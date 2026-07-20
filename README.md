@@ -428,6 +428,36 @@ future feature.
 | `start` hangs | Node firewalled / DNS-stuck. Increase `ssh_options.connect_timeout` or remove the node. |
 | `status` says alive but `stop` says "token mismatch" | The PID was reused. Token guards against this — investigate which process holds the PID. |
 
+### Alpine / BusyBox: `realpath --` incompatibility under `uvx`
+
+On Alpine (or any BusyBox-based system), launching tunstrap through
+`uvx` / `uv tool run` may abort before startup with:
+
+```text
+realpath: --: No such file or directory
+```
+
+The uv-generated console-script wrapper calls `realpath -- "$0"`, but
+BusyBox `realpath` does not treat `--` as end-of-options; it tries to
+resolve a path named `--` and fails. This is an upstream uv issue
+([astral-sh/uv#16209](https://github.com/astral-sh/uv/issues/16209)),
+not a tunstrap bug.
+
+Workarounds:
+
+- Install GNU coreutils, whose `realpath` accepts `--`:
+
+  ```bash
+  apk add --no-cache coreutils
+  ```
+
+- Or bypass the console-script wrapper and run tunstrap as a module:
+
+  ```bash
+  uv run --no-project --with git+https://github.com/AlexMKX/tunstrap.git \
+      python -m tunstrap start ...
+  ```
+
 ## Migration from `v2026.10516.11702`
 
 Two breaking changes from the original release:
