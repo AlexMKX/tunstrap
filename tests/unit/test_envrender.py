@@ -1,8 +1,8 @@
 import pytest
 
-from tunstrap.envrender import format_exports, render_env
+from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import MultiNodeEnvUnsupported
-from tunstrap.schemas import KubeTargetOutput, NodeOutput, OutputSchema
+from tunstrap.schemas import InputSchema, KubeTargetOutput, NodeOutput, OutputSchema
 
 
 def _kube_out(port, path):
@@ -89,3 +89,72 @@ def test_format_exports_quotes_safely():
     txt = format_exports({"A": "x'y", "B": "z"})
     assert "export A='x'\\''y'" in txt
     assert "export B='z'" in txt
+
+
+def test_predicted_env_keys_matches_render_env() -> None:
+    """The predictor and render_env agree exactly for a matching input/output pair.
+
+    This is the anti-drift guard: adding a key to render_env without adding it
+    to predicted_env_keys makes this test fail.
+    """
+    schema = InputSchema.model_validate(
+        {
+            "nodes": {
+                "node": {
+                    "host": "h.example.net",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "remote_targets": {"db-1": "127.0.0.1:5432", "web": "127.0.0.1:80"},
+                    "kube_targets": {"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}},
+                }
+            }
+        }
+    )
+    out = OutputSchema(
+        connections={
+            "node": NodeOutput(
+                ports={"db-1": 5432, "web": 8080},
+                kube_targets={"k3s": _kube_out(7000, "/run/s/tunnel-data/k3s")},
+            )
+        },
+        pid=1,
+        session_dir="/run/s",
+        started_at="now",
+    )
+    assert predicted_env_keys(schema) == set(render_env(out))
+
+
+def test_predicted_env_keys_no_kube_omits_kubeconfig() -> None:
+    """Without kube_targets the predictor must not claim KUBECONFIG."""
+    schema = InputSchema.model_validate(
+        {
+            "nodes": {
+                "node": {
+                    "host": "h.example.net",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "remote_targets": {"db": "127.0.0.1:5432"},
+                }
+            }
+        }
+    )
+    assert "KUBECONFIG" not in predicted_env_keys(schema)
+    assert predicted_env_keys(schema) == {
+        "TUNSTRAP_SESSION_DIR",
+        "TUNSTRAP_PID",
+        "TUNSTRAP_DB_HOST",
+        "TUNSTRAP_DB_PORT",
+        "TUNSTRAP_DB_ENDPOINT",
+    }
+
+
+def test_predicted_env_keys_multi_node_is_empty() -> None:
+    """Multi-node input injects no scalars at all, so nothing can collide."""
+    node = {
+        "host": "h.example.net",
+        "user": "u",
+        "ssh_password": "p",
+        "remote_targets": {"db": "127.0.0.1:5432"},
+    }
+    schema = InputSchema.model_validate({"nodes": {"a": node, "b": dict(node)}})
+    assert predicted_env_keys(schema) == set()

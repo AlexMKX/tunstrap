@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from tunstrap.exceptions import MultiNodeEnvUnsupported
-from tunstrap.schemas import OutputSchema
+from tunstrap.schemas import InputSchema, OutputSchema
 
 _NON_ALNUM = re.compile(r"[^A-Z0-9]")
 
@@ -52,6 +52,38 @@ def render_env(output: OutputSchema) -> dict[str, str]:
     if kube_paths:
         put("KUBECONFIG", ":".join(kube_paths))
     return env
+
+
+def predicted_env_keys(schema: InputSchema) -> set[str]:
+    """Env keys ``render_env`` will produce for this *input* schema.
+
+    Used pre-spawn to reject an ``--output-var`` NAME that would collide with
+    an injected key, before a daemon exists to orphan. Multi-node input
+    injects no scalars at all, so the answer there is the empty set.
+
+    The result is a superset of the eventual actual key set when an optional
+    target fails and is absent from the output. A superset only rejects more
+    names, never fewer, so it cannot let a real collision through.
+    """
+    if len(schema.nodes) != 1:
+        return set()
+    (node,) = schema.nodes.values()
+    keys = {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID"}
+    for tname in node.remote_targets:
+        base = _key(tname)
+        keys.update(
+            {
+                f"TUNSTRAP_{base}_HOST",
+                f"TUNSTRAP_{base}_PORT",
+                f"TUNSTRAP_{base}_ENDPOINT",
+            }
+        )
+    for kname in node.kube_targets or {}:
+        base = _key(kname)
+        keys.update({f"TUNSTRAP_{base}_KUBECONFIG", f"TUNSTRAP_{base}_ENDPOINT"})
+    if node.kube_targets:
+        keys.add("KUBECONFIG")
+    return keys
 
 
 def format_exports(env: dict[str, str]) -> str:
