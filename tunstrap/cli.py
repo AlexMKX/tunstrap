@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from tunstrap import __version__
 from tunstrap.cli_input import build_schema_from_env, build_single_node_schema
 from tunstrap.daemon import spawn_daemon
-from tunstrap.envrender import format_exports, render_env
+from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import (
     DaemonError,
     TunstrapError,
@@ -281,10 +281,20 @@ def _split_run_args(
     return connection, cmd
 
 
-def _validate_output_var(name: str) -> None:
-    """Reject an ``--output-var`` NAME that is not a valid env-var name."""
+def _validate_output_var(name: str, schema: InputSchema) -> None:
+    """Reject an ``--output-var`` NAME that is invalid or would collide.
+
+    Evaluated pre-spawn against the *input* schema, because the output schema
+    does not exist yet and a usage error must never be able to orphan a
+    daemon. Collision with an unrelated inherited variable is a documented
+    overwrite; only the keys ``run`` itself injects are protected.
+    """
     if not _ENV_NAME_RE.match(name):
         raise click.UsageError(f"--output-var NAME must match [A-Za-z_][A-Za-z0-9_]*; got {name!r}")
+    if name in predicted_env_keys(schema):
+        raise click.UsageError(
+            f"--output-var {name} collides with an environment key run already injects"
+        )
 
 
 @main.command("run")
@@ -318,8 +328,6 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     `-`.
     """
     connection, cmd = _split_run_args(args, input_env=input_env)
-    if output_var is not None:
-        _validate_output_var(output_var)
     try:
         if input_env is not None:
             schema = build_schema_from_env(input_env)
@@ -346,6 +354,8 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             )
         else:  # pragma: no cover - _split_run_args already rejected this arity
             raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
+        if output_var is not None:
+            _validate_output_var(output_var, schema)
         message = spawn_daemon(schema, session_dir=session_dir)
     except TunstrapError as exc:
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
