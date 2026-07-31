@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
 from tunstrap.exceptions import DaemonError
@@ -50,7 +51,7 @@ def _spawns(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         raise AssertionError("spawn_daemon must not be reached by a usage error")
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
-    monkeypatch.setattr(cli_mod, "_teardown_run", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setenv(VAR, _PAYLOAD)
     return calls
 
@@ -143,17 +144,21 @@ def test_daemon_flags_still_work_in_flag_mode(
 
 
 @pytest.mark.parametrize(
-    "extra, stdin",
+    "extra, stdin, expected_passphrase, expected_fetch_path",
     [
-        (["--ssh-key-passphrase", "x"], None),
-        (["--ssh-password-stdin"], "pw\n"),
-        (["--target", "web=127.0.0.1:80"], None),
-        (["--kube", "k3s=/etc/k3s.yaml"], None),
-        (["--fetch", "f=/etc/hosts"], None),
+        (["--ssh-key-passphrase", "x"], None, "x", None),
+        (["--ssh-password-stdin"], "pw\n", None, None),
+        (["--target", "web=127.0.0.1:80"], None, None, None),
+        (["--kube", "k3s=/etc/k3s.yaml"], None, None, None),
+        (["--fetch", "f=/etc/hosts"], None, None, "/etc/hosts"),
     ],
 )
 def test_connection_flags_still_work_in_flag_mode(
-    monkeypatch: pytest.MonkeyPatch, extra: list[str], stdin: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    extra: list[str],
+    stdin: str | None,
+    expected_passphrase: str | None,
+    expected_fetch_path: str | None,
 ) -> None:
     """Each connection flag rejected for env input still reaches flag-mode spawn."""
     seen: list[Any] = []
@@ -169,3 +174,8 @@ def test_connection_flags_still_work_in_flag_mode(
         input=stdin,
     )
     assert len(seen) == 1
+    node = seen[0].nodes["node"]
+    if expected_passphrase is not None:
+        assert node.ssh_pkey_passphrase == expected_passphrase
+    if expected_fetch_path is not None:
+        assert node.fetch_files["f"].path == expected_fetch_path
