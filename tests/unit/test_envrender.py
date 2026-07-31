@@ -1,6 +1,8 @@
 import pytest
-from tunstrap.envrender import render_env, format_exports
-from tunstrap.schemas import OutputSchema, NodeOutput, KubeTargetOutput
+
+from tunstrap.envrender import format_exports, render_env
+from tunstrap.exceptions import MultiNodeEnvUnsupported
+from tunstrap.schemas import KubeTargetOutput, NodeOutput, OutputSchema
 
 
 def _kube_out(port, path):
@@ -61,9 +63,25 @@ def test_render_kube_not_materialized_raises():
         render_env(out)
 
 
-def test_render_requires_single_node():
+def test_render_requires_single_node_zero() -> None:
+    """Zero connections raise the typed error, not a bare ValueError."""
     out = OutputSchema(connections={}, pid=1, session_dir="/s", started_at="now")
-    with pytest.raises(ValueError, match="exactly one node"):
+    with pytest.raises(MultiNodeEnvUnsupported, match="exactly one node"):
+        render_env(out)
+
+
+def test_render_requires_single_node_two() -> None:
+    """Two connections raise the typed error, so run maps them to exit 1."""
+    out = OutputSchema(
+        connections={
+            "a": NodeOutput(ports={"db": 1}),
+            "b": NodeOutput(ports={"db": 2}),
+        },
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    with pytest.raises(MultiNodeEnvUnsupported, match="exactly one node"):
         render_env(out)
 
 

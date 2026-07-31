@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from tunstrap.exceptions import MultiNodeEnvUnsupported
 from tunstrap.schemas import OutputSchema
 
 _NON_ALNUM = re.compile(r"[^A-Z0-9]")
@@ -17,7 +18,10 @@ def _key(name: str) -> str:
 def render_env(output: OutputSchema) -> dict[str, str]:
     """Build the TUNSTRAP_* env mapping for a single-node OutputSchema."""
     if len(output.connections) != 1:
-        raise ValueError("render_env requires exactly one node")
+        raise MultiNodeEnvUnsupported(
+            "render_env requires exactly one node",
+            {"nodes": sorted(output.connections)},
+        )
     (node,) = output.connections.values()
 
     env: dict[str, str] = {
