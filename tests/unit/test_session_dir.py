@@ -112,3 +112,47 @@ def test_accepts_absolute_supplied_dir(tmp_path: Path) -> None:
     abs_dir = tmp_path / "work"
     sd = SessionDir.create(supplied=str(abs_dir), base=tmp_path)
     assert Path(sd.session_dir) == abs_dir.resolve()
+
+
+def test_cleanup_path_returns_empty_on_success(tmp_path: Path) -> None:
+    """A successful tunnel-data removal reports no survivors."""
+    data = tmp_path / "tunnel-data"
+    data.mkdir()
+    (data / "daemon.pid").write_text("1\n")
+    assert SessionDir.cleanup_path(str(tmp_path)) == []
+    assert not data.exists()
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory write permission")
+def test_cleanup_path_reports_survivor_when_removal_fails(tmp_path: Path) -> None:
+    """An unremovable tunnel-data is reported, not silently swallowed."""
+    data = tmp_path / "tunnel-data"
+    data.mkdir()
+    (data / "stuck").write_text("x")
+    # Drop write permission on the parent so the child entry cannot be unlinked.
+    os.chmod(data, 0o500)
+    try:
+        survivors = SessionDir.cleanup_path(str(tmp_path))
+    finally:
+        os.chmod(data, 0o700)
+    assert survivors == [str(data.resolve())]
+    assert data.exists()
+
+
+def test_cleanup_path_missing_dir_is_not_a_failure(tmp_path: Path) -> None:
+    """A tunnel-data that was never created reports no survivors."""
+    assert SessionDir.cleanup_path(str(tmp_path)) == []
+
+
+def test_remove_root_removes_everything(tmp_path: Path) -> None:
+    """remove_root deletes the whole minted root, not just tunnel-data."""
+    root = tmp_path / "minted"
+    (root / "tunnel-data").mkdir(parents=True)
+    (root / "session.lock").write_text("1\n")
+    assert SessionDir.remove_root(str(root)) == []
+    assert not root.exists()
+
+
+def test_remove_root_missing_is_not_a_failure(tmp_path: Path) -> None:
+    """remove_root on an already-gone root reports no survivors and never raises."""
+    assert SessionDir.remove_root(str(tmp_path / "gone")) == []

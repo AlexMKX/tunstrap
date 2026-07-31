@@ -129,7 +129,35 @@ class SessionDir:
             raise SessionError(f"cannot read identity from {data}: {exc}") from exc
 
     @classmethod
-    def cleanup_path(cls, session_dir: str) -> None:
-        """Remove <session_dir>/tunnel-data best-effort (stop-side cleanup)."""
-        data = Path(session_dir).resolve() / _TUNNEL_DATA
-        shutil.rmtree(data, ignore_errors=True)
+    def cleanup_path(cls, session_dir: str) -> list[str]:
+        """Remove ``<session_dir>/tunnel-data`` best-effort; return what survived.
+
+        Never raises, so ``stop``'s behaviour is unchanged. The returned list
+        is empty on success and holds the still-present path when removal
+        failed, which is what gives ``run`` something to report on stderr —
+        the old ``ignore_errors=True`` discarded every error, making a
+        promise to report cleanup failures unsatisfiable.
+        """
+        return cls._rmtree_reporting(Path(session_dir).resolve() / _TUNNEL_DATA)
+
+    @classmethod
+    def remove_root(cls, root: str) -> list[str]:
+        """Remove a ``run``-minted session root entirely; return what survived.
+
+        ``run`` supplies its own ``--session-dir``, which makes the worker's
+        ``SessionDir`` non-generated, so the worker never removes the root.
+        ``run`` therefore removes the root it minted itself, and only that one
+        — a caller-supplied ``--session-dir`` is never touched.
+        """
+        return cls._rmtree_reporting(Path(root))
+
+    @staticmethod
+    def _rmtree_reporting(path: Path) -> list[str]:
+        """rmtree ignoring errors, then report the path if it survived.
+
+        ``shutil.rmtree(onexc=...)`` is 3.12+ and ``onerror=`` is deprecated
+        from 3.12; with a 3.10 floor the portable outcome check is
+        "did the path go away?".
+        """
+        shutil.rmtree(path, ignore_errors=True)
+        return [str(path)] if path.exists() else []
