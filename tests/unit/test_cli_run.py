@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
 
@@ -54,7 +55,12 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
         cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
     )
     stops: list[tuple[str, int]] = []
-    monkeypatch.setattr(cli_mod, "_teardown_run", lambda sd, gs: stops.append((sd, gs)))
+
+    def _record(sd: str, gs: int, *, minted_root: str | None = None) -> None:
+        stops.append((sd, gs))
+        cleaning_teardown(sd, gs, minted_root=minted_root)
+
+    monkeypatch.setattr(cli_mod, "_teardown_run", _record)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
 
     res = CliRunner().invoke(
@@ -65,6 +71,8 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
             "--target",
             "db=127.0.0.1:5432",
             "--ssh-password-stdin",
+            "--session-dir",
+            "/x",
             "--",
             "echo",
             "hi",
@@ -78,7 +86,7 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
     assert FakePopen.last_env["TUNSTRAP_DB_PORT"] == "5432"
     # Child env is os.environ + render_env(output), not a bare dict.
     assert "PATH" in FakePopen.last_env
-    assert stops == [("/s", 10)], "teardown must run with resolved session dir"
+    assert stops == [("/x", 10)], "teardown must run with the session dir run owns"
 
 
 def test_run_requires_command():
@@ -91,7 +99,12 @@ def test_run_teardown_on_child_exception(monkeypatch):
         cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
     )
     stops: list[str] = []
-    monkeypatch.setattr(cli_mod, "_teardown_run", lambda sd, gs: stops.append(sd))
+
+    def _record(sd: str, gs: int, *, minted_root: str | None = None) -> None:
+        stops.append(sd)
+        cleaning_teardown(sd, gs, minted_root=minted_root)
+
+    monkeypatch.setattr(cli_mod, "_teardown_run", _record)
 
     def boom(cmd, env=None):
         raise OSError("no such binary")
@@ -142,7 +155,7 @@ def test_run_forwards_signals(monkeypatch):
     monkeypatch.setattr(
         cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
     )
-    monkeypatch.setattr(cli_mod, "_teardown_run", lambda sd, gs: None)
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
 
     captured: dict[str, Any] = {}
 
@@ -191,7 +204,7 @@ def test_run_preserves_child_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
     )
-    monkeypatch.setattr(cli_mod, "_teardown_run", lambda sd, gs: None)
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
     res = CliRunner().invoke(
         main,

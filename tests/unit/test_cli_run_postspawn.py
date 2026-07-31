@@ -13,14 +13,18 @@ daemon, no signals and no filesystem work — this passes unchanged on macOS.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
+from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap import session as session_mod
 from tunstrap.cli import main
+from tunstrap.exceptions import DaemonError
 from tunstrap.identity import IdentityCheckResult
 from tunstrap.session import StopOutcome
 
@@ -129,6 +133,9 @@ def test_teardown_exception_does_not_change_exit_code(
     assert result.exit_code == 7, "teardown failure must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "stop exploded" in result.stderr
+    assert not any(Path(p).exists() for p in Path(tempfile.gettempdir()).glob("tunstrap-run-*")), (
+        "a raising stop primitive leaked the minted session root"
+    )
 
 
 def test_teardown_permission_error_does_not_change_exit_code(
@@ -191,4 +198,131 @@ def test_teardown_stderr_write_failure_is_swallowed(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
     monkeypatch.setattr(cli_mod, "stop_session", _boom)
     monkeypatch.setattr(cli_mod.sys, "stderr", BrokenStderr())
-    cli_mod._teardown_run("/s", 0)
+    cli_mod._teardown_run("/s", 0, minted_root=None)
+
+
+@pytest.fixture(name="teardowns")
+def _teardowns(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    """Record every _teardown_run call as (session_dir, grace, minted_root).
+
+    Records *and* cleans: `run` mints a real temp directory before spawning,
+    so a fixture that only recorded would leak one per test in this module.
+    """
+    calls: list[tuple[Any, ...]] = []
+
+    def _record(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
+        calls.append((session_dir, grace_seconds, minted_root))
+        cleaning_teardown(session_dir, grace_seconds, minted_root=minted_root)
+
+    monkeypatch.setattr(cli_mod, "_teardown_run", _record)
+    return calls
+
+
+def test_run_mints_the_session_path_before_spawning(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """With no --session-dir, run creates the directory itself and passes it on."""
+    spawned: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        spawned.append(session_dir)
+        assert session_dir is not None, "run must not let the worker generate the path"
+        assert Path(session_dir).is_dir(), "the minted path must exist before spawning"
+        return _success_payload()
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7
+    minted = spawned[0]
+    assert minted is not None
+    assert minted.startswith(tempfile.gettempdir())
+    assert teardowns == [(minted, 10, minted)]
+
+
+def test_teardown_uses_the_minted_path_not_the_payload(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """The success payload's session_dir is ignored; the minted path wins.
+
+    This is the orphan fix: cleanup must not depend on the object whose
+    validation can fail.
+    """
+    spawned: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        spawned.append(session_dir)
+        payload = _success_payload()
+        payload["payload"]["session_dir"] = "/completely/bogus"
+        return payload
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7
+    assert teardowns[0][0] == spawned[0]
+    assert teardowns[0][0] != "/completely/bogus"
+
+
+def test_supplied_session_dir_is_never_minted_or_removed(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]], tmp_path: Path
+) -> None:
+    """A caller-supplied --session-dir is passed through with minted_root=None."""
+    supplied = tmp_path / "work"
+    supplied.mkdir()
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "u@h",
+            "--target",
+            "db=127.0.0.1:5432",
+            "--ssh-password-stdin",
+            "--session-dir",
+            str(supplied),
+            "--",
+            "true",
+        ],
+        input="secret\n",
+    )
+    assert result.exit_code == 7
+    assert teardowns == [(str(supplied), 10, None)]
+    assert supplied.is_dir(), "run must never remove a caller-supplied session dir"
+
+
+def test_minted_root_is_discarded_when_spawn_fails(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """A failed spawn leaves no empty minted directory behind."""
+    seen: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        seen.append(session_dir)
+        raise DaemonError("worker died", {})
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert seen[0] is not None
+    assert not Path(seen[0]).exists(), "a failed spawn leaked a minted session root"
+    assert teardowns == [], "no daemon exists, so there is nothing to tear down"
+
+
+def test_minted_root_is_removed_after_a_successful_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a real teardown, the minted root itself is gone from disk."""
+    seen: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        seen.append(session_dir)
+        return _success_payload()
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _g, force: StopOutcome(True))
+    monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7
+    assert seen[0] is not None
+    assert not Path(seen[0]).exists(), "teardown left the minted session root behind"

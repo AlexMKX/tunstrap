@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Callable, TypeVar
 
 import click
@@ -345,6 +346,33 @@ def _build_child_env(
     return child_env
 
 
+def _mint_session_dir(session_dir: str | None) -> tuple[str, str | None]:
+    """Return (the session path to use, the root ``run`` minted, or ``None``).
+
+    ``run`` must know the session path **before** spawning. When the caller
+    supplies none, the worker generates it (``session.py:53-56``), so the
+    parent could only recover the path by parsing the success envelope — which
+    makes cleanup depend on the very object whose validation can fail. Minting
+    it here makes the path a precondition of spawning.
+
+    ``SessionDir.create`` accepts a supplied absolute path and does
+    ``mkdir(parents=True, exist_ok=True)`` (``session.py:57-63``), so an empty
+    pre-created directory is valid worker input. A supplied path sets
+    ``generated=False``, so the worker never removes the root; ``run``
+    therefore removes the root it minted itself, and only that one.
+    """
+    if session_dir is not None:
+        return session_dir, None
+    minted = tempfile.mkdtemp(prefix="tunstrap-run-")
+    return minted, minted
+
+
+def _discard_minted_root(minted_root: str | None) -> None:
+    """Remove a session root ``run`` minted but never spawned into. Never raises."""
+    if minted_root is not None:
+        SessionDir.remove_root(minted_root)
+
+
 @main.command("run")
 @_connection_options
 @click.option("--input-env", "input_env", default=None, metavar="VAR")
@@ -376,6 +404,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     `-`.
     """
     connection, cmd = _split_run_args(args, input_env=input_env)
+    minted_root: str | None = None
     try:
         if input_env is not None:
             _reject_flags_under_input_env(
@@ -426,19 +455,25 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
                 {"nodes": sorted(schema.nodes)},
             )
         inject_scalars = len(schema.nodes) == 1
-        message = spawn_daemon(schema, session_dir=session_dir)
+        # Minting is the last statement before the spawn, so every usage check
+        # above it runs while minted_root is still None. A click.UsageError
+        # needs no discard, and is unrelated to TunstrapError, so it passes the
+        # handler below untouched.
+        session_path, minted_root = _mint_session_dir(session_dir)
+        message = spawn_daemon(schema, session_dir=session_path)
     except TunstrapError as exc:
+        _discard_minted_root(minted_root)
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
         sys.exit(exit_code_for(exc))
 
     kind = message["kind"]
     if kind != "success":
+        _discard_minted_root(minted_root)
         sys.stderr.write(json.dumps(message["payload"]) + "\n")
         sys.exit({"required_failure": 2, "session_active": 3, "daemon_error": 4}.get(kind, 4))
 
     out = OutputSchema.model_validate(message["payload"])
     child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
-    resolved_session_dir = out.session_dir
 
     prev_int = signal.getsignal(signal.SIGINT)
     prev_term = signal.getsignal(signal.SIGTERM)
@@ -464,11 +499,11 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     finally:
         signal.signal(signal.SIGINT, prev_int)
         signal.signal(signal.SIGTERM, prev_term)
-        _teardown_run(resolved_session_dir, grace_seconds)
+        _teardown_run(session_path, grace_seconds, minted_root=minted_root)
     sys.exit(returncode)
 
 
-def _teardown_run(session_dir: str, grace_seconds: int) -> None:
+def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
     """Stop the daemon and clean up without propagating any exception or using stdout.
 
     Under the tofu-proxy pattern fd 1 belongs to the child, so every teardown
@@ -477,9 +512,13 @@ def _teardown_run(session_dir: str, grace_seconds: int) -> None:
     diagnostic is interrupted.
     """
     try:
-        _teardown_run_inner(session_dir, grace_seconds)
+        _teardown_run_inner(session_dir, grace_seconds, minted_root=minted_root)
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         _warn(f"run: teardown failed: {type(exc).__name__}: {exc}\n")
+        # A raising stop primitive short-circuits _teardown_run_inner before it
+        # reaches the root removal, so retry it here: a temp directory run
+        # created must not outlive run even on the exceptional path.
+        _discard_minted_root(minted_root)
 
 
 def _warn(message: str) -> None:
@@ -490,8 +529,8 @@ def _warn(message: str) -> None:
         pass
 
 
-def _teardown_run_inner(session_dir: str, grace_seconds: int) -> None:
-    """Stop the daemon and remove tunnel-data, reporting failures on stderr."""
+def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
+    """Stop the daemon, remove tunnel-data and any minted root; report on stderr."""
     try:
         pid = SessionDir.read_identity(session_dir)
     except SessionError:
@@ -506,6 +545,10 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int) -> None:
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
         _warn("run: could not remove: " + ", ".join(survivors) + "\n")
+    if minted_root is not None:
+        remaining = SessionDir.remove_root(minted_root)
+        if remaining:
+            _warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
 
 
 def _stop_outcome_json(outcome: StopOutcome) -> str:
