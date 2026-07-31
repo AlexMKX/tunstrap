@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -119,5 +118,6 @@ def build_single_node_schema(
         )
     except ValidationError as exc:
         raise SchemaValidationError(
-            "CLI input does not satisfy the schema", {"errors": json.loads(exc.json())}
+            "CLI input does not satisfy the schema",
+            {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
         ) from exc

@@ -55,6 +55,27 @@ def test_to_error_output_does_not_leak_secrets() -> None:
     assert "ssh_pkey" not in out["details"]
 
 
+def test_to_error_output_recursively_scrubs_secrets() -> None:
+    """Nested validation details cannot retain SSH credentials."""
+    err = SchemaValidationError(
+        "bad",
+        {
+            "nested": {"ssh_password": "nested-password", "safe": "value"},
+            "errors": [
+                {"input": {"ssh_pkey": "nested-key", "safe": "still-here"}},
+                {"ssh_pkey_passphrase": "nested-passphrase"},
+            ],
+            "nested_lists": [[{"ssh_password": "list-password", "safe": "list-safe"}]],
+        },
+    )
+
+    assert err.to_error_output()["details"] == {
+        "nested": {"safe": "value"},
+        "errors": [{"input": {"safe": "still-here"}}, {}],
+        "nested_lists": [[{"safe": "list-safe"}]],
+    }
+
+
 def test_session_active_exit_code_is_3() -> None:
     """SessionActive maps to exit code 3 and reports the correct error name."""
     exc = SessionActive("daemon already running")
