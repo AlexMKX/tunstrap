@@ -331,6 +331,22 @@ def test_start_flag_mode_builds_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["schema"].nodes["node"].user == "root"
 
 
+def test_start_flag_model_validation_does_not_print_ssh_key(tmp_path: Path) -> None:
+    """Flag-mode node validation must not expose the key read from --ssh-key."""
+    secret = "FLAG-MODE-PRIVATE-KEY"
+    key_file = tmp_path / "id_key"
+    key_file.write_text(secret)
+
+    result = CliRunner().invoke(main, ["start", "root@h", "--ssh-key", str(key_file)])
+
+    assert result.exit_code == 1
+    assert secret not in result.output
+    payload = json.loads(result.output)
+    error = payload["details"]["errors"][0]
+    assert error["loc"] == ["nodes", "node"]
+    assert "node must define at least one" in error["msg"]
+
+
 def test_start_rejects_trailing_command() -> None:
     """start + trailing -- CMD is rejected (exit 64); output mentions 'run'."""
     res = CliRunner().invoke(main, ["start", "root@h", "--", "helm", "list"])

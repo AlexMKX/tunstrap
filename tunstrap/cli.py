@@ -207,7 +207,11 @@ def start_command(  # pylint: disable=too-many-arguments,too-many-branches,too-m
             except ValidationError as exc:
                 raise SchemaValidationError(
                     "input does not satisfy the InputSchema contract",
-                    {"errors": json.loads(exc.json())},
+                    {
+                        "errors": exc.errors(
+                            include_input=False, include_url=False, include_context=False
+                        )
+                    },
                 ) from exc
 
         message = spawn_daemon(schema, session_dir=session_dir)

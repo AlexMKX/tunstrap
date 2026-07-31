@@ -7,9 +7,13 @@ from typing import Any
 _SECRET_KEYS = frozenset({"ssh_pkey", "ssh_password", "ssh_pkey_passphrase"})
 
 
-def _scrub(details: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of details with secret keys (ssh_pkey/etc) removed."""
-    return {k: v for k, v in details.items() if k not in _SECRET_KEYS}
+def _scrub(value: Any) -> Any:
+    """Return a copy of values with SSH secret keys removed at every depth."""
+    if isinstance(value, dict):
+        return {key: _scrub(nested) for key, nested in value.items() if key not in _SECRET_KEYS}
+    if isinstance(value, list):
+        return [_scrub(nested) for nested in value]
+    return value
 
 
 class TunstrapError(Exception):

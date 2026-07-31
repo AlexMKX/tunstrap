@@ -211,8 +211,14 @@ class NodeInput(BaseModel):
                 try:
                     parsed[handle] = RemoteTarget.model_validate(raw)
                 except ValidationError as exc:
+                    messages = "; ".join(
+                        error["msg"]
+                        for error in exc.errors(
+                            include_input=False, include_url=False, include_context=False
+                        )
+                    )
                     raise ValueError(
-                        f"remote_targets[{handle!r}]: invalid dict form: {exc}"
+                        f"remote_targets[{handle!r}]: invalid dict form: {messages}"
                     ) from exc
                 continue
             if not isinstance(raw, str):
