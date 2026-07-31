@@ -297,6 +297,38 @@ def _validate_output_var(name: str, schema: InputSchema) -> None:
         )
 
 
+def _reject_flags_under_input_env(
+    *,
+    conn_flags: bool,
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+) -> None:
+    """Every flag ``--input-env`` makes redundant is a usage error (64).
+
+    Rejected rather than given a precedence order: the payload's ``daemon``
+    block is complete and authoritative, so there must be exactly one place to
+    look when a tunnel misbehaves. The daemon flags need their own rule
+    because ``_connection_options`` attaches them but ``_conn_flags_present``
+    deliberately excludes them.
+    """
+    if conn_flags:
+        raise click.UsageError(
+            "--input-env supplies the full InputSchema; connection flags are redundant"
+        )
+    if auto_stop_idle_seconds is not None:
+        raise click.UsageError(
+            "--auto-stop-idle-seconds conflicts with --input-env; "
+            "set daemon.auto_stop_idle_seconds in the payload"
+        )
+    if log_file is not None:
+        raise click.UsageError(
+            "--log-file conflicts with --input-env; set daemon.log_file in the payload"
+        )
+    if materialize:
+        raise click.UsageError("--materialize conflicts with --input-env; run always materializes")
+
+
 @main.command("run")
 @_connection_options
 @click.option("--input-env", "input_env", default=None, metavar="VAR")
@@ -330,6 +362,19 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     connection, cmd = _split_run_args(args, input_env=input_env)
     try:
         if input_env is not None:
+            _reject_flags_under_input_env(
+                conn_flags=_conn_flags_present(
+                    ssh_key=ssh_key,
+                    ssh_key_passphrase=ssh_key_passphrase,
+                    ssh_password_stdin=ssh_password_stdin,
+                    targets=targets,
+                    kube=kube,
+                    fetch=fetch,
+                ),
+                auto_stop_idle_seconds=auto_stop_idle_seconds,
+                materialize=materialize,
+                log_file=log_file,
+            )
             schema = build_schema_from_env(input_env)
             # The one place `run` mutates the supplied schema. It is an
             # invariant of the verb, not a flag precedence rule: render_env
