@@ -156,3 +156,18 @@ def test_remove_root_removes_everything(tmp_path: Path) -> None:
 def test_remove_root_missing_is_not_a_failure(tmp_path: Path) -> None:
     """remove_root on an already-gone root reports no survivors and never raises."""
     assert SessionDir.remove_root(str(tmp_path / "gone")) == []
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory execute permission")
+def test_rmtree_reporting_reports_unstatable_survivor(tmp_path: Path) -> None:
+    """An unstatable leaf is reported rather than letting exists() raise."""
+    middle = tmp_path / "parent" / "middle"
+    leaf = middle / "leaf"
+    leaf.mkdir(parents=True)
+    os.chmod(middle, 0o600)
+    try:
+        survivors = SessionDir._rmtree_reporting(leaf)
+    finally:
+        os.chmod(middle, 0o700)
+    assert survivors == [str(leaf)]
+    assert leaf.exists()

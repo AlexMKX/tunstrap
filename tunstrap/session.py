@@ -160,4 +160,10 @@ class SessionDir:
         "did the path go away?".
         """
         shutil.rmtree(path, ignore_errors=True)
-        return [str(path)] if path.exists() else []
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return [str(path)]
+        return [str(path)]
