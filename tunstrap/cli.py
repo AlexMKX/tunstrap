@@ -19,6 +19,7 @@ from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import (
     DaemonError,
+    MultiNodeEnvUnsupported,
     TunstrapError,
     SchemaValidationError,
     exit_code_for,
@@ -401,6 +402,14 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
         if output_var is not None:
             _validate_output_var(output_var, schema)
+        if output_var is None and len(schema.nodes) != 1:
+            # Decided from the *input* node count so it can never orphan a
+            # daemon: TUNSTRAP_<TARGET>_* has no node dimension, and
+            # --output-var is the node-keyed channel that does.
+            raise MultiNodeEnvUnsupported(
+                "multi-node input requires --output-var; TUNSTRAP_* scalars are single-node only",
+                {"nodes": sorted(schema.nodes)},
+            )
         message = spawn_daemon(schema, session_dir=session_dir)
     except TunstrapError as exc:
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")

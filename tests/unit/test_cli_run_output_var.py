@@ -21,6 +21,7 @@ from click.testing import CliRunner
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
+from tunstrap.exceptions import DaemonError
 
 pytestmark = pytest.mark.unit
 
@@ -134,3 +135,53 @@ def test_non_colliding_tunstrap_prefixed_name_is_accepted(
     )
     assert result.exit_code == 0, result.stderr
     assert len(spawn) == 2, "a legal name must reach spawn_daemon"
+
+
+def test_multi_node_without_output_var_is_exit_1_pre_spawn(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """Multi-node input rejects pre-spawn even if optional node b has no output."""
+    spawn[0](_success({"a": _conn(db=5432)}))
+    monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node(required=False)}))
+    result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
+    assert result.exit_code == 1
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    error = json.loads(result.stderr)
+    assert error["error"] == "MultiNodeEnvUnsupported"
+    assert error["details"]["nodes"] == ["a", "b"]
+    assert len(spawn) == 1, "the multi-node rejection must happen before spawn_daemon"
+
+
+def test_multi_node_with_output_var_reaches_spawn(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """--output-var is the node-keyed channel, so multi-node input passes the gate.
+
+    spawn_daemon is made to fail immediately so this asserts only that the
+    gate let the run through — the child-env half of multi-node behaviour is
+    Task 3.6's, and until it lands render_env would still reject a two-node
+    envelope post-spawn.
+    """
+
+    def _spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        spawn.append(schema)
+        raise DaemonError("captured; stop before the child runs", {})
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn_daemon)
+    monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node()}))
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
+    )
+    assert result.exit_code == 4, result.stderr
+    assert len(spawn) == 2, "the gate must let a multi-node run with --output-var through"
+
+
+def test_single_node_without_output_var_still_works(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """The gate is about node count only; single-node flagless runs are untouched."""
+    spawn[0](_success({"node": _conn(db=5432)}))
+    monkeypatch.setenv(VAR, _payload())
+    result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
+    assert result.exit_code == 0, result.stderr
+    assert len(spawn) == 2
