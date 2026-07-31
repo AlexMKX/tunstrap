@@ -264,10 +264,20 @@ def test_teardown_uses_the_minted_path_not_the_payload(
     assert teardowns[0][0] != "/completely/bogus"
 
 
-def test_supplied_session_dir_is_never_minted_or_removed(
+def test_supplied_session_dir_is_never_minted(
     monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]], tmp_path: Path
 ) -> None:
-    """A caller-supplied --session-dir is passed through with minted_root=None."""
+    """A caller-supplied --session-dir is passed through with minted_root=None.
+
+    This covers the *wiring* only: which path run hands to teardown, and that
+    it claims no ownership of it. It deliberately makes no claim about the
+    directory surviving -- the `teardowns` fixture substitutes
+    `cleaning_teardown`, which removes only `minted_root`, so a supplied
+    directory survives it by construction and a survival assertion here could
+    never fail. That claim belongs to
+    `test_production_teardown_keeps_a_supplied_session_dir`, which lets the
+    real `_teardown_run` run.
+    """
     supplied = tmp_path / "work"
     supplied.mkdir()
     monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
@@ -289,7 +299,52 @@ def test_supplied_session_dir_is_never_minted_or_removed(
     )
     assert result.exit_code == 7
     assert teardowns == [(str(supplied), 10, None)]
+
+
+def test_production_teardown_keeps_a_supplied_session_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Production teardown removes tunnel-data and nothing else the caller owns.
+
+    The ownership asymmetry exercised against the real `_teardown_run`: no
+    `teardowns` fixture, no `cleanup_path` or `read_identity` stub, so
+    `_teardown_run_inner` does its own filesystem work. A supplied path makes
+    the worker's SessionDir non-generated, so the root is the caller's; an
+    implementation that removed `session_dir` unconditionally would take the
+    sentinel and the root with it.
+    """
+    supplied = tmp_path / "work"
+    supplied.mkdir()
+    sentinel = supplied / "caller-owned.txt"
+    sentinel.write_text("do not delete me")
+    data = supplied / "tunnel-data"
+    data.mkdir()
+    (data / "daemon.pid").write_text("4242\n")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _g, force: StopOutcome(True))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "u@h",
+            "--target",
+            "db=127.0.0.1:5432",
+            "--ssh-password-stdin",
+            "--session-dir",
+            str(supplied),
+            "--",
+            "true",
+        ],
+        input="secret\n",
+    )
+    assert result.exit_code == 7
+    assert result.stderr == "", f"a clean teardown warned: {result.stderr!r}"
+    assert not data.exists(), "teardown must remove tunnel-data from a supplied session dir"
     assert supplied.is_dir(), "run must never remove a caller-supplied session dir"
+    assert sentinel.read_text() == "do not delete me", "teardown destroyed caller-owned content"
 
 
 def test_minted_root_is_discarded_when_spawn_fails(
