@@ -61,7 +61,7 @@ def test_stop_stdout_is_byte_identical(
     expected: str,
 ) -> None:
     """Each StopOutcome renders as the exact bytes stop wrote before the refactor."""
-    monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _grace, force: outcome)
+    monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _grace, *, force: outcome)
     result = CliRunner().invoke(main, ["stop", "--session-dir", "/s"])
     assert result.exit_code == 0
     assert result.stdout == expected

@@ -175,31 +175,32 @@ def test_stop_session_error_reports_and_exits_zero(tmp_path: Path) -> None:
 def test_stop_removes_tunnel_data_on_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """stop removes <session-dir>/tunnel-data after a successful match path."""
+    """A successful stop is rendered and removes <session-dir>/tunnel-data."""
     import tunstrap.cli as cli_mod
-    from tunstrap.identity import IdentityCheckResult
 
     sd = tmp_path / "session"
     data = sd / "tunnel-data"
     data.mkdir(parents=True)
     (data / "daemon.pid").write_text(f"{os.getpid()}\n")
 
-    def fake_verify(_session_dir: str, _pid: int) -> object:
-        return IdentityCheckResult.match
+    calls: list[tuple[str, int, int, bool]] = []
 
-    call_count = {"n": 0}
+    def _stop_session(
+        session_dir: str, pid: int, grace_seconds: int, *, force: bool
+    ) -> StopOutcome:
+        calls.append((session_dir, pid, grace_seconds, force))
+        return StopOutcome(True)
 
-    def fake_kill(_pid: int, sig: int) -> None:
-        call_count["n"] += 1
-        if call_count["n"] >= 2:
-            raise ProcessLookupError
-
-    monkeypatch.setattr(cli_mod, "verify_session", fake_verify)
-    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(cli_mod, "stop_session", _stop_session)
 
     runner = CliRunner()
-    result = runner.invoke(cli_mod.main, ["stop", "--session-dir", str(sd)])
+    result = runner.invoke(
+        cli_mod.main,
+        ["stop", "--session-dir", str(sd), "--grace-seconds", "17"],
+    )
     assert result.exit_code == 0
+    assert result.stdout == '{"stopped": true}\n'
+    assert calls == [(str(sd), os.getpid(), 17, True)]
     assert not data.exists(), f"tunnel-data should be removed; result={result.output!r}"
 
 
@@ -219,38 +220,6 @@ def test_stop_unknown_pid_reports_not_found() -> None:
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
     assert out == {"stopped": False, "reason": "not found"}
-
-
-def test_stop_identity_mismatch_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """stop where the live holder's pid differs reports an identity mismatch."""
-    monkeypatch.setattr(
-        cli_mod,
-        "stop_session",
-        lambda _session_dir, _pid, _grace_seconds, *, force: StopOutcome(
-            False, "identity mismatch"
-        ),
-    )
-    sd = _make_session_dir(12345)
-    result = CliRunner().invoke(main, ["stop", "--session-dir", sd])
-    assert result.exit_code == 0
-    out = json.loads(result.output)
-    assert out == {"stopped": False, "reason": "identity mismatch"}
-
-
-def test_stop_identity_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """stop reports unavailable identity (e.g., /proc not readable)."""
-    monkeypatch.setattr(
-        cli_mod,
-        "stop_session",
-        lambda _session_dir, _pid, _grace_seconds, *, force: StopOutcome(
-            False, "identity check unavailable"
-        ),
-    )
-    sd = _make_session_dir(12345)
-    result = CliRunner().invoke(main, ["stop", "--session-dir", sd])
-    assert result.exit_code == 0
-    out = json.loads(result.output)
-    assert out == {"stopped": False, "reason": "identity check unavailable"}
 
 
 def test_start_invalid_json_returns_one() -> None:
