@@ -60,6 +60,36 @@ def _success(connections: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_RICH_KUBE: dict[str, Any] = {
+    "cluster_name": "probe-cluster",
+    "context_name": "probe-context",
+    "local_port": 41111,
+    "endpoint": "https://127.0.0.1:41111",
+    "tls_server_name": "probe-control-plane",
+    "certificate_authority_data": "Y2E=",
+    "client_certificate_data": "Y2VydA==",
+    "client_key_data": "a2V5",
+    "content_b64": "a3ViZWNvbmZpZw==",
+    "path": "/s/tunnel-data/node-k3s",
+}
+
+# Non-default in every field the TUNSTRAP_* scalars drop: a real warning, a
+# fetched file, and the seven kube_target fields beyond path/endpoint.
+_RICH_PAYLOAD: dict[str, Any] = {
+    "connections": {
+        "node": {
+            "ports": {"db": 5432},
+            "fetch_files": {"hosts": {"content_b64": "aG9zdHM=", "size": 6, "sha256": "ab" * 32}},
+            "kube_targets": {"k3s": _RICH_KUBE},
+        }
+    },
+    "pid": 99,
+    "session_dir": "/s",
+    "started_at": "2026-07-31T00:00:00Z",
+    "warnings": [{"node": "edge", "error": "optional node refused the forward", "skipped": True}],
+}
+
+
 class FakePopen:
     last_env: dict[str, str] | None = None
 
@@ -191,34 +221,138 @@ def test_single_node_without_output_var_still_works(
 def test_output_var_carries_complete_envelope(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
 ) -> None:
-    """Output variable round-trips the complete structured result."""
-    payload = _success({"node": _conn(db=5432)})["payload"]
-    payload["warnings"] = [{"node": "edge", "error": "optional failed", "skipped": True}]
-    spawn[0]({"kind": "success", "payload": payload})
+    """The child receives the whole OutputSchema, not a lossy projection."""
+    spawn[0]({"kind": "success", "payload": _RICH_PAYLOAD})
     monkeypatch.setenv(VAR, _payload())
     result = CliRunner().invoke(
         main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
     )
     assert result.exit_code == 0, result.stderr
     assert FakePopen.last_env is not None
-    assert OutputSchema.model_validate(
-        json.loads(FakePopen.last_env["TF_VAR_t"])
-    ) == OutputSchema.model_validate(payload)
+    decoded = OutputSchema.model_validate(json.loads(FakePopen.last_env["TF_VAR_t"]))
+
+    # Whole-object equality: any dropped, renamed or re-defaulted field fails here.
+    assert decoded == OutputSchema.model_validate(_RICH_PAYLOAD)
+
+    # Restated field by field so the failure message names what was lost.
+    assert decoded.warnings[0].node == "edge"
+    assert decoded.warnings[0].error == "optional node refused the forward"
+    assert decoded.started_at == "2026-07-31T00:00:00Z"
+    assert decoded.pid == 99
+    assert decoded.session_dir == "/s"
+    kube = decoded.connections["node"].kube_targets["k3s"]
+    assert kube.tls_server_name == "probe-control-plane"
+    assert kube.certificate_authority_data == "Y2E="
+    assert kube.client_certificate_data == "Y2VydA=="
+    assert kube.client_key_data == "a2V5"
+    assert kube.content_b64 == "a3ViZWNvbmZpZw=="
+    assert kube.path == "/s/tunnel-data/node-k3s"
+    assert decoded.connections["node"].fetch_files["hosts"].sha256 == "ab" * 32
+
+
+def test_single_node_keeps_scalars_alongside_output_var(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """--output-var is additive: the TUNSTRAP_* scalars are still injected."""
+    spawn[0](_success({"node": _conn(db=5432)}))
+    monkeypatch.setenv(VAR, _payload())
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert FakePopen.last_env is not None
+    assert FakePopen.last_env["TUNSTRAP_DB_PORT"] == "5432"
+    assert FakePopen.last_env["TUNSTRAP_DB_ENDPOINT"] == "127.0.0.1:5432"
+    assert "TF_VAR_t" in FakePopen.last_env
+
+
+def test_multi_node_injects_output_var_and_no_scalars(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """More than one node: the structure only, never the ambiguous scalars."""
+    spawn[0](_success({"a": _conn(db=5432), "b": _conn(db=5433)}))
+    monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node()}))
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert FakePopen.last_env is not None
+    # VAR itself is the payload variable this test set; it is inherited, not injected.
+    leaked = [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR]
+    assert leaked == [], f"multi-node run injected ambiguous scalars: {leaked}"
+    decoded = OutputSchema.model_validate(json.loads(FakePopen.last_env["TF_VAR_t"]))
+    assert sorted(decoded.connections) == ["a", "b"]
+    assert decoded.connections["a"].ports == {"db": 5432}
+    assert decoded.connections["b"].ports == {"db": 5433}
 
 
 def test_multi_node_suppression_uses_input_count(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
 ) -> None:
-    """Two input nodes and one surviving output node inject JSON only."""
+    """Two nodes in, one connection out: still no scalars, still no KUBECONFIG.
+
+    This is the falsifiable half of the multi-node rule, and the only place the
+    KUBECONFIG check can actually fire. An implementation that decided from
+    ``len(out.connections)`` instead of the input node count sees 1 here, calls
+    render_env successfully, and injects the surviving node's scalars --
+    including KUBECONFIG, which points at a real materialized kubeconfig. The
+    two-in/two-out case above cannot catch that: render_env rejects a two-node
+    envelope outright, so a wrong implementation errors there instead of
+    leaking, and a KUBECONFIG assertion on it could never fail.
+    """
+    # Clear the operator's own KUBECONFIG: it is the one injected key with no
+    # TUNSTRAP_ prefix, so an inherited copy would mask a wrongly-injected one.
     monkeypatch.delenv("KUBECONFIG", raising=False)
-    payload = _success({"a": _conn(db=5432)})["payload"]
-    spawn[0]({"kind": "success", "payload": payload})
+    survivor = {
+        "ports": {"db": 5432},
+        "fetch_files": {},
+        "kube_targets": {"k3s": _RICH_KUBE},
+    }
+    spawn[0](
+        {
+            "kind": "success",
+            "payload": {
+                "connections": {"a": survivor},
+                "pid": 99,
+                "session_dir": "/s",
+                "started_at": "2026-07-31T00:00:00Z",
+                "warnings": [{"node": "b", "error": "optional node failed"}],
+            },
+        }
+    )
     monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node(required=False)}))
     result = CliRunner().invoke(
         main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
     )
     assert result.exit_code == 0, result.stderr
     assert FakePopen.last_env is not None
-    assert [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR] == []
-    assert "KUBECONFIG" not in FakePopen.last_env
+    leaked = [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR]
+    assert leaked == [], f"scalars injected from the output node count: {leaked}"
+    assert "KUBECONFIG" not in FakePopen.last_env, "KUBECONFIG injected despite multi-node input"
     assert "TF_VAR_t" in FakePopen.last_env
+
+
+def test_child_env_without_output_var_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """Without --output-var the injected set is exactly what it was before."""
+    # The developer's own environment must not decide this assertion.
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    spawn[0](_success({"node": _conn(db=5432)}))
+    monkeypatch.setenv(VAR, _payload())
+    result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
+    assert result.exit_code == 0, result.stderr
+    assert FakePopen.last_env is not None
+    injected = {
+        k: v
+        for k, v in FakePopen.last_env.items()
+        if k != VAR and k.startswith(("TUNSTRAP_", "KUBECONFIG"))
+    }
+    assert injected == {
+        "TUNSTRAP_SESSION_DIR": "/s",
+        "TUNSTRAP_PID": "99",
+        "TUNSTRAP_DB_HOST": "127.0.0.1",
+        "TUNSTRAP_DB_PORT": "5432",
+        "TUNSTRAP_DB_ENDPOINT": "127.0.0.1:5432",
+    }
+    assert "PATH" in FakePopen.last_env, "child env must still inherit os.environ"
