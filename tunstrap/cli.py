@@ -335,14 +335,34 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals
 
 
 def _teardown_run(session_dir: str, grace_seconds: int) -> None:
-    """Stop the daemon for session_dir and remove its tunnel-data. Best-effort."""
+    """Stop the daemon for session_dir and clean up. Never raises, never uses stdout.
+
+    Under the tofu-proxy pattern fd 1 belongs to the child, so every teardown
+    diagnostic goes to stderr and none of them changes the exit code: a child
+    that ran and returned 7 still exits 7.
+    """
+    try:
+        _teardown_run_inner(session_dir, grace_seconds)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        sys.stderr.write(f"run: teardown failed: {type(exc).__name__}: {exc}\n")
+
+
+def _teardown_run_inner(session_dir: str, grace_seconds: int) -> None:
+    """Stop the daemon and remove tunnel-data, reporting failures on stderr."""
     try:
         pid = SessionDir.read_identity(session_dir)
     except SessionError:
-        SessionDir.cleanup_path(session_dir)
-        return
-    stop_session(session_dir, pid, grace_seconds, force=True)
-    SessionDir.cleanup_path(session_dir)
+        # No identity file: nothing to stop. Not an error — with the session
+        # path minted before the spawn, a missing identity no longer means the
+        # path is unknown, it means the daemon never recorded one.
+        pass
+    else:
+        outcome = stop_session(session_dir, pid, grace_seconds, force=True)
+        if not outcome.stopped:
+            sys.stderr.write(f"run: daemon not stopped cleanly: {outcome.reason}\n")
+    survivors = SessionDir.cleanup_path(session_dir)
+    if survivors:
+        sys.stderr.write("run: could not remove: " + ", ".join(survivors) + "\n")
 
 
 def _stop_outcome_json(outcome: StopOutcome) -> str:
