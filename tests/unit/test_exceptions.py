@@ -81,3 +81,20 @@ def test_session_active_exit_code_is_3() -> None:
     exc = SessionActive("daemon already running")
     assert exit_code_for(exc) == 3
     assert exc.to_error_output()["error"] == "SessionActive"
+
+
+def test_multi_node_env_unsupported_is_tunstrap_error() -> None:
+    """MultiNodeEnvUnsupported is a TunstrapError so run's typed handler catches it."""
+    from tunstrap.exceptions import MultiNodeEnvUnsupported
+
+    assert issubclass(MultiNodeEnvUnsupported, TunstrapError)
+
+
+def test_multi_node_env_unsupported_exit_code_is_1() -> None:
+    """MultiNodeEnvUnsupported maps to exit 1 and names itself in the error envelope."""
+    from tunstrap.exceptions import MultiNodeEnvUnsupported
+
+    exc = MultiNodeEnvUnsupported("needs --output-var", {"nodes": ["a", "b"]})
+    assert exit_code_for(exc) == 1
+    assert exc.to_error_output()["error"] == "MultiNodeEnvUnsupported"
+    assert exc.to_error_output()["details"] == {"nodes": ["a", "b"]}

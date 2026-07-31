@@ -58,8 +58,19 @@ class SessionActive(TunstrapError):
     """A daemon session is already running; a second start is rejected."""
 
 
+class MultiNodeEnvUnsupported(TunstrapError):
+    """A multi-node result cannot be rendered as TUNSTRAP_* scalars.
+
+    ``TUNSTRAP_<TARGET>_*`` has no node dimension, so two nodes with a
+    same-named target collide irreducibly. ``run`` requires ``--output-var``
+    (which is keyed by node) for multi-node input and raises this
+    **before spawning**, so the rejection can never orphan a daemon.
+    """
+
+
 _EXIT_CODES: dict[type[TunstrapError], int] = {
     SchemaValidationError: 1,
+    MultiNodeEnvUnsupported: 1,
     RequiredTunnelFailure: 2,
     KubeParseError: 2,
     SessionActive: 3,
