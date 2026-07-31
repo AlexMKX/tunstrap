@@ -13,7 +13,10 @@ daemon, no signals and no filesystem work — this passes unchanged on macOS.
 
 from __future__ import annotations
 
+import json
+import signal as signal_mod
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -381,3 +384,162 @@ def test_minted_root_is_removed_after_a_successful_run(monkeypatch: pytest.Monke
     assert result.exit_code == 7
     assert seen[0] is not None
     assert not Path(seen[0]).exists(), "teardown left the minted session root behind"
+
+
+@pytest.fixture(name="signal_guard")
+def _signal_guard() -> Iterator[None]:
+    """Guarantee this process's SIGINT/SIGTERM handlers survive the test.
+
+    ``signal_mod.signal`` is captured at setup: a test that makes restoration
+    raise does so by patching that very function, and this fixture is torn
+    down *before* monkeypatch undoes the patch, so calling it by attribute
+    would re-enter the flaky stub and error out in teardown.
+    """
+    real_signal = signal_mod.signal
+    saved = [(s, signal_mod.getsignal(s)) for s in (signal_mod.SIGINT, signal_mod.SIGTERM)]
+    try:
+        yield
+    finally:
+        for signum, handler in saved:
+            real_signal(signum, handler)
+
+
+def test_malformed_success_payload_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """A success payload missing session_dir must not orphan the daemon."""
+    spawned: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        spawned.append(session_dir)
+        payload = _success_payload()
+        del payload["payload"]["session_dir"]
+        return payload
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert json.loads(result.stderr)["error"] == "DaemonError"
+    assert len(teardowns) == 1, "teardown must run exactly once"
+    assert teardowns[0][0] == spawned[0], "teardown must use the minted path"
+
+
+def test_non_string_session_dir_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """A non-string session_dir fails validation post-spawn but still tears down."""
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        payload = _success_payload()
+        payload["payload"]["session_dir"] = 17
+        return payload
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert len(teardowns) == 1
+
+
+@pytest.mark.parametrize("missing", ["kind", "payload"])
+def test_unreadable_envelope_still_tears_down(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]], missing: str
+) -> None:
+    """An envelope run cannot index must not orphan a daemon that may be live.
+
+    ``message["kind"]`` and ``message["payload"]`` are read after the spawn.
+    Indexing them outside cleanup ownership -- including as the argument
+    expression of the supervise call, which is evaluated in the caller -- lets
+    a KeyError escape while a worker may already be running.
+    """
+    envelope = _success_payload()
+    del envelope[missing]
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: envelope)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert json.loads(result.stderr)["error"] == "DaemonError"
+    assert len(teardowns) == 1, "an unreadable envelope must still tear down, exactly once"
+
+
+@pytest.mark.parametrize("target", ["render_env", "_build_child_env"])
+def test_post_spawn_exception_tears_down_once(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]], target: str
+) -> None:
+    """Anything raised between the spawn and Popen still stops the daemon, exit 4."""
+
+    def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError(f"{target} exploded")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod, target, _boom)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert json.loads(result.stderr)["error"] == "DaemonError"
+    assert len(teardowns) == 1, "teardown must run exactly once"
+
+
+def test_launch_failure_is_127_and_tears_down(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """An unlaunchable child is 127, distinct from the post-spawn guard's 4."""
+
+    def _boom(_cmd: list[str], env: dict[str, str] | None = None) -> Any:
+        raise OSError("no such binary")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", _boom)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 127
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert "failed to launch command" in result.stderr
+    assert len(teardowns) == 1
+
+
+def test_failing_signal_restoration_cannot_skip_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    teardowns: list[tuple[Any, ...]],
+    signal_guard: None,
+) -> None:
+    """If restoring the handlers raises, the daemon is still stopped."""
+    real_signal = signal_mod.signal
+    calls = {"n": 0}
+
+    def _flaky(signum: int, handler: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] > 2:  # the first two are installs, the rest are restores
+            raise RuntimeError("cannot restore handler")
+        return real_signal(signum, handler)
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod.signal, "signal", _flaky)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert len(teardowns) == 1, "teardown must run even when restoration raises"
+    assert result.exit_code == 4
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert json.loads(result.stderr)["error"] == "DaemonError"
+
+
+def test_signal_handlers_are_restored_on_the_happy_path(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """After a normal run the process's original handlers are back in place."""
+    before = (
+        signal_mod.getsignal(signal_mod.SIGINT),
+        signal_mod.getsignal(signal_mod.SIGTERM),
+    )
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7
+    after = (
+        signal_mod.getsignal(signal_mod.SIGINT),
+        signal_mod.getsignal(signal_mod.SIGTERM),
+    )
+    assert after == before, "run left its own SIGINT/SIGTERM handlers installed"

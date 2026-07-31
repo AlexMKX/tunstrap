@@ -9,7 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 import click
 from pydantic import ValidationError
@@ -373,6 +373,90 @@ def _discard_minted_root(minted_root: str | None) -> None:
         SessionDir.remove_root(minted_root)
 
 
+def _report_unexpected(exc: BaseException) -> None:
+    """Report an unexpected post-spawn failure as DaemonError JSON on stderr.
+
+    Mirrors ``start``'s top-level guard (``cli.py:241-254``) except for the
+    channel: under the tofu-proxy pattern fd 1 belongs to the child, so ``run``
+    never writes a diagnostic to stdout.
+    """
+    sys.stderr.write(
+        json.dumps(
+            DaemonError(
+                "unexpected failure during run", {"type": type(exc).__name__}
+            ).to_error_output()
+        )
+        + "\n"
+    )
+
+
+def _run_child(
+    payload: Any, cmd: list[str], *, output_var: str | None, inject_scalars: bool
+) -> int:
+    """Validate the success payload, build the child env, run the child.
+
+    Every statement here runs inside ``_supervise_child``'s teardown ``try``,
+    including ``OutputSchema.model_validate`` — which is exactly the case an
+    earlier design left unguarded: a malformed success payload orphaned the
+    daemon, because the session path was recovered from that same payload.
+    """
+    out = OutputSchema.model_validate(payload)
+    child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
+    # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
+    # forwarded to the child while it runs in the foreground.
+    proc = subprocess.Popen(  # noqa: SIM115  # pylint: disable=consider-using-with
+        cmd, env=child_env
+    )
+
+    def _forward(signum: int, _frame: object) -> None:
+        try:
+            proc.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGINT, _forward)
+    signal.signal(signal.SIGTERM, _forward)
+    return proc.wait()
+
+
+def _supervise_child(  # pylint: disable=too-many-arguments
+    payload: Any,
+    cmd: list[str],
+    *,
+    output_var: str | None,
+    inject_scalars: bool,
+    session_dir: str,
+    grace_seconds: int,
+    minted_root: str | None,
+) -> int:
+    """Own the whole post-spawn window; the daemon is stopped on every path.
+
+    The ``try`` opens on the first statement and the caller invokes this with
+    nothing between it and a successful ``spawn_daemon`` — the payload is read
+    out of the envelope beforehand, because an argument expression is evaluated
+    in the caller and so would sit outside this window. Handlers are saved into
+    a list *inside* the ``try``, so even a failure capturing them leaves the
+    teardown reachable, and the restoration loop is nested in its own ``try``
+    whose ``finally`` performs the teardown.
+    """
+    saved: list[tuple[int, Any]] = []
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            saved.append((signum, signal.getsignal(signum)))
+        return _run_child(payload, cmd, output_var=output_var, inject_scalars=inject_scalars)
+    except OSError as exc:
+        sys.stderr.write(f"run: failed to launch command: {exc}\n")
+        return 127
+    finally:
+        try:
+            # A distinct name: `signum` above is bound to signal.Signals, and
+            # reusing it here for the plain int in `saved` fails mypy --strict.
+            for saved_signum, handler in saved:
+                signal.signal(saved_signum, handler)
+        finally:
+            _teardown_run(session_dir, grace_seconds, minted_root=minted_root)
+
+
 @main.command("run")
 @_connection_options
 @click.option("--input-env", "input_env", default=None, metavar="VAR")
@@ -466,40 +550,42 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
         sys.exit(exit_code_for(exc))
 
-    kind = message["kind"]
+    try:
+        kind = message["kind"]
+        payload = message["payload"]
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        # An envelope we cannot index leaves us unable to tell whether a worker
+        # is live, and an orphan is the one outcome this window exists to
+        # prevent — so tear down rather than guess. Harmless when no daemon
+        # ran: _teardown_run_inner simply finds no recorded pid.
+        _teardown_run(session_path, grace_seconds, minted_root=minted_root)
+        _report_unexpected(exc)
+        sys.exit(4)
+
     if kind != "success":
+        # No daemon of ours is running on these paths, and session_active means
+        # the pid under the session dir belongs to somebody else's live
+        # session, so teardown here would stop a daemon we do not own.
         _discard_minted_root(minted_root)
-        sys.stderr.write(json.dumps(message["payload"]) + "\n")
+        sys.stderr.write(json.dumps(payload) + "\n")
         sys.exit({"required_failure": 2, "session_active": 3, "daemon_error": 4}.get(kind, 4))
 
-    out = OutputSchema.model_validate(message["payload"])
-    child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
-
-    prev_int = signal.getsignal(signal.SIGINT)
-    prev_term = signal.getsignal(signal.SIGTERM)
+    # Nothing whatsoever between a successful spawn and the try that owns
+    # teardown: _supervise_child opens it on its first statement.
     try:
-        # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
-        # forwarded to the child while it runs in the foreground.
-        proc = subprocess.Popen(  # noqa: SIM115  # pylint: disable=consider-using-with
-            cmd, env=child_env
+        returncode = _supervise_child(
+            payload,
+            cmd,
+            output_var=output_var,
+            inject_scalars=inject_scalars,
+            session_dir=session_path,
+            grace_seconds=grace_seconds,
+            minted_root=minted_root,
         )
-
-        def _forward(signum: int, _frame: object) -> None:
-            try:
-                proc.send_signal(signum)
-            except ProcessLookupError:
-                pass
-
-        signal.signal(signal.SIGINT, _forward)
-        signal.signal(signal.SIGTERM, _forward)
-        returncode = proc.wait()
-    except OSError as exc:
-        sys.stderr.write(f"run: failed to launch command: {exc}\n")
-        returncode = 127
-    finally:
-        signal.signal(signal.SIGINT, prev_int)
-        signal.signal(signal.SIGTERM, prev_term)
-        _teardown_run(session_path, grace_seconds, minted_root=minted_root)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        # Teardown has already run in _supervise_child's finally.
+        _report_unexpected(exc)
+        returncode = 4
     sys.exit(returncode)
 
 
