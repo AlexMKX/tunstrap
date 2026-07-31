@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
+from tunstrap.session import StopOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -222,12 +223,12 @@ def test_stop_unknown_pid_reports_not_found() -> None:
 
 def test_stop_identity_mismatch_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """stop where the live holder's pid differs reports an identity mismatch."""
-    from tunstrap.identity import IdentityCheckResult
-
     monkeypatch.setattr(
         cli_mod,
-        "verify_session",
-        lambda session_dir, pid: IdentityCheckResult.mismatch,
+        "stop_session",
+        lambda _session_dir, _pid, _grace_seconds, *, force: StopOutcome(
+            False, "identity mismatch"
+        ),
     )
     sd = _make_session_dir(12345)
     result = CliRunner().invoke(main, ["stop", "--session-dir", sd])
@@ -238,12 +239,12 @@ def test_stop_identity_mismatch_reports_reason(monkeypatch: pytest.MonkeyPatch) 
 
 def test_stop_identity_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """stop reports unavailable identity (e.g., /proc not readable)."""
-    from tunstrap.identity import IdentityCheckResult
-
     monkeypatch.setattr(
         cli_mod,
-        "verify_session",
-        lambda session_dir, pid: IdentityCheckResult.unavailable,
+        "stop_session",
+        lambda _session_dir, _pid, _grace_seconds, *, force: StopOutcome(
+            False, "identity check unavailable"
+        ),
     )
     sd = _make_session_dir(12345)
     result = CliRunner().invoke(main, ["stop", "--session-dir", sd])

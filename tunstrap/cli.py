@@ -7,7 +7,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from typing import Callable, TypeVar
 
 import click
@@ -25,7 +24,7 @@ from tunstrap.exceptions import (
 )
 from tunstrap.identity import IdentityCheckResult, verify_session
 from tunstrap.schemas import DaemonOptions, InputSchema, OutputSchema
-from tunstrap.session import SessionDir, SessionError
+from tunstrap.session import SessionDir, SessionError, StopOutcome, stop_session
 
 _FC = TypeVar("_FC", bound=Callable[..., object])
 
@@ -342,8 +341,23 @@ def _teardown_run(session_dir: str, grace_seconds: int) -> None:
     except SessionError:
         SessionDir.cleanup_path(session_dir)
         return
-    _kill_with_identity(pid, grace_seconds, force=True, session_dir=session_dir)
+    stop_session(session_dir, pid, grace_seconds, force=True)
     SessionDir.cleanup_path(session_dir)
+
+
+def _stop_outcome_json(outcome: StopOutcome) -> str:
+    """Render a StopOutcome as ``stop``'s documented stdout JSON, key for key.
+
+    Key order and omission rules reproduce the pre-refactor writes in
+    ``_kill_with_identity``: ``stopped`` first, then ``reason`` when there is
+    one, then ``forced`` only when True.
+    """
+    body: dict[str, object] = {"stopped": outcome.stopped}
+    if outcome.reason is not None:
+        body["reason"] = outcome.reason
+    if outcome.forced:
+        body["forced"] = True
+    return json.dumps(body)
 
 
 @main.command("stop")
@@ -358,7 +372,10 @@ def stop_command(session_dir: str, grace_seconds: int) -> None:
         sys.stdout.write("\n")
         sys.stdout.flush()
         sys.exit(0)
-    _kill_with_identity(pid, grace_seconds, force=True, session_dir=session_dir)
+    outcome = stop_session(session_dir, pid, grace_seconds, force=True)
+    sys.stdout.write(_stop_outcome_json(outcome))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     SessionDir.cleanup_path(session_dir)
 
 
@@ -375,70 +392,6 @@ def status_command(session_dir: str) -> None:
     sys.stdout.write(json.dumps({"alive": alive}))
     sys.stdout.write("\n")
     sys.stdout.flush()
-
-
-def _kill_with_identity(  # pylint: disable=too-many-return-statements
-    pid: int, grace_seconds: int, *, force: bool, session_dir: str
-) -> bool:
-    check = verify_session(session_dir, pid)
-    if check == IdentityCheckResult.not_found:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": "not found"}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return False
-    if check == IdentityCheckResult.mismatch:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": "identity mismatch"}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return False
-    if check == IdentityCheckResult.unavailable:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": "identity check unavailable"}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return False
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        sys.stdout.write(json.dumps({"stopped": True}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return True
-
-    deadline = time.monotonic() + max(0, grace_seconds)
-    while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            sys.stdout.write(json.dumps({"stopped": True}))
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            return True
-        time.sleep(0.5)
-
-    if not force:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": "still alive"}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return False
-
-    recheck = verify_session(session_dir, pid)
-    if recheck != IdentityCheckResult.match:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": "identity changed during grace"}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return False
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        sys.stdout.write(json.dumps({"stopped": True}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        return True
-    sys.stdout.write(json.dumps({"stopped": True, "forced": True}))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-    return True
 
 
 if __name__ == "__main__":  # pragma: no cover
