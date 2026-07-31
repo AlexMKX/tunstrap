@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -120,4 +122,40 @@ def build_single_node_schema(
         raise SchemaValidationError(
             "CLI input does not satisfy the schema",
             {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
+        ) from exc
+
+
+def build_schema_from_env(var_name: str) -> InputSchema:
+    """Read, JSON-decode and validate an ``InputSchema`` from ``os.environ[var_name]``.
+
+    ``run`` owns a child that inherits stdin, so stdin is unavailable to it as
+    a control channel; the environment is the remaining out-of-band input a
+    parent has. Every failure is a ``SchemaValidationError`` (exit 1) with the
+    same three shapes ``start``'s stdin path produces.
+
+    ``exc.errors(include_input=False, ...)`` is mandatory: pydantic v2 error
+    entries embed the offending ``input``, which for a malformed node is the
+    ``ssh_pkey`` PEM itself, and ``TunstrapError._scrub`` cannot reach it.
+    """
+    raw = os.environ.get(var_name, "")
+    if not raw.strip():
+        raise SchemaValidationError(
+            f"environment variable {var_name} is unset or empty", {"var": var_name}
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaValidationError(
+            f"environment variable {var_name} is not valid JSON",
+            {"var": var_name, "position": exc.pos},
+        ) from exc
+    try:
+        return InputSchema.model_validate(payload)
+    except ValidationError as exc:
+        raise SchemaValidationError(
+            "input does not satisfy the InputSchema contract",
+            {
+                "var": var_name,
+                "errors": exc.errors(include_input=False, include_url=False, include_context=False),
+            },
         ) from exc
