@@ -69,12 +69,15 @@ def test_sigterm_on_already_dead_process_is_stopped(
 ) -> None:
     """A ProcessLookupError on SIGTERM means it is already gone: stopped, unforced."""
     monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    calls: list[int] = []
 
-    def _kill(_pid: int, _sig: int) -> None:
+    def _kill(_pid: int, sig: int) -> None:
+        calls.append(sig)
         raise ProcessLookupError
 
     monkeypatch.setattr(session_mod.os, "kill", _kill)
     assert stop_session(SESSION, PID, 10, force=True) == StopOutcome(True)
+    assert calls == [signal.SIGTERM]
 
 
 def test_exits_within_grace_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,13 +97,30 @@ def test_exits_within_grace_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert signal.SIGKILL not in calls, "must not escalate when the grace poll succeeded"
 
 
+def test_grace_poll_uses_strict_deadline_and_half_second_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed poll sleeps 0.5 seconds and equality with the deadline ends grace."""
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monotonic_values = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: next(monotonic_values))
+    sleeps: list[float] = []
+    monkeypatch.setattr(session_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+    calls: list[int] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda _pid, sig: calls.append(sig))
+
+    assert stop_session(SESSION, PID, 1, force=True) == StopOutcome(True, forced=True)
+    assert calls == [signal.SIGTERM, 0, signal.SIGKILL]
+    assert sleeps == [0.5]
+
+
 def test_not_force_reports_still_alive(monkeypatch: pytest.MonkeyPatch) -> None:
     """force=False after an expired grace reports 'still alive' and never SIGKILLs."""
     monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
     calls: list[int] = []
     monkeypatch.setattr(session_mod.os, "kill", lambda _p, s: calls.append(s))
     assert stop_session(SESSION, PID, 0, force=False) == StopOutcome(False, "still alive")
-    assert signal.SIGKILL not in calls
+    assert calls == [signal.SIGTERM]
 
 
 def test_identity_changed_during_grace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +135,7 @@ def test_identity_changed_during_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stop_session(SESSION, PID, 0, force=True) == StopOutcome(
         False, "identity changed during grace"
     )
-    assert signal.SIGKILL not in calls, "SIGKILL on a recycled pid would kill a stranger"
+    assert calls == [signal.SIGTERM]
 
 
 def test_forced_kill(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,11 +151,46 @@ def test_stop_session_writes_nothing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The primitive is silent on every branch: that is its whole purpose."""
-    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
     for check in IdentityCheckResult:
         monkeypatch.setattr(session_mod, "verify_session", _fixed_check(check))
+        monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
         stop_session(SESSION, PID, 0, force=True)
+
+    def _already_dead(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monkeypatch.setattr(session_mod.os, "kill", _already_dead)
+    stop_session(SESSION, PID, 0, force=True)
+
+    def _dies_during_grace(_pid: int, sig: int) -> None:
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monkeypatch.setattr(session_mod.os, "kill", _dies_during_grace)
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+    stop_session(SESSION, PID, 10, force=True)
+
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
+    stop_session(SESSION, PID, 0, force=False)
+
+    monkeypatch.setattr(
+        session_mod,
+        "verify_session",
+        _checks(IdentityCheckResult.match, IdentityCheckResult.mismatch),
+    )
+    stop_session(SESSION, PID, 0, force=True)
+
+    def _dies_on_sigkill(_pid: int, sig: int) -> None:
+        if sig == signal.SIGKILL:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monkeypatch.setattr(session_mod.os, "kill", _dies_on_sigkill)
+    stop_session(SESSION, PID, 0, force=True)
+
     captured = capsys.readouterr()
     assert captured.out == "", f"stop_session wrote to stdout: {captured.out!r}"
     assert captured.err == "", f"stop_session wrote to stderr: {captured.err!r}"
