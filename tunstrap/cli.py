@@ -582,6 +582,14 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             grace_seconds=grace_seconds,
             minted_root=minted_root,
         )
+    except TunstrapError as exc:
+        # An expected outcome keeps its own exit code. A lone required:false
+        # node that failed yields a success envelope with no connections
+        # (manager.py:99-107), and render_env raises MultiNodeEnvUnsupported
+        # here — exit 1, not "unexpected failure during run". Teardown has
+        # already run in _supervise_child's finally, as it has below.
+        sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
+        returncode = exit_code_for(exc)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         # Teardown has already run in _supervise_child's finally.
         _report_unexpected(exc)

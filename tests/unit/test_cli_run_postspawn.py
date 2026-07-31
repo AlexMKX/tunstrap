@@ -136,9 +136,8 @@ def test_teardown_exception_does_not_change_exit_code(
     assert result.exit_code == 7, "teardown failure must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "stop exploded" in result.stderr
-    assert not any(Path(p).exists() for p in Path(tempfile.gettempdir()).glob("tunstrap-run-*")), (
-        "a raising stop primitive leaked the minted session root"
-    )
+    leaked = list(Path(tempfile.gettempdir()).glob("tunstrap-run-*"))
+    assert leaked == [], f"a raising stop primitive leaked the minted session root: {leaked}"
 
 
 def test_teardown_permission_error_does_not_change_exit_code(
@@ -386,12 +385,18 @@ def test_minted_root_is_removed_after_a_successful_run(monkeypatch: pytest.Monke
     assert not Path(seen[0]).exists(), "teardown left the minted session root behind"
 
 
-@pytest.fixture(name="signal_guard")
+@pytest.fixture(name="signal_guard", autouse=True)
 def _signal_guard() -> Iterator[None]:
     """Guarantee this process's SIGINT/SIGTERM handlers survive the test.
 
+    Autouse because every test here that reaches ``_run_child`` installs
+    ``_forward`` as this process's SIGINT/SIGTERM handler. If such a test fails
+    before restoration, ``_forward`` stays bound to a dead ``QuietPopen`` for
+    the remainder of the session, and a later test — or a real Ctrl-C — would
+    behave unpredictably.
+
     ``signal_mod.signal`` is captured at setup: a test that makes restoration
-    raise does so by patching that very function, and this fixture is torn
+    raise does so by patching that very function, and this fixture may be torn
     down *before* monkeypatch undoes the patch, so calling it by attribute
     would re-enter the flaky stub and error out in teardown.
     """
@@ -543,3 +548,54 @@ def test_signal_handlers_are_restored_on_the_happy_path(
         signal_mod.getsignal(signal_mod.SIGTERM),
     )
     assert after == before, "run left its own SIGINT/SIGTERM handlers installed"
+
+
+def test_lone_optional_node_failure_keeps_its_own_exit_code(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """A required:false node that failed is an expected outcome, not an internal error.
+
+    manager.py builds ``connections`` from successful nodes only
+    (``manager.py:99-107``), so a lone optional node that never came up yields
+    a *success* envelope with ``connections == {}`` and a warning.
+    ``inject_scalars`` is True because it is decided from the one *input* node,
+    so ``render_env`` raises ``MultiNodeEnvUnsupported`` inside the post-spawn
+    window. That is a TunstrapError with its own mapping
+    (``exceptions.py:71-78`` -> 1); routing it through the generic guard would
+    report an expected result as "unexpected failure during run" with exit 4.
+    """
+    payload = {
+        "connections": {},
+        "pid": 99,
+        "session_dir": "/s",
+        "started_at": "now",
+        "warnings": [{"node": "edge", "error": "optional node refused the forward"}],
+    }
+    monkeypatch.setattr(
+        cli_mod,
+        "spawn_daemon",
+        lambda _s, session_dir=None: {"kind": "success", "payload": payload},
+    )
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setenv(
+        "TUNSTRAP_INPUT",
+        json.dumps(
+            {
+                "nodes": {
+                    "edge": {
+                        "host": "h.example.net",
+                        "user": "u",
+                        "ssh_password": "p",
+                        "required": False,
+                        "remote_targets": {"db": "127.0.0.1:5432"},
+                    }
+                }
+            }
+        ),
+    )
+    result = CliRunner().invoke(main, ["run", "--input-env", "TUNSTRAP_INPUT", "--", "true"])
+    assert result.exit_code == 1, result.stderr
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    error = json.loads(result.stderr)
+    assert error["error"] == "MultiNodeEnvUnsupported"
+    assert len(teardowns) == 1, "the daemon must still be stopped"
