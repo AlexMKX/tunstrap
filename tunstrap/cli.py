@@ -330,6 +330,21 @@ def _reject_flags_under_input_env(
         raise click.UsageError("--materialize conflicts with --input-env; run always materializes")
 
 
+def _build_child_env(
+    output: OutputSchema, *, output_var: str | None, inject_scalars: bool
+) -> dict[str, str]:
+    """Inherited env, plus scalars and the optional complete output JSON.
+
+    ``inject_scalars`` is decided pre-spawn from the input node count.
+    """
+    child_env = dict(os.environ)
+    if inject_scalars:
+        child_env.update(render_env(output))
+    if output_var is not None:
+        child_env[output_var] = output.model_dump_json()
+    return child_env
+
+
 @main.command("run")
 @_connection_options
 @click.option("--input-env", "input_env", default=None, metavar="VAR")
@@ -410,6 +425,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
                 "multi-node input requires --output-var; TUNSTRAP_* scalars are single-node only",
                 {"nodes": sorted(schema.nodes)},
             )
+        inject_scalars = len(schema.nodes) == 1
         message = spawn_daemon(schema, session_dir=session_dir)
     except TunstrapError as exc:
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
@@ -421,7 +437,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
         sys.exit({"required_failure": 2, "session_active": 3, "daemon_error": 4}.get(kind, 4))
 
     out = OutputSchema.model_validate(message["payload"])
-    child_env = {**os.environ, **render_env(out)}
+    child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
     resolved_session_dir = out.session_dir
 
     prev_int = signal.getsignal(signal.SIGINT)

@@ -22,6 +22,7 @@ from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
 from tunstrap.exceptions import DaemonError
+from tunstrap.schemas import OutputSchema
 
 pytestmark = pytest.mark.unit
 
@@ -185,3 +186,39 @@ def test_single_node_without_output_var_still_works(
     result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
     assert result.exit_code == 0, result.stderr
     assert len(spawn) == 2
+
+
+def test_output_var_carries_complete_envelope(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """Output variable round-trips the complete structured result."""
+    payload = _success({"node": _conn(db=5432)})["payload"]
+    payload["warnings"] = [{"node": "edge", "error": "optional failed", "skipped": True}]
+    spawn[0]({"kind": "success", "payload": payload})
+    monkeypatch.setenv(VAR, _payload())
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert FakePopen.last_env is not None
+    assert OutputSchema.model_validate(
+        json.loads(FakePopen.last_env["TF_VAR_t"])
+    ) == OutputSchema.model_validate(payload)
+
+
+def test_multi_node_suppression_uses_input_count(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """Two input nodes and one surviving output node inject JSON only."""
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    payload = _success({"a": _conn(db=5432)})["payload"]
+    spawn[0]({"kind": "success", "payload": payload})
+    monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node(required=False)}))
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", "TF_VAR_t", "--", "true"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert FakePopen.last_env is not None
+    assert [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR] == []
+    assert "KUBECONFIG" not in FakePopen.last_env
+    assert "TF_VAR_t" in FakePopen.last_env
