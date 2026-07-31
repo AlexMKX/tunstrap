@@ -146,3 +146,49 @@ def test_teardown_permission_error_does_not_change_exit_code(
     assert result.exit_code == 7, "teardown failure must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "PermissionError: recycled pid" in result.stderr
+
+
+def test_teardown_keyboard_interrupt_does_not_change_exit_code(
+    monkeypatch: pytest.MonkeyPatch, spawned: None
+) -> None:
+    """A KeyboardInterrupt from teardown does not override the child's exit code."""
+
+    def _interrupted(_sd: str, _pid: int, _g: int, *, force: bool) -> StopOutcome:
+        raise KeyboardInterrupt("second Ctrl-C")
+
+    monkeypatch.setattr(cli_mod, "stop_session", _interrupted)
+    monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7, "teardown interruption must never override the child code"
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert "KeyboardInterrupt: second Ctrl-C" in result.stderr
+
+
+def test_teardown_already_exited_daemon_is_silent(
+    monkeypatch: pytest.MonkeyPatch, spawned: None
+) -> None:
+    """A daemon that already exited is normal and produces no teardown warning."""
+    monkeypatch.setattr(
+        cli_mod, "stop_session", lambda _sd, _pid, _g, *, force: StopOutcome(False, "not found")
+    )
+    monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 7
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert result.stderr == "", f"run warned about an already-exited daemon: {result.stderr!r}"
+
+
+def test_teardown_stderr_write_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A diagnostic write failure cannot escape the never-raise teardown wrapper."""
+
+    class BrokenStderr:
+        def write(self, _message: str) -> int:
+            raise BrokenPipeError("stderr closed")
+
+    def _boom(_sd: str, _pid: int, _g: int, *, force: bool) -> StopOutcome:
+        raise RuntimeError("stop exploded")
+
+    monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
+    monkeypatch.setattr(cli_mod, "stop_session", _boom)
+    monkeypatch.setattr(cli_mod.sys, "stderr", BrokenStderr())
+    cli_mod._teardown_run("/s", 0)

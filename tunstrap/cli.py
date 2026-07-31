@@ -335,16 +335,25 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals
 
 
 def _teardown_run(session_dir: str, grace_seconds: int) -> None:
-    """Stop the daemon for session_dir and clean up. Never raises, never uses stdout.
+    """Stop the daemon and clean up without propagating any exception or using stdout.
 
     Under the tofu-proxy pattern fd 1 belongs to the child, so every teardown
-    diagnostic goes to stderr and none of them changes the exit code: a child
-    that ran and returned 7 still exits 7.
+    diagnostic is attempted on stderr and none of them changes the exit code:
+    a child that ran and returned 7 still exits 7, even if teardown or its
+    diagnostic is interrupted.
     """
     try:
         _teardown_run_inner(session_dir, grace_seconds)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        sys.stderr.write(f"run: teardown failed: {type(exc).__name__}: {exc}\n")
+    except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        _warn(f"run: teardown failed: {type(exc).__name__}: {exc}\n")
+
+
+def _warn(message: str) -> None:
+    """Attempt a teardown diagnostic without allowing a closed stderr to escape."""
+    try:
+        sys.stderr.write(message)
+    except BaseException:  # noqa: BLE001, S110  # pylint: disable=broad-exception-caught
+        pass
 
 
 def _teardown_run_inner(session_dir: str, grace_seconds: int) -> None:
@@ -358,11 +367,11 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int) -> None:
         pass
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)
-        if not outcome.stopped:
-            sys.stderr.write(f"run: daemon not stopped cleanly: {outcome.reason}\n")
+        if not outcome.stopped and outcome.reason != "not found":
+            _warn(f"run: daemon not stopped cleanly: {outcome.reason}\n")
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
-        sys.stderr.write("run: could not remove: " + ", ".join(survivors) + "\n")
+        _warn("run: could not remove: " + ", ".join(survivors) + "\n")
 
 
 def _stop_outcome_json(outcome: StopOutcome) -> str:
