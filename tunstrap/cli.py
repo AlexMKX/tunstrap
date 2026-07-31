@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import click
 from pydantic import ValidationError
 
 from tunstrap import __version__
-from tunstrap.cli_input import build_single_node_schema
+from tunstrap.cli_input import build_schema_from_env, build_single_node_schema
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import format_exports, render_env
 from tunstrap.exceptions import (
@@ -27,6 +28,7 @@ from tunstrap.schemas import DaemonOptions, InputSchema, OutputSchema
 from tunstrap.session import SessionDir, SessionError, StopOutcome, stop_session
 
 _FC = TypeVar("_FC", bound=Callable[..., object])
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class _UsageExit64(click.Group):
@@ -250,14 +252,49 @@ def start_command(  # pylint: disable=too-many-arguments,too-many-branches,too-m
         sys.exit(4)
 
 
+def _split_run_args(
+    args: tuple[str, ...], *, input_env: str | None
+) -> tuple[str | None, list[str]]:
+    """Split ``run``'s single variadic into (CONNECTION, child command).
+
+    Click distributes post-``--`` tokens over the declared positionals in
+    order, so a separate CONNECTION positional binds the child's program name:
+    ``run --input-env X -- tofu plan`` yields ``connection='tofu'``. One
+    variadic split after parsing is the only surface that can express "no
+    connection" while keeping the documented ``run USER@HOST -- CMD`` form and
+    its integration tests working.
+    """
+    connection: str | None = None
+    rest: tuple[str, ...] = args
+    if input_env is None:
+        if not args:
+            raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
+        connection = args[0]
+        rest = args[1:]
+    cmd = list(rest)
+    # Click consumes the first `--` and only the first, so a doubled separator
+    # leaves a literal "--" at the head of the child command.
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        raise click.UsageError("run requires a command: tunstrap run USER@HOST ... -- CMD [ARGS]")
+    return connection, cmd
+
+
+def _validate_output_var(name: str) -> None:
+    """Reject an ``--output-var`` NAME that is not a valid env-var name."""
+    if not _ENV_NAME_RE.match(name):
+        raise click.UsageError(f"--output-var NAME must match [A-Za-z_][A-Za-z0-9_]*; got {name!r}")
+
+
 @main.command("run")
-@click.argument("connection", required=True)
 @_connection_options
+@click.option("--input-env", "input_env", default=None, metavar="VAR")
+@click.option("--output-var", "output_var", default=None, metavar="NAME")
 @click.option("--session-dir", "session_dir", default=None)
 @click.option("--grace-seconds", "grace_seconds", type=int, default=10, show_default=True)
-@click.argument("command", nargs=-1, type=click.UNPROCESSED)
-def run_command(  # pylint: disable=too-many-arguments,too-many-locals
-    connection: str,
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
     ssh_key: str | None,
     ssh_key_passphrase: str | None,
     ssh_password_stdin: bool,
@@ -267,31 +304,48 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals
     auto_stop_idle_seconds: int | None,
     materialize: bool,
     log_file: str | None,
+    input_env: str | None,
+    output_var: str | None,
     session_dir: str | None,
     grace_seconds: int,
-    command: tuple[str, ...],
+    args: tuple[str, ...],
 ) -> None:
-    """Open a tunnel, run CMD with TUNSTRAP_*/KUBECONFIG injected, then tear down."""
-    cmd = list(command)
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
-    if not cmd:
-        raise click.UsageError("run requires a command: tunstrap run USER@HOST ... -- CMD [ARGS]")
+    """Open a tunnel, run CMD with TUNSTRAP_*/KUBECONFIG injected, then tear down.
 
+    Input is either a USER@HOST[:PORT] positional plus flags, or the complete
+    InputSchema JSON in the environment variable named by --input-env. `--` is
+    mandatory whenever the child command or any of its arguments begins with
+    `-`.
+    """
+    connection, cmd = _split_run_args(args, input_env=input_env)
+    if output_var is not None:
+        _validate_output_var(output_var)
     try:
-        schema = _schema_from_flags(
-            connection,
-            ssh_key=ssh_key,
-            ssh_key_passphrase=ssh_key_passphrase,
-            ssh_password_stdin=ssh_password_stdin,
-            targets=targets,
-            kube=kube,
-            fetch=fetch,
-            auto_stop_idle_seconds=auto_stop_idle_seconds,
-            materialize=materialize,
-            log_file=log_file,
-            force_materialize=True,
-        )
+        if input_env is not None:
+            schema = build_schema_from_env(input_env)
+            # The one place `run` mutates the supplied schema. It is an
+            # invariant of the verb, not a flag precedence rule: render_env
+            # needs a materialized kubeconfig path (envrender.py:42-43), and
+            # an unmaterialized target would hand --output-var consumers
+            # `path: null` and the kubernetes/helm providers an empty
+            # config_path.
+            schema.daemon.materialize = True
+        elif connection is not None:
+            schema = _schema_from_flags(
+                connection,
+                ssh_key=ssh_key,
+                ssh_key_passphrase=ssh_key_passphrase,
+                ssh_password_stdin=ssh_password_stdin,
+                targets=targets,
+                kube=kube,
+                fetch=fetch,
+                auto_stop_idle_seconds=auto_stop_idle_seconds,
+                materialize=materialize,
+                log_file=log_file,
+                force_materialize=True,
+            )
+        else:  # pragma: no cover - _split_run_args already rejected this arity
+            raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
         message = spawn_daemon(schema, session_dir=session_dir)
     except TunstrapError as exc:
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
