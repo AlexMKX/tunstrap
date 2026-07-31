@@ -11,13 +11,21 @@ user is rejected.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
+import signal
 import tempfile
+import time
 from pathlib import Path
 
 from tunstrap.exceptions import SessionActive
-from tunstrap.identity import acquire_session_lock, release_session_lock
+from tunstrap.identity import (
+    IdentityCheckResult,
+    acquire_session_lock,
+    release_session_lock,
+    verify_session,
+)
 
 _TUNNEL_DATA = "tunnel-data"
 
@@ -167,3 +175,59 @@ class SessionDir:
         except OSError:
             return [str(path)]
         return [str(path)]
+
+
+@dataclasses.dataclass(frozen=True)
+class StopOutcome:
+    """What ``stop_session`` did, with no opinion about where to report it.
+
+    ``reason`` is ``None`` for the two success shapes and otherwise carries
+    ``stop``'s documented wording verbatim. ``forced`` is True only when the
+    daemon had to be SIGKILLed after the grace period.
+    """
+
+    stopped: bool
+    reason: str | None = None
+    forced: bool = False
+
+
+def stop_session(  # pylint: disable=too-many-return-statements
+    session_dir: str, pid: int, grace_seconds: int, *, force: bool
+) -> StopOutcome:
+    """Stop the daemon recorded for ``session_dir``. Performs the stop, writes nothing.
+
+    Split out of ``cli._kill_with_identity``, which wrote its result to stdout
+    on every branch. ``stop`` renders the same JSON from the returned outcome;
+    ``run`` prints nothing on success and stderr on failure, so a foreground
+    child keeps fd 1 to itself.
+    """
+    check = verify_session(session_dir, pid)
+    if check == IdentityCheckResult.not_found:
+        return StopOutcome(False, "not found")
+    if check == IdentityCheckResult.mismatch:
+        return StopOutcome(False, "identity mismatch")
+    if check == IdentityCheckResult.unavailable:
+        return StopOutcome(False, "identity check unavailable")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return StopOutcome(True)
+
+    deadline = time.monotonic() + max(0, grace_seconds)
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return StopOutcome(True)
+        time.sleep(0.5)
+
+    if not force:
+        return StopOutcome(False, "still alive")
+    if verify_session(session_dir, pid) != IdentityCheckResult.match:
+        return StopOutcome(False, "identity changed during grace")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return StopOutcome(True)
+    return StopOutcome(True, forced=True)
