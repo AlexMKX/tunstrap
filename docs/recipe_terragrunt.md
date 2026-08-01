@@ -300,7 +300,14 @@ stdout, a pipe consumed directly by the caller who already supplied the input,
 and without `--materialize` its `content_b64` is the only way to obtain the
 kubeconfig at all.
 
+### The input variable is scrubbed
 
+The variable named by `--input-env` — `TUNSTRAP_INPUT` in the shim above —
+holds the `InputSchema`, including `ssh_pkey`. `run` removes it from the child's
+environment before exec'ing `tofu`, because `tofu` passes its environment to
+every provider plugin, `external` data source and `local-exec` provisioner.
+Nothing in the module needs it; if you need a value from the payload downstream,
+export it explicitly rather than relying on inheritance.
 
 If you have more than one node in the payload, the scalar `TUNSTRAP_*` env and
 `KUBECONFIG` are not injected (they have no node dimension and would collide);

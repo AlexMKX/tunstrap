@@ -339,16 +339,30 @@ def _reject_flags_under_input_env(
 
 
 def _build_child_env(
-    output: OutputSchema, *, output_var: str | None, inject_scalars: bool
+    output: OutputSchema,
+    *,
+    output_var: str | None,
+    inject_scalars: bool,
+    input_env: str | None,
 ) -> dict[str, str]:
-    """Inherited env, plus scalars and the projected output JSON.
+    """Inherited env, scrubbed of the input payload, plus the exported channels.
 
     ``inject_scalars`` is decided pre-spawn from the input node count.
+
+    ``input_env`` names the variable holding the InputSchema, whose ``ssh_pkey``
+    is an SSH private key. ``run`` is the one component that knows this variable
+    is secret-bearing, and the child is ``tofu``, which hands its environment to
+    every provider plugin, ``external`` data source and ``local-exec``
+    provisioner — so it is removed here. The removal happens *before* anything is
+    injected, so an operator who passes the same NAME to both flags gets the
+    projected output rather than the untouched secret restored under it.
 
     ``output_var`` carries ``render_output_var``'s projection, not the whole
     envelope: its consumer persists the value into an OpenTofu plan file.
     """
     child_env = dict(os.environ)
+    if input_env is not None:
+        child_env.pop(input_env, None)
     if inject_scalars:
         child_env.update(render_env(output))
     if output_var is not None:
@@ -413,7 +427,12 @@ def _report_unexpected(exc: BaseException) -> None:
 
 
 def _run_child(
-    payload: Any, cmd: list[str], *, output_var: str | None, inject_scalars: bool
+    payload: Any,
+    cmd: list[str],
+    *,
+    output_var: str | None,
+    inject_scalars: bool,
+    input_env: str | None,
 ) -> int:
     """Validate the success payload, build the child env, run the child.
 
@@ -423,7 +442,9 @@ def _run_child(
     daemon, because the session path was recovered from that same payload.
     """
     out = OutputSchema.model_validate(payload)
-    child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
+    child_env = _build_child_env(
+        out, output_var=output_var, inject_scalars=inject_scalars, input_env=input_env
+    )
     # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
     # forwarded to the child while it runs in the foreground.
     # pylint: disable-next=consider-using-with
@@ -453,6 +474,7 @@ def _supervise_child(  # pylint: disable=too-many-arguments
     *,
     output_var: str | None,
     inject_scalars: bool,
+    input_env: str | None,
     session_dir: str,
     grace_seconds: int,
     minted_root: str | None,
@@ -471,7 +493,13 @@ def _supervise_child(  # pylint: disable=too-many-arguments
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             saved.append((signum, signal.getsignal(signum)))
-        return _run_child(payload, cmd, output_var=output_var, inject_scalars=inject_scalars)
+        return _run_child(
+            payload,
+            cmd,
+            output_var=output_var,
+            inject_scalars=inject_scalars,
+            input_env=input_env,
+        )
     except OSError as exc:
         sys.stderr.write(f"run: failed to launch command: {exc}\n")
         return 127
@@ -620,6 +648,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             cmd,
             output_var=output_var,
             inject_scalars=inject_scalars,
+            input_env=input_env,
             session_dir=session_path,
             grace_seconds=grace_seconds,
             minted_root=minted_root,

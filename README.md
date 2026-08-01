@@ -253,6 +253,11 @@ it drops `warnings`, `started_at`, and every `kube_targets` field except
 `path` and `endpoint`. `--output-var` is the structured channel — keyed by
 node, and lossless apart from the credential projection above.
 
+- The variable named by `--input-env` is **removed** from the child's
+  environment. It holds the `InputSchema`, whose `ssh_pkey` is an SSH private
+  key, and the child (`tofu`) would otherwise pass it to every provider
+  plugin, `external` data source and `local-exec` provisioner.
+
 - `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`, else exit `64`.
 - `NAME` may not collide with a variable `run` itself injects, else exit `64`.
   Collision with an unrelated inherited variable is a documented overwrite.
