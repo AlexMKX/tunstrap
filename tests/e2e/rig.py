@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -189,6 +190,14 @@ def write_fake_tofu(
     Deterministic by construction - one fixed line, no timestamps, no
     environment echo - because the stdout-purity assertion compares its bytes
     across two runs.
+
+    The line is emitted with ``printf '%s\\n'`` and shell-quoted via
+    ``shlex.quote``: the previous ``printf "{line}\\n"`` baked the line into a
+    printf *format string*, so a ``%`` was read as a directive, a ``"`` broke the
+    quoting, and a ``\\`` was an escape. Every prior call happened to pass a line
+    free of those bytes, so the latent defect never surfaced. The stdout-purity
+    task is the one that has to push adversarial bytes through the stream, so the
+    emitter was hardened rather than the test data tamed.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     marker_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +205,7 @@ def write_fake_tofu(
     script.write_text(
         "#!/bin/sh\n"
         f'printf "%s\\n" "$@" > "{marker_dir}/$$.argv"\n'
-        f'printf "{stdout_line}\\n"\n'
+        f"printf '%s\\n' {shlex.quote(stdout_line)}\n"
         f"exit {exit_code}\n"
     )
     script.chmod(0o755)

@@ -25,8 +25,10 @@ from tests.e2e.rig import (
     CONTROL_PLANE,
     HERE,
     kubectl_in_node,
+    recorded_argvs,
     require_tools,
     tunstrap_input_json,
+    write_fake_tofu,
 )
 
 pytestmark = [pytest.mark.e2e]
@@ -433,3 +435,40 @@ def test_kube_rig_reports_a_failed_compose_down(
 
     with pytest.warns(UserWarning, match="network kind is in use"), pytest.raises(StopIteration):
         next(generator)
+
+
+def test_write_fake_tofu_forwards_an_adversarial_stdout_line_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """write_fake_tofu emits percent, quote and backslash bytes unmangled.
+
+    The emitter once baked the line into a printf *format string*, so a percent
+    was read as a directive, a double-quote broke the shell quoting, and a
+    backslash was an escape. Three tasks passed without tripping it because every
+    line was tame (FAKE_TOFU_RAN, FAKE_TOFU_EXIT_42). The stdout-purity task is
+    exactly the one that has to push adversarial bytes, so the emitter was
+    switched to ``printf '%s\\n' <shlex.quote(line)>``.
+
+    Fails-when-broken: against the old emitter this line is a shell syntax error
+    (unbalanced quote), so the script exits non-zero with empty stdout and both
+    assertions fire. The exact-byte check (not "no percent left over") is what
+    closes the door on a future emitter that mangles some *other* byte: a novel
+    contaminant still changes the length or content and fails the equality.
+
+    Needs no cluster and no Docker - the fake script is run directly.
+    """
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    # One line carrying all three adversarial bytes at once.
+    line = 'pre%smid"post\\tail'
+    write_fake_tofu(bin_dir, marker_dir, exit_code=0, stdout_line=line)
+
+    result = subprocess.run(
+        [str(bin_dir / "tofu"), "ignored-argv"],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (line + "\n").encode()
+    # The fix touched the whole generated script; confirm argv recording survived.
+    assert recorded_argvs(marker_dir) == [["ignored-argv"]]
