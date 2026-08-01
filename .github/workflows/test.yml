@@ -101,6 +101,12 @@ jobs:
     # If this proves flaky, demote it with `continue-on-error: true` here rather
     # than by weakening any assertion in tests/e2e/.
     runs-on: ubuntu-latest
+    # Bounds a hung `kind create`, a stuck image pull, or a wedged provider
+    # download. The tier runs in ~100s locally; on a cold runner add the 1.45 GB
+    # kindest/node pull, provider downloads, ~35s cluster create and the per-test
+    # ~8s inits. 20 min is ~2x a realistic cold-peak and 18x under the 360m
+    # Actions default that a true hang would otherwise ride.
+    timeout-minutes: 20
     needs: unit
     env:
       # Turns every "tool missing" skip in tests/e2e/rig.py::skip_or_fail into a
@@ -159,8 +165,15 @@ jobs:
           assert counts["skipped"] == 0, "the e2e tier must never skip in CI"
           assert counts["failures"] == 0 and counts["errors"] == 0
           # Floor, not equality: adding tests must not require a CI edit, but
-          # losing them must fail. Raise this when the tier legitimately grows.
-          assert counts["tests"] >= 20, f"expected at least 20 e2e tests, ran {counts['tests']}"
+          # losing them must fail. Kept as a hand-set literal deliberately: a
+          # number derived by collecting the suite would be computed from the
+          # same files pytest runs, so a deleted module shrinks the collected
+          # count and the JUnit `tests` count in lockstep and the guard would
+          # stay GREEN for exactly the deletion it exists to catch (proven
+          # tautological). Only an independent literal anchors against deletion;
+          # at 24 == the current tier it catches the loss of any one test. Bump
+          # to the new total whenever the tier grows.
+          assert counts["tests"] >= 24, f"expected at least 24 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 
