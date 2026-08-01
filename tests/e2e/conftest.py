@@ -6,20 +6,25 @@ only.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
 import sys
+import time
 import warnings
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
+import asyncssh
 import pytest
 
 from tests.e2e.rig import (
     CLUSTER_NAME,
+    COMPOSE_FILE,
     CONTROL_PLANE,
     HERE,
+    IN_NODE_KUBECONFIG,
     NODE_IMAGE,
     kubectl_in_node,
     require_tools,
@@ -210,3 +215,92 @@ def node_kubeconfig(kind_cluster: str) -> Iterator[Path]:
                 "Remove it with:\n  sudo rm -rf tests/e2e/_kube",
                 stacklevel=1,
             )
+
+
+def _wait_for_ssh(port: int, private_pem: str, timeout: float = 90.0) -> None:
+    """Poll a real authenticated SSH exec until it succeeds.
+
+    A TCP connect is not sufficient: the listener accepts before
+    linuxserver/openssh-server has installed the authorized key, so a
+    connect-only probe returns ready while every later connection is rejected
+    with `Permission denied (publickey)`.
+    """
+    key = asyncssh.import_private_key(private_pem)
+
+    async def _probe() -> bool:
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                port=port,
+                username="tester",
+                client_keys=[key],
+                known_hosts=None,
+            ) as conn:
+                result = await conn.run("echo ssh-ready", check=True)
+                return "ssh-ready" in str(result.stdout)
+        except (OSError, asyncssh.Error):
+            return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if asyncio.run(_probe()):
+            return
+        time.sleep(1.0)
+    pytest.fail(
+        f"sshd-kube never accepted an authenticated SSH exec on 127.0.0.1:{port} "
+        f"within {timeout:.0f}s"
+    )
+
+
+@pytest.fixture(scope="session")
+def kube_rig(
+    e2e_ssh_keypair: tuple[str, str],
+    node_kubeconfig: Path,
+) -> Iterator[dict[str, Any]]:
+    """Bring up sshd-kube on kind's network and return its connection facts."""
+    # Deliberately not `del node_kubeconfig`. Requesting the fixture is what
+    # orders this one *after* the kubeconfig is on disk, and consuming its value
+    # keeps that ordering load-bearing rather than decorative: if a later edit
+    # dropped the parameter, compose would come up first, Docker would create
+    # the missing ./_kube bind-mount source as root:root, and node_kubeconfig
+    # would then fail with EACCES on this and every subsequent run. An
+    # "ordering only" argument is exactly the kind a refactor deletes without
+    # noticing, so it is asserted on instead.
+    if not node_kubeconfig.is_file():
+        pytest.fail(
+            f"{node_kubeconfig} must exist before compose comes up: Docker creates a "
+            "missing ./_kube bind-mount source as root-owned, which poisons that "
+            "directory for every later run"
+        )
+
+    private_pem, _public_line = e2e_ssh_keypair
+    subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait"],
+        check=True,
+    )
+    try:
+        published = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "port", "sshd-kube", "2222"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # The published port is random by design ("127.0.0.1::2222"), so it must
+        # be discovered, never assumed.
+        _host, port_str = published.stdout.strip().rsplit(":", 1)
+        port = int(port_str)
+        _wait_for_ssh(port, private_pem)
+        yield {
+            "host": "127.0.0.1",
+            "port": port,
+            "user": "tester",
+            "private_pem": private_pem,
+            "cluster_name": CLUSTER_NAME,
+            "control_plane": CONTROL_PLANE,
+            "kubeconfig_in_node_path": IN_NODE_KUBECONFIG,
+        }
+    finally:
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
+            check=False,
+        )

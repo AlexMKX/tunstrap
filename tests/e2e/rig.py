@@ -14,11 +14,12 @@ machine and fail in a clean CI checkout.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import pytest
 
@@ -83,4 +84,37 @@ def kubectl_in_node(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def tunstrap_input_json(rig: dict[str, Any], *, materialize: bool | None = None) -> str:
+    """The InputSchema the shim reads from TUNSTRAP_INPUT.
+
+    The node key is ``node`` and the kube-target key is ``k3s`` because
+    ``module/main.tf`` decodes ``connections.node.kube_targets.k3s.path``.
+
+    ``materialize`` is omitted by default, on purpose. ``run`` forces
+    ``daemon.materialize = True`` on an --input-env payload ("the one place run
+    mutates the supplied schema"), so leaving it out keeps that invariant
+    load-bearing for the whole tier: if the forcing were ever removed, ``path``
+    would come back null, ``config_path`` would be empty, and every provider
+    test would fail. ``start`` does *not* force it, so the one test that drives
+    ``start`` directly passes ``materialize=True`` explicitly.
+    """
+    daemon: dict[str, Any] = {"auto_stop_idle_seconds": 300}
+    if materialize is not None:
+        daemon["materialize"] = materialize
+    return json.dumps(
+        {
+            "nodes": {
+                "node": {
+                    "host": rig["host"],
+                    "port": rig["port"],
+                    "user": rig["user"],
+                    "ssh_pkey": rig["private_pem"],
+                    "kube_targets": {"k3s": {"kubeconfig_path": rig["kubeconfig_in_node_path"]}},
+                }
+            },
+            "daemon": daemon,
+        }
     )

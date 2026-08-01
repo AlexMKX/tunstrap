@@ -10,10 +10,17 @@ from __future__ import annotations
 import ast
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.e2e.rig import CLUSTER_NAME, CONTROL_PLANE, HERE, kubectl_in_node
+from tests.e2e.rig import (
+    CLUSTER_NAME,
+    COMPOSE_FILE,
+    CONTROL_PLANE,
+    HERE,
+    kubectl_in_node,
+)
 
 pytestmark = [pytest.mark.e2e]
 
@@ -167,3 +174,49 @@ def test_in_node_kubeconfig_has_the_shape_the_tunnel_flow_depends_on(
     assert "client-certificate-data:" in text
     assert "client-key-data:" in text
     assert node_kubeconfig.stat().st_mode & 0o777 == 0o644  # pin (see docstring)
+
+
+def test_rig_publishes_a_dynamic_port_and_accepts_the_generated_key(
+    kube_rig: dict[str, Any],
+) -> None:
+    """The rig hands back a live, authenticated SSH endpoint on a random port.
+
+    Assertion audit - what actually carries weight here:
+    - The strongest check is *implicit*: reaching the body at all means
+      `kube_rig` completed, and `kube_rig` does not yield until `_wait_for_ssh`
+      has run a real authenticated `echo ssh-ready` over SSH. A dead or
+      unauthenticated sshd errors this test in setup, before any assert runs.
+      Measured against a container holding a decoy key: the probe failed with
+      "never accepted an authenticated SSH exec ... within 6s" while a plain TCP
+      connect to the same port succeeded.
+    - `port != 2222`: BEHAVIOURAL, and the load-bearing assertion of the body.
+      Compose publishes "127.0.0.1::2222", i.e. a random host port, so a fixture
+      that assumed 2222 would connect to nothing - or to an unrelated local
+      service - and every downstream tunnelling test would fail with an opaque
+      SSH error. Observed ports across runs: 33161, 33162 (ephemeral range).
+    - `port > 1024`: BEHAVIOURAL (weak). Catches a parse that yielded 0 or a
+      negative from `docker compose port` output.
+    - `kubeconfig_in_node_path == "/etc/kube/admin.conf"`: BEHAVIOURAL as a
+      cross-file pin. The fixture yields the IN_NODE_KUBECONFIG constant while
+      this compares against the literal, so changing the constant without
+      changing docker-compose.yml's `./_kube:/etc/kube:ro` mount fails here.
+    - `host`, `user`, `control_plane`: PINS. The fixture yields those literals
+      and constants, so they cannot fail against a broken rig. Kept because they
+      are the exact tuple Task 2.5 and every Phase 4/5 tunnelling test consume.
+    - `docker compose ps` contains "sshd-kube": BEHAVIOURAL. Separates "port
+      discovery is wrong" from "the container is dead".
+    """
+    assert kube_rig["host"] == "127.0.0.1"
+    assert kube_rig["port"] > 1024
+    assert kube_rig["port"] != 2222
+    assert kube_rig["user"] == "tester"
+    assert kube_rig["control_plane"] == CONTROL_PLANE
+    assert kube_rig["kubeconfig_in_node_path"] == "/etc/kube/admin.conf"
+
+    listed = subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "--format", "{{.Name}}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "sshd-kube" in listed.stdout
