@@ -39,22 +39,25 @@ def test_rig_borrows_nothing_from_another_suite(e2e_ssh_keypair: tuple[str, str]
     # own condition, and rig.py's module docstring all name that path in prose -
     # and could therefore never pass. Import statements are the thing that
     # actually creates a code dependency, and they are unambiguous in an AST.
-    imported: set[str] = set()
+    foreign: set[str] = set()
     for module in sorted(HERE.glob("*.py")):
         for node in ast.walk(ast.parse(module.read_text())):
             if isinstance(node, ast.Import):
-                imported.update(alias.name for alias in node.names)
+                foreign.update(
+                    alias.name
+                    for alias in node.names
+                    if alias.name.startswith("tests") and not alias.name.startswith("tests.e2e")
+                )
             elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    imported.add("." * node.level + (node.module or ""))
-                elif node.module:
-                    imported.add(node.module)
-    foreign = sorted(
-        name
-        for name in imported
-        if name.split(".")[0] == "tests" and not name.startswith("tests.e2e")
-    )
-    assert foreign == [], f"e2e modules importing another suite: {foreign}"
+                if node.level >= 2:
+                    foreign.add("." * node.level + (node.module or ""))
+                elif (
+                    node.module
+                    and node.module.startswith("tests")
+                    and not node.module.startswith("tests.e2e")
+                ):
+                    foreign.add(node.module)
+    assert not foreign, f"e2e modules importing another suite: {sorted(foreign)}"
 
     # Every bind mount is relative to this directory. Matching on ":/" catches
     # any host:container pair, including one written as ../integration/_keys,
