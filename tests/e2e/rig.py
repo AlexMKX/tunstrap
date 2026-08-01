@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -118,3 +119,126 @@ def tunstrap_input_json(rig: dict[str, Any], *, materialize: bool | None = None)
             "daemon": daemon,
         }
     )
+
+
+def tofu_env(
+    module_dir: Path,
+    cache: Path,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """A hermetic environment for one tofu invocation.
+
+    KUBECONFIG is removed and HOME is redirected to a scratch directory on
+    purpose: an ambient kubeconfig, or an operator's ~/.kube/config, would let a
+    broken TF_VAR_tunstrap -> config_path chain still reach a cluster. That is
+    the silent pass this whole tier exists to prevent. This scrubs the *parent*
+    environment; the shim's own `env -u KUBECONFIG` scrubs the one `run` injects.
+    """
+    env = dict(os.environ)
+    env.pop("KUBECONFIG", None)
+    env.pop("TUNSTRAP_INPUT", None)
+    scratch_home = module_dir.parent / "home"
+    scratch_home.mkdir(exist_ok=True)
+    env["HOME"] = str(scratch_home)
+    env["TF_DATA_DIR"] = str(module_dir / ".terraform")
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache)
+    env["TF_IN_AUTOMATION"] = "1"
+    env["TF_INPUT"] = "0"
+    if extra:
+        env.update(extra)
+    return env
+
+
+def write_tofu_recorder(bin_dir: Path, dump_dir: Path) -> Path:
+    """Install a `tofu` on PATH that records argv + env, then execs the real one.
+
+    Recording *and* exec'ing - rather than faking - means the environment the
+    test asserts on is the environment of the invocation that actually talked to
+    the cluster, not a stand-in for it.
+
+    `env -0` is used rather than `env` because NUL separation is unambiguous for
+    values containing newlines; a line-oriented dump could be misread.
+    """
+    real = shutil.which("tofu")
+    if real is None:  # pragma: no cover - require_tools ran first
+        pytest.skip("e2e tier requires tofu on PATH")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "tofu"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'dump="{dump_dir}/$$"\n'
+        'printf "%s\\n" "$@" > "$dump.argv"\n'
+        'env -0 > "$dump.env0"\n'
+        f'exec "{real}" "$@"\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+def write_fake_tofu(
+    bin_dir: Path,
+    marker_dir: Path,
+    *,
+    exit_code: int,
+    stdout_line: str,
+) -> Path:
+    """Install a fake `tofu`: record argv, print one fixed line, exit `exit_code`.
+
+    Deterministic by construction - one fixed line, no timestamps, no
+    environment echo - because the stdout-purity assertion compares its bytes
+    across two runs.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "tofu"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{marker_dir}/$$.argv"\n'
+        f'printf "{stdout_line}\\n"\n'
+        f"exit {exit_code}\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def read_env_dump(path: Path) -> dict[str, str]:
+    """Parse an `env -0` dump. NUL-separated, so any value is safe."""
+    result: dict[str, str] = {}
+    for chunk in path.read_bytes().split(b"\0"):
+        if not chunk:
+            continue
+        key, _sep, value = chunk.partition(b"=")
+        result[key.decode()] = value.decode()
+    return result
+
+
+def collect_tofu_invocations(dump_dir: Path) -> list[tuple[list[str], dict[str, str]]]:
+    """Every recorded tofu invocation as (argv, env), oldest first."""
+    invocations: list[tuple[list[str], dict[str, str]]] = []
+    for env_path in sorted(dump_dir.glob("*.env0"), key=lambda p: p.stat().st_mtime):
+        argv = env_path.with_suffix(".argv").read_text().splitlines()
+        invocations.append((argv, read_env_dump(env_path)))
+    return invocations
+
+
+def recorded_argvs(marker_dir: Path) -> list[list[str]]:
+    """Every fake-tofu invocation's argv, oldest first."""
+    return [
+        path.read_text().splitlines()
+        for path in sorted(marker_dir.glob("*.argv"), key=lambda p: p.stat().st_mtime)
+    ]
+
+
+def wait_for_namespace_gone(name: str, timeout: float = 120.0) -> None:
+    """Block until the named Namespace is really gone, via the in-node oracle."""
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        probe = kubectl_in_node("get", "namespace", name, "-o", "name")
+        if probe.returncode != 0 and "not found" in probe.stderr.lower():
+            return
+        last = f"rc={probe.returncode} stdout={probe.stdout!r} stderr={probe.stderr!r}"
+        time.sleep(2.0)
+    pytest.fail(f"namespace {name!r} still present after {timeout:.0f}s: {last}")

@@ -343,3 +343,28 @@ def kube_rig(
                 f"sshd-kube stack may still be running: {removed.stderr.strip()}",
                 stacklevel=1,
             )
+
+
+@pytest.fixture(scope="session")
+def tofu_plugin_cache(e2e_preflight: None, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One shared provider download for the whole session.
+
+    Per-test module isolation multiplies the *warm* init (~1-2s), not the ~9s
+    download, so a handful of tests costs seconds rather than minutes.
+    """
+    del e2e_preflight  # ordering only
+    require_tools("tofu")
+    return tmp_path_factory.mktemp("tofu-plugin-cache")
+
+
+@pytest.fixture
+def tofu_module(tmp_path: Path) -> Path:
+    """A private copy of tests/e2e/module/ for one test.
+
+    TF_DATA_DIR and the state file live inside it (see rig.tofu_env), so no test
+    can share .terraform/ or terraform.tfstate with another, and none can pass
+    because of a neighbour's leftovers.
+    """
+    dest = tmp_path / "module"
+    shutil.copytree(HERE / "module", dest)
+    return dest
