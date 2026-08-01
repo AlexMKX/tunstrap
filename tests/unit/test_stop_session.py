@@ -8,10 +8,18 @@ Assertion: each identity/kill scenario yields the documented StopOutcome, and
 capsys shows empty out and err.
 Method: monkeypatch session.verify_session and session.os.kill; no real
 processes and no real signals, so this passes unchanged on macOS.
+
+These are the ``stop``-verb tests: the daemon is *not* a child of the stopping
+process, so ``no_child_pid`` below pins ``os.waitpid`` to ECHILD for the whole
+module and every case here exercises the signal-0 fallback in ``_has_exited``.
+The child topology — ``run``, where the daemon is a Popen child and its pid
+survives its exit as a zombie — cannot be modelled with a patched ``os.kill``
+at all, and lives in test_stop_session_child.py against a real process.
 """
 
 from __future__ import annotations
 
+import errno
 import signal
 from typing import Any
 
@@ -25,6 +33,21 @@ pytestmark = pytest.mark.unit
 
 PID = 4242
 SESSION = "/nonexistent/session"
+
+
+@pytest.fixture(autouse=True)
+def no_child_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PID is nobody's child here; keep that explicit rather than accidental.
+
+    Without this the real ``os.waitpid`` would run inside the test process,
+    which is both nondeterministic and, if PID ever were a live child of
+    pytest, actively harmful.
+    """
+
+    def _echild(_pid: int, _options: int) -> tuple[int, int]:
+        raise ChildProcessError(errno.ECHILD, "No child processes")
+
+    monkeypatch.setattr(session_mod.os, "waitpid", _echild)
 
 
 def _fixed_check(result: IdentityCheckResult) -> Any:
@@ -145,6 +168,94 @@ def test_forced_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(session_mod.os, "kill", lambda _p, s: calls.append(s))
     assert stop_session(SESSION, PID, 0, force=True) == StopOutcome(True, forced=True)
     assert calls == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_reaped_child_ends_the_poll_even_though_signal_zero_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The zombie case, stated as a unit: waitpid decides, signal 0 does not.
+
+    ``os.kill`` here never raises, which is precisely how an unreaped child
+    behaves — its pid answers signal 0 until somebody collects it. Revert
+    ``_has_exited`` to a bare ``os.kill(pid, 0)`` and this poll runs to the
+    deadline and escalates, so the outcome becomes ``StopOutcome(True,
+    forced=True)`` and the SIGKILL assertion fails too.
+    """
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    calls: list[int] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, s: calls.append(s))
+    monkeypatch.setattr(session_mod.os, "waitpid", lambda pid, _options: (pid, 0))
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+
+    assert stop_session(SESSION, PID, 10, force=True) == StopOutcome(True)
+    assert calls == [signal.SIGTERM], "a reaped child must not be escalated to SIGKILL"
+
+
+def test_still_running_child_keeps_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """waitpid returning 0 means "not yet", not "gone".
+
+    Fails if the reap is written as a bare ``os.waitpid(...)`` whose return
+    value is discarded: the very first poll would then report success and the
+    outcome would lose its ``forced=True``.
+    """
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monotonic_values = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+    calls: list[int] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, s: calls.append(s))
+    monkeypatch.setattr(session_mod.os, "waitpid", lambda _pid, _options: (0, 0))
+
+    assert stop_session(SESSION, PID, 1, force=True) == StopOutcome(True, forced=True)
+    assert calls == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_waitpid_failure_falls_back_instead_of_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waitpid error is absorbed and the signal-0 probe still runs.
+
+    stop_session raising would short-circuit ``_teardown_run_inner`` before it
+    removes tunnel-data, so ``run`` would leak the session on a kernel-level
+    oddity. Delete the ``except OSError`` arm and this test errors out with the
+    OSError instead of comparing an outcome; narrow the arm to
+    ``ChildProcessError`` and it errors the same way.
+    """
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monotonic_values = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+    calls: list[int] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, s: calls.append(s))
+
+    def _einval(_pid: int, _options: int) -> tuple[int, int]:
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr(session_mod.os, "waitpid", _einval)
+
+    assert stop_session(SESSION, PID, 1, force=True) == StopOutcome(True, forced=True)
+    assert calls == [signal.SIGTERM, 0, signal.SIGKILL], "the signal-0 probe must still run"
+
+
+def test_non_positive_pid_never_reaches_waitpid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A corrupt daemon.pid must not turn the reap into a process-group wait.
+
+    ``waitpid(0, ...)`` collects any child in the caller's process group, which
+    under ``run`` includes the foreground command whose exit status is the CLI's
+    return value. Drop the ``pid > 0`` guard and this records that call.
+    """
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monotonic_values = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
+    waited: list[int] = []
+    monkeypatch.setattr(
+        session_mod.os, "waitpid", lambda pid, _options: (waited.append(pid), (pid, 0))[1]
+    )
+
+    stop_session(SESSION, 0, 1, force=True)
+    assert waited == [], "waitpid must never be handed a pid that selects a process group"
 
 
 def test_stop_session_writes_nothing(

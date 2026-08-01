@@ -191,6 +191,45 @@ class StopOutcome:
     forced: bool = False
 
 
+def _has_exited(pid: int) -> bool:
+    """True once ``pid`` has terminated, reaping it first when it is our child.
+
+    ``os.kill(pid, 0)`` alone is not a liveness probe for a process we spawned.
+    ``run`` starts the daemon with ``subprocess.Popen`` (daemon.py:41) and never
+    waits on it, so the daemon is a *child* of the CLI: when it exits it becomes
+    a zombie, and the pid stays allocated — and keeps answering signal 0 — until
+    somebody reaps it. The grace poll below therefore ran to its full deadline on
+    every clean shutdown, then found the flock already released and reported
+    "identity changed during grace" for a daemon that had exited in milliseconds.
+
+    ``waitpid(WNOHANG)`` answers the question *and* frees the pid, so the
+    signal-0 probe becomes truthful again. Falling back to it on ``ECHILD``
+    also keeps the answer independent of whether ``subprocess``'s own
+    ``_active`` bookkeeping happened to reap the daemon first — that is CPython
+    internals, not a promise across the supported 3.10-3.13 range.
+
+    Only ``pid > 0`` reaches ``waitpid``: 0 and negatives select a process
+    *group*, which would let a corrupt ``daemon.pid`` reap ``run``'s foreground
+    child and steal its exit status.
+    """
+    if pid > 0:
+        try:
+            return os.waitpid(pid, os.WNOHANG)[0] == pid
+        except OSError:
+            # ECHILD: not, or no longer, our child — the `stop` verb runs in a
+            # process that never spawned the daemon, and there signal 0 is
+            # already correct because nobody holds the exit status open.
+            # Anything else means the reap is simply unavailable. Neither may
+            # escape: a raising stop_session short-circuits _teardown_run
+            # before it removes tunnel-data.
+            pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
 def stop_session(  # pylint: disable=too-many-return-statements
     session_dir: str, pid: int, grace_seconds: int, *, force: bool
 ) -> StopOutcome:
@@ -216,9 +255,7 @@ def stop_session(  # pylint: disable=too-many-return-statements
 
     deadline = time.monotonic() + max(0, grace_seconds)
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if _has_exited(pid):
             return StopOutcome(True)
         time.sleep(0.5)
 

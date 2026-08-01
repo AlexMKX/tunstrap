@@ -34,12 +34,14 @@ Method: the installed console script as a subprocess, forwarding through
 `sshd-bastion` -- the only rig service with AllowTcpForwarding enabled and a
 route to the internal `target-1`.
 
-Note: no assertion on clean stderr for the success paths. Every successful run
-against a live daemon currently spends the full grace window and then writes
-`run: daemon not stopped cleanly: identity changed during grace` to stderr.
-That is pre-existing (the same loop and string are at the branch base
-a4f086d), it is on stderr so it does not threaten this invariant, and it is
-why these tests take ~10s each.
+Note: these tests assert on stdout only, except where a diagnostic is the point
+(the tampered-identity case at the bottom). That a successful run also leaves
+stderr *empty* is a separate invariant and is asserted in
+test_run_teardown_latency.py. An earlier version of this note recorded the
+opposite -- that every successful run burned the full grace window and then
+wrote `run: daemon not stopped cleanly: identity changed during grace`, which
+is why these tests used to take ~10s each. That was the unreaped-zombie defect
+in the grace poll, since fixed in session.py (`_has_exited`).
 """
 
 from __future__ import annotations
