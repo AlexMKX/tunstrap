@@ -138,9 +138,11 @@ jobs:
         with:
           tofu_version: 1.12.5
           # MANDATORY. The action's default wrapper replaces `tofu` on PATH with
-          # a script that adds GitHub annotations to stdout, which would make
-          # test_shim.py's byte-equality assertion compare tofu's output against
-          # an annotated copy of it.
+          # a script that adds GitHub annotations to real tofu's output, and this
+          # tier asserts on that output. The real-tofu path lives in
+          # test_tofu_providers.py (init/plan/apply/destroy call `tofu` directly,
+          # or a recorder that execs it); test_shim.py is unaffected because it
+          # puts a fake `tofu` first on PATH, which shadows any wrapper.
           tofu_wrapper: false
       - run: docker compose version
       - name: pytest (e2e)

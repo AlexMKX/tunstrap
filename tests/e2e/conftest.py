@@ -345,10 +345,22 @@ def kube_rig(
 
 @pytest.fixture(scope="session")
 def tofu_plugin_cache(e2e_preflight: None, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """One shared provider download for the whole session.
+    """One shared ``TF_PLUGIN_CACHE_DIR`` for the whole session.
 
-    Per-test module isolation multiplies the *warm* init (~1-2s), not the ~9s
-    download, so a handful of tests costs seconds rather than minutes.
+    Measured twice (Task 3.3 and 6.3): cold init 7.65 s; warm cache *without* a
+    lock file 8.17 / 8.21 / 8.27 s; warm cache *with* a ``.terraform.lock.hcl``
+    0.226 s. Warm inits are marginally *slower* than cold, not faster. The
+    dominant cost is registry version resolution
+    (``Finding hashicorp/helm versions matching "~> 2.17"``), which reruns on
+    every init because the module ships no ``.terraform.lock.hcl``; the cache
+    removes only the download, which is not the bottleneck here.
+
+    The cache does NOT buy the init-time win the old docstring claimed. It is
+    kept as standard hygiene: it is the documented mechanism for avoiding
+    redundant provider downloads, it costs nothing (a session temp dir), and the
+    per-test download it removes is real even if locally it is lost in noise.
+    The actual init-time lever is a committed ``.terraform.lock.hcl``, which is
+    deliberately absent so provider resolution keeps floating.
     """
     del e2e_preflight  # ordering only
     require_tools("tofu")

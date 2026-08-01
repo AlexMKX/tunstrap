@@ -40,7 +40,9 @@ Defined in `tests/integration/conftest.py`:
   invocations so the suite teardown can stop them by `--session-dir`.
 
 Defined in `tests/e2e/conftest.py` (constants and helpers live in
-`tests/e2e/rig.py`, which the tests import from — never from `conftest`):
+`tests/e2e/rig.py`, the intended import surface; `conftest.py` holds fixtures.
+A few white-box checks in `test_rig.py` import `conftest` directly to exercise
+fixture internals, but the rest read from `rig`):
 
 - `e2e_preflight` — session-scoped; requires Linux and `tunstrap` on PATH. A
   missing `tunstrap` is a hard **failure**, not a skip: it means the venv is not
@@ -81,5 +83,13 @@ Defined in `tests/e2e/conftest.py` (constants and helpers live in
   the `kubernetes` and `helm` providers from `registry.opentofu.org` (~9s). That
   is the *runner's* network and has nothing to do with the tunnel.
 - No `helm` binary. The Terraform `helm` provider links the Helm v3 Go SDK.
-- Budget ~2.5-3 minutes for a full `pytest tests/e2e -m e2e` run, of which
-  ~90s is cluster and container setup.
+- Budget ~2.5-3 minutes for a full `pytest tests/e2e -m e2e` run once the
+  `kindest/node` image is local, of which ~90s is cluster and container setup.
+  A first run additionally pulls `kindest/node:v1.34.0` (~1.45 GB).
+- The documented local command does **not** set `TUNSTRAP_E2E_REQUIRE_ALL`. The
+  e2e CI job sets it to `1`, which turns every "tool missing" skip in
+  `tests/e2e/rig.py::skip_or_fail` into a **failure** — CI installs every tool
+  itself, so a skip there means the job reports green while most of the tier
+  never ran. Locally a missing `kind`/`tofu`/`kubectl` is therefore a *skip*,
+  not a failure: a green local run with skips is not full coverage. To mirror
+  CI, `export TUNSTRAP_E2E_REQUIRE_ALL=1` before running.
