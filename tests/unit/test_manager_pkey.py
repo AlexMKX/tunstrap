@@ -11,9 +11,9 @@ from __future__ import annotations
 import asyncssh
 import pytest
 
+from tests.unit.conftest import make_node
 from tunstrap.schemas import InputSchema
 from tunstrap.ssh import _load_client_keys
-from tests.unit.conftest import make_node
 
 pytestmark = pytest.mark.unit
 

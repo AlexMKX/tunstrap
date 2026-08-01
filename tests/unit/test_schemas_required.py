@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from tunstrap.schemas import InputSchema
 from tests.unit.conftest import make_node
+from tunstrap.schemas import InputSchema
 
 pytestmark = pytest.mark.unit
 

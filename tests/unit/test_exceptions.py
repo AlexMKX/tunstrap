@@ -11,11 +11,11 @@ import pytest
 
 from tunstrap.exceptions import (
     DaemonError,
-    SessionActive,
-    TunstrapError,
     RequiredTunnelFailure,
     SchemaValidationError,
+    SessionActive,
     TunnelStartupError,
+    TunstrapError,
     exit_code_for,
 )
 

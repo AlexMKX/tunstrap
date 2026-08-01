@@ -1,6 +1,7 @@
 # tests/unit/test_cli_input.py
 import pytest
-from tunstrap.cli_input import parse_endpoint, parse_named, build_single_node_schema
+
+from tunstrap.cli_input import build_single_node_schema, parse_endpoint, parse_named
 from tunstrap.exceptions import SchemaValidationError
 from tunstrap.schemas import DaemonOptions
 

@@ -62,7 +62,7 @@ exclude = ["docs/**/*.md"]
 # Test fixtures deliberately model process failures, legacy annotations, and
 # naive certificates; keep test code unchanged while retaining these rules in
 # production modules.
-"tests/**/*.py" = ["DTZ001", "I001", "PLW1510", "PYI034", "PYI036", "RUF012", "RUF059", "UP024", "UP035", "UP037"]
+"tests/**/*.py" = ["DTZ001", "PLW1510", "PYI034", "PYI036", "RUF012", "RUF059", "UP024", "UP035", "UP037"]
 # Coverage instrumentation is deliberately fail-open: startup must continue
 # even when the optional coverage bootstrap fails.
 "sitecustomize.py" = ["S110"]

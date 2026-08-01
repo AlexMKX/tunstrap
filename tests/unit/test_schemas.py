@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from tests.unit.conftest import make_node
 from tunstrap.schemas import (
     DaemonOptions,
     InputSchema,
@@ -19,7 +20,6 @@ from tunstrap.schemas import (
     SSHOptions,
     TunnelWarning,
 )
-from tests.unit.conftest import make_node
 
 pytestmark = pytest.mark.unit
 
