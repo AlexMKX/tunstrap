@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests.e2e.rig import (
+    CONTROL_SHIM,
     SHIM,
     collect_tofu_invocations,
     kubectl_in_node,
@@ -165,3 +166,54 @@ def test_apply_creates_real_objects_through_the_tunnel_and_destroy_removes_them(
     assert destroyed.returncode == 0, destroyed.stdout + destroyed.stderr
     assert "Destroy complete!" in destroyed.stdout
     wait_for_namespace_gone("tunstrap-e2e")
+
+
+def test_apply_without_output_var_fails_even_with_the_tunnel_up(
+    kube_rig: dict[str, Any],
+    tofu_module: Path,
+    tofu_plugin_cache: Path,
+) -> None:
+    """Negative control: the decoded config_path is the ONLY route to the cluster."""
+    env = tofu_env(
+        tofu_module,
+        tofu_plugin_cache,
+        extra={"TUNSTRAP_INPUT": tunstrap_input_json(kube_rig)},
+    )
+
+    init = subprocess.run(
+        [str(CONTROL_SHIM), "init", "-input=false"],
+        cwd=tofu_module,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    applied = subprocess.run(
+        [str(CONTROL_SHIM), "apply", "-auto-approve", "-input=false"],
+        cwd=tofu_module,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = applied.stdout + applied.stderr
+    success_msg = (
+        "apply SUCCEEDED without TF_VAR_tunstrap: something other than the "
+        "decoded config_path is reaching the cluster, and every positive "
+        "assertion in this tier proves nothing.\n" + combined
+    )
+    assert applied.returncode != 0, success_msg
+    assert "127.0.0.1:0" in combined, combined
+
+    # Nothing was created.
+    namespace = kubectl_in_node("get", "namespace", "tunstrap-e2e", "-o", "name")
+    assert namespace.returncode != 0
+    assert "not found" in namespace.stderr.lower()
+
+    # The cluster was alive the whole time, so the failure above is
+    # attributable to the missing variable rather than to a dead rig.
+    health = kubectl_in_node("get", "--raw", "/healthz")
+    assert health.returncode == 0, health.stderr
+    assert health.stdout.strip() == "ok"
