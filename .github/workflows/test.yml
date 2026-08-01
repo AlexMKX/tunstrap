@@ -84,6 +84,86 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  e2e:
+    # Real kind cluster + real OpenTofu providers through a real tunnel.
+    #
+    # A separate job, not part of `integration`: the integration marker's
+    # contract is "docker compose alone", while this needs kind, tofu, kubectl,
+    # a 1.45 GB node image and an external Docker network. Folding it in would
+    # break that contract and make every integration run pay ~90s of cluster
+    # setup.
+    #
+    # It produces NO coverage artifact and is deliberately absent from the
+    # `coverage` job's combine: that gate downloads exactly two artifacts and
+    # enforces --fail-under=80, and a third, slowest, most environment-sensitive
+    # input would let a cluster flake take the coverage gate down with it.
+    #
+    # If this proves flaky, demote it with `continue-on-error: true` here rather
+    # than by weakening any assertion in tests/e2e/.
+    runs-on: ubuntu-latest
+    needs: unit
+    env:
+      # Turns every "tool missing" skip in tests/e2e/rig.py::skip_or_fail into a
+      # failure. Without it a runner that lost `kind` between the install step
+      # and the test step would report a green job with most of the tier
+      # skipped - a cluster tier that silently stops running is worse than none.
+      TUNSTRAP_E2E_REQUIRE_ALL: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: install kind
+        run: |
+          curl -fsSL -o ./kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: install kubectl
+        # Matched to kindest/node:v1.34.0, which tests/e2e/rig.py pins.
+        run: |
+          curl -fsSL -o ./kubectl https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kubectl version --client
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.5
+          # MANDATORY. The action's default wrapper replaces `tofu` on PATH with
+          # a script that adds GitHub annotations to stdout, which would make
+          # test_shim.py's byte-equality assertion compare tofu's output against
+          # an annotated copy of it.
+          tofu_wrapper: false
+      - run: docker compose version
+      - name: pytest (e2e)
+        run: pytest tests/e2e -m e2e -v --junitxml=e2e-results.xml
+      - name: require the whole tier to have run
+        # Second, independent guard. TUNSTRAP_E2E_REQUIRE_ALL covers a missing
+        # tool; this covers everything else that can quietly shrink the tier -
+        # a stray @pytest.mark.skip, a collection error swallowed by -k, a
+        # deleted module. stdlib only, exact numbers, no log scraping.
+        if: always()
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          # pytest writes <testsuites><testsuite .../></testsuites>; accept both
+          # shapes so a pytest change cannot make this silently read zeros.
+          root = ET.parse("e2e-results.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None, "no <testsuite> element in the JUnit report"
+          counts = {k: int(suite.get(k, 0)) for k in ("tests", "skipped", "failures", "errors")}
+          print(counts)
+          assert counts["skipped"] == 0, "the e2e tier must never skip in CI"
+          assert counts["failures"] == 0 and counts["errors"] == 0
+          # Floor, not equality: adding tests must not require a CI edit, but
+          # losing them must fail. Raise this when the tier legitimately grows.
+          assert counts["tests"] >= 20, f"expected at least 20 e2e tests, ran {counts['tests']}"
+          print("e2e tier ran in full")
+          PY
+
   coverage:
     runs-on: ubuntu-latest
     needs: integration
