@@ -10,10 +10,17 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.e2e.rig import CONTROL_SHIM, SHIM, recorded_argvs, write_fake_tofu
+from tests.e2e.rig import (
+    CONTROL_SHIM,
+    SHIM,
+    recorded_argvs,
+    tunstrap_input_json,
+    write_fake_tofu,
+)
 
 pytestmark = [pytest.mark.e2e]
 
@@ -127,3 +134,32 @@ def test_unset_payload_passes_through(e2e_preflight: None, tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == "FAKE_TOFU_RAN\n"
     assert recorded_argvs(marker_dir) == [["plan"]]
+
+
+def test_child_exit_code_propagates_verbatim(kube_rig: dict[str, Any], tmp_path: Path) -> None:
+    """A child exiting 42 makes the shim exit 42, and the child provably ran."""
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    # 42 is outside tunstrap's reserved set (1, 2, 3, 4, 64), distinct from the
+    # launch-failure code 127, and below the 128+N band _run_child maps a
+    # signalled child into - so no tunstrap path can produce it by accident.
+    # "Non-zero" would prove nothing: tunnel failure, usage error and provider
+    # failure are all non-zero and most never run the child at all.
+    write_fake_tofu(bin_dir, marker_dir, exit_code=42, stdout_line="FAKE_TOFU_EXIT_42")
+    env = _shim_env(bin_dir)
+    env["TUNSTRAP_INPUT"] = tunstrap_input_json(kube_rig)
+
+    result = subprocess.run(
+        [str(SHIM), "apply"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Bound to a name rather than written inline: black and ruff format
+    # disagree about where to break `assert <cond>, <long message>`, and both
+    # are CI gates. A named message sidesteps the divergence entirely.
+    detail = f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.returncode == 42, detail
+    assert result.stdout == "FAKE_TOFU_EXIT_42\n"
+    assert recorded_argvs(marker_dir) == [["apply"]]
