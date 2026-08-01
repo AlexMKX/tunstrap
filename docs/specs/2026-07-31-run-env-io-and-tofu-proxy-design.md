@@ -793,8 +793,9 @@ kubeconfig path:
 
 ```hcl
 variable "tunstrap" {
-  type    = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 
 locals {

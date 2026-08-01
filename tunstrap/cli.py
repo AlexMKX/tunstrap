@@ -18,7 +18,12 @@ from pydantic import ValidationError
 from tunstrap import __version__
 from tunstrap.cli_input import build_schema_from_env, build_single_node_schema
 from tunstrap.daemon import spawn_daemon
-from tunstrap.envrender import format_exports, predicted_env_keys, render_env
+from tunstrap.envrender import (
+    format_exports,
+    predicted_env_keys,
+    render_env,
+    render_output_var,
+)
 from tunstrap.exceptions import (
     DaemonError,
     DaemonHandshakeError,
@@ -336,15 +341,18 @@ def _reject_flags_under_input_env(
 def _build_child_env(
     output: OutputSchema, *, output_var: str | None, inject_scalars: bool
 ) -> dict[str, str]:
-    """Inherited env, plus scalars and the optional complete output JSON.
+    """Inherited env, plus scalars and the projected output JSON.
 
     ``inject_scalars`` is decided pre-spawn from the input node count.
+
+    ``output_var`` carries ``render_output_var``'s projection, not the whole
+    envelope: its consumer persists the value into an OpenTofu plan file.
     """
     child_env = dict(os.environ)
     if inject_scalars:
         child_env.update(render_env(output))
     if output_var is not None:
-        child_env[output_var] = output.model_dump_json()
+        child_env[output_var] = render_output_var(output)
     return child_env
 
 

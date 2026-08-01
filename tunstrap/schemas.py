@@ -336,6 +336,42 @@ class KubeTargetOutput(BaseModel):
     path: str | None = None
 
 
+class RunKubeTarget(BaseModel):
+    """The credential-free projection of ``KubeTargetOutput`` for ``--output-var``.
+
+    ``run --output-var NAME`` puts this into the child's environment, and the
+    documented consumer binds NAME to a Terraform variable. OpenTofu persists
+    root-module variable values in the plan file, which pipelines archive, so
+    anything here must be assumed to be written to durable storage that is not
+    treated as a secret.
+
+    An **allow-list**, deliberately: ``extra="ignore"`` means a field later
+    added to ``KubeTargetOutput`` is dropped from this channel until someone
+    adds it here on purpose. A deny-list would leak each new field by default.
+
+    Dropped: ``client_key_data`` (a private key), ``content_b64`` (the whole
+    patched kubeconfig, which embeds that key) and ``client_certificate_data``
+    (useless for authentication without the key, but it discloses the
+    Kubernetes RBAC identity — CN is the username, O the groups).
+
+    Kept: the CA certificate, which is a published trust anchor rather than a
+    credential, and which a consumer authenticating by some other means (token,
+    exec plugin, service account) still needs to verify the endpoint.
+    ``run`` forces ``materialize=True`` (``cli.py``), so ``path`` is always a
+    real file and is the field the documented chain actually reads.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    cluster_name: str
+    context_name: str
+    local_port: int
+    endpoint: str
+    tls_server_name: str | None
+    certificate_authority_data: str
+    path: str | None = None
+
+
 class NodeOutput(BaseModel):
     """Per-node success payload: ports, fetched files, and kube targets."""
 

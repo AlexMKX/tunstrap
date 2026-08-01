@@ -1,11 +1,17 @@
-"""Render an OutputSchema into TUNSTRAP_* environment variables (#6/#5)."""
+"""Render an OutputSchema into the two channels ``run`` exports (#6/#5).
+
+The scalar channel (``render_env``) exports only hosts, ports and paths. The
+structured channel (``render_output_var``) exports a projection of the whole
+envelope with the kube credentials removed, because its consumer persists it.
+"""
 
 from __future__ import annotations
 
+import json
 import re
 
 from tunstrap.exceptions import MultiNodeEnvUnsupported
-from tunstrap.schemas import InputSchema, OutputSchema
+from tunstrap.schemas import InputSchema, OutputSchema, RunKubeTarget
 
 _NON_ALNUM = re.compile(r"[^A-Z0-9]")
 
@@ -52,6 +58,26 @@ def render_env(output: OutputSchema) -> dict[str, str]:
     if kube_paths:
         put("KUBECONFIG", ":".join(kube_paths))
     return env
+
+
+def render_output_var(output: OutputSchema) -> str:
+    """Serialise the envelope for ``--output-var``, minus the kube credentials.
+
+    The consumer binds this to a Terraform variable, and OpenTofu writes
+    root-module variable values into the plan file, so the private key and the
+    embedded-credential kubeconfig must never enter it. They are not needed:
+    ``run`` forces ``materialize=True``, so the chain reads ``path``.
+
+    The projection is applied per kube target through ``RunKubeTarget``, an
+    allow-list model — see its docstring for the field-by-field rationale.
+    """
+    payload = output.model_dump(mode="json")
+    for node in payload["connections"].values():
+        node["kube_targets"] = {
+            name: RunKubeTarget.model_validate(target).model_dump(mode="json")
+            for name, target in node["kube_targets"].items()
+        }
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def predicted_env_keys(schema: InputSchema) -> set[str]:

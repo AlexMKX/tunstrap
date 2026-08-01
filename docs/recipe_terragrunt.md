@@ -206,14 +206,15 @@ error against an inert loopback endpoint**, not a silent wrong result.
 
 ## The module side
 
-The shim hands the module the **complete** connection envelope as a JSON string
-in `TF_VAR_tunstrap`. The module decodes it and derives its provider
-`config_path` from it. This is the exact chain the e2e tier exists to prove:
+The shim hands the module the connection envelope as a JSON string in
+`TF_VAR_tunstrap`. The module decodes it and derives its provider `config_path`
+from it. This is the exact chain the e2e tier exists to prove:
 
 ```hcl
 variable "tunstrap" {
-  type    = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 
 locals {
@@ -265,6 +266,41 @@ reason if dropped:
    `run` always forces `daemon.materialize = true`, so `connections.*.kube_targets.*.path`
    is a real on-disk kubeconfig (mode 0600), patched so `server:` and
    `tls-server-name` already point at the tunnelled port. The provider just reads it.
+4. **`sensitive = true` on the variable.** Defence in depth, not the fix — it
+   suppresses rendering in plan/apply output and diagnostics, but it does *not*
+   keep the value out of the plan file. See the note below.
+
+### What is, and is not, in `TF_VAR_tunstrap`
+
+`run` **projects** the envelope before exporting it on this channel. Each
+`kube_targets` entry keeps:
+
+`cluster_name`, `context_name`, `local_port`, `endpoint`, `tls_server_name`,
+`certificate_authority_data`, `path`
+
+and **drops** `client_key_data` (a private key), `content_b64` (the whole
+patched kubeconfig, which embeds that key) and `client_certificate_data` (not a
+key, but it discloses the Kubernetes RBAC identity — CN is the username, O the
+groups).
+
+The reason is the consumer, not the transport: OpenTofu persists root-module
+variable values in the **plan file**, which pipelines routinely archive, and
+renders unmarked variables in diagnostics. `sensitive = true` fixes the
+rendering half only — the plan file still contains the value — so the material
+has to not be there in the first place.
+
+Nothing is lost. `run` always materializes, so `path` points at an on-disk
+kubeconfig (mode 0600) that contains every dropped field. A module that wants
+inline provider configuration rather than `config_path` still has
+`certificate_authority_data` (a published trust anchor, not a credential) plus
+`endpoint` and `tls_server_name`, and supplies its own client credentials.
+
+`tunstrap start` is **not** affected: it writes the complete envelope to
+stdout, a pipe consumed directly by the caller who already supplied the input,
+and without `--materialize` its `content_b64` is the only way to obtain the
+kubeconfig at all.
+
+
 
 If you have more than one node in the payload, the scalar `TUNSTRAP_*` env and
 `KUBECONFIG` are not injected (they have no node dimension and would collide);

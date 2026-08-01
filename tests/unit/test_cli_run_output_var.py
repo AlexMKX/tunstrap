@@ -1,8 +1,9 @@
 """`--output-var`: name validation, collision rejection, and injection.
 
 Validates: NAME must be a valid env-var name and must not collide with a key
-run already injects; the child receives the complete OutputSchema as JSON
-under NAME; multi-node results get NAME and no TUNSTRAP_* scalars.
+run already injects; the child receives the OutputSchema as JSON under NAME,
+projected to drop the kube credentials (see test_cli_run_secret_scrub.py);
+multi-node results get NAME and no TUNSTRAP_* scalars.
 Code: tunstrap/cli.py (_validate_output_var, _build_child_env)
 Assertion: exit codes and messages for the rejections; the child env contents
 for the injections.
@@ -218,10 +219,21 @@ def test_single_node_without_output_var_still_works(
     assert len(spawn) == 2
 
 
-def test_output_var_carries_complete_envelope(
+def test_output_var_carries_the_whole_envelope_minus_kube_credentials(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
 ) -> None:
-    """The child receives the whole OutputSchema, not a lossy projection."""
+    """The child receives every field except the kube target's credentials.
+
+    This test previously asserted the envelope was carried *complete*, which
+    is precisely the exposure fixed here: the value becomes a Terraform
+    variable and OpenTofu persists root-module variables in the plan file. The
+    lossless property is now deliberately false, and only for the three
+    credential fields — everything else must still survive, which is what the
+    whole-object comparison below pins.
+
+    The payload is non-default in every field, so a projection that collapsed a
+    dict to ``{}`` or dropped ``warnings`` still fails here.
+    """
     spawn[0]({"kind": "success", "payload": _RICH_PAYLOAD})
     monkeypatch.setenv(VAR, _payload())
     result = CliRunner().invoke(
@@ -229,25 +241,40 @@ def test_output_var_carries_complete_envelope(
     )
     assert result.exit_code == 0, result.stderr
     assert FakePopen.last_env is not None
-    decoded = OutputSchema.model_validate(json.loads(FakePopen.last_env["TF_VAR_t"]))
+    decoded = json.loads(FakePopen.last_env["TF_VAR_t"])
 
-    # Whole-object equality: any dropped, renamed or re-defaulted field fails here.
-    assert decoded == OutputSchema.model_validate(_RICH_PAYLOAD)
+    # Round-tripped through OutputSchema so defaulted fields (FetchedFile.error)
+    # are normalised on both sides; only kube_targets is then overridden.
+    expected = json.loads(OutputSchema.model_validate(_RICH_PAYLOAD).model_dump_json())
+    expected["connections"]["node"]["kube_targets"]["k3s"] = {
+        key: value
+        for key, value in _RICH_KUBE.items()
+        if key not in {"client_certificate_data", "client_key_data", "content_b64"}
+    }
+    # Whole-object equality: any *other* dropped, renamed or re-defaulted field
+    # fails here, so the projection cannot quietly widen.
+    assert decoded == expected
 
     # Restated field by field so the failure message names what was lost.
-    assert decoded.warnings[0].node == "edge"
-    assert decoded.warnings[0].error == "optional node refused the forward"
-    assert decoded.started_at == "2026-07-31T00:00:00Z"
-    assert decoded.pid == 99
-    assert decoded.session_dir == "/s"
-    kube = decoded.connections["node"].kube_targets["k3s"]
-    assert kube.tls_server_name == "probe-control-plane"
-    assert kube.certificate_authority_data == "Y2E="
-    assert kube.client_certificate_data == "Y2VydA=="
-    assert kube.client_key_data == "a2V5"
-    assert kube.content_b64 == "a3ViZWNvbmZpZw=="
-    assert kube.path == "/s/tunnel-data/node-k3s"
-    assert decoded.connections["node"].fetch_files["hosts"].sha256 == "ab" * 32
+    assert decoded["warnings"][0]["node"] == "edge"
+    assert decoded["warnings"][0]["error"] == "optional node refused the forward"
+    assert decoded["started_at"] == "2026-07-31T00:00:00Z"
+    assert decoded["pid"] == 99
+    assert decoded["session_dir"] == "/s"
+    kube = decoded["connections"]["node"]["kube_targets"]["k3s"]
+    assert kube["tls_server_name"] == "probe-control-plane"
+    assert kube["certificate_authority_data"] == "Y2E="
+    assert kube["path"] == "/s/tunnel-data/node-k3s"
+    assert kube["cluster_name"] == "probe-cluster"
+    assert kube["context_name"] == "probe-context"
+    assert kube["local_port"] == 41111
+    assert kube["endpoint"] == "https://127.0.0.1:41111"
+    assert decoded["connections"]["node"]["fetch_files"]["hosts"]["sha256"] == "ab" * 32
+
+    # The three fields the projection exists to remove.
+    assert "client_certificate_data" not in kube
+    assert "client_key_data" not in kube
+    assert "content_b64" not in kube
 
 
 def test_single_node_keeps_scalars_alongside_output_var(

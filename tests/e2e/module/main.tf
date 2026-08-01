@@ -9,9 +9,16 @@
 # recipe tells operators to write, so this module doubles as a regression test
 # for that recipe.
 
+# `run` projects the envelope before exporting it: the kube target's
+# client_key_data, client_certificate_data and content_b64 are dropped, so no
+# credential reaches this variable. `sensitive = true` is defence in depth for
+# what remains -- it suppresses rendering in plan/apply output and diagnostics.
+# It does NOT keep the value out of the plan file, which is why the projection,
+# not this flag, is the actual fix.
 variable "tunstrap" {
-  type    = string
-  default = ""
+  type      = string
+  default   = ""
+  sensitive = true
 }
 
 locals {
@@ -65,6 +72,14 @@ resource "helm_release" "probe" {
 # Read straight out of terraform.tfstate by the chain-integrity assertion and
 # compared against connections.node.kube_targets.k3s.path in the envelope, so a
 # hard-coded or fallback path cannot pass.
+#
+# nonsensitive() is required, not cosmetic: `sensitive = true` on var.tunstrap
+# taints everything derived from it, and OpenTofu refuses an output that
+# "refers to sensitive values". The kubeconfig *path* is a filename, not a
+# credential -- and the envelope no longer carries credentials at all -- so
+# unmarking it here is accurate. Any consumer that adds `sensitive = true` and
+# also outputs something derived from the variable will hit the same error;
+# this is the documented remedy (see docs/recipe_terragrunt.md).
 output "kubepath_used" {
-  value = local.kubepath
+  value = nonsensitive(local.kubepath)
 }

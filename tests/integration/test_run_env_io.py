@@ -1,10 +1,11 @@
 """`run --input-env` / `--output-var` against the real docker SSH rig.
 
 Validates: a complete InputSchema handed to run through the environment opens
-real tunnels; the child receives the full OutputSchema as JSON and the
-advertised endpoints actually accept connections; multi-node results carry
-every node and no ambiguous TUNSTRAP_* scalars; and the teardown removes the
-session.
+real tunnels; the child receives the OutputSchema as JSON (projected to drop
+the kube credentials — see tests/unit/test_cli_run_output_var_projection.py)
+and the advertised endpoints actually accept connections; multi-node results
+carry every node and no ambiguous TUNSTRAP_* scalars; and the teardown removes
+the session.
 
 Both nodes point at `sshd-bastion`: it is the only service in the rig with
 AllowTcpForwarding enabled and a route to the internal `target-1`, so it is

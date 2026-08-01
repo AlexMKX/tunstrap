@@ -229,9 +229,19 @@ schema.
 
 #### Structured output: `--output-var NAME`
 
-`--output-var NAME` puts the **complete** `OutputSchema`, JSON-encoded, into
-the child's environment under `NAME`, *alongside* the usual `TUNSTRAP_*`
-scalars rather than instead of them.
+`--output-var NAME` puts the `OutputSchema`, JSON-encoded, into the child's
+environment under `NAME`, *alongside* the usual `TUNSTRAP_*` scalars rather
+than instead of them.
+
+**The kube credentials are projected out of this channel.** Each
+`kube_targets` entry keeps `cluster_name`, `context_name`, `local_port`,
+`endpoint`, `tls_server_name`, `certificate_authority_data` and `path`, and
+drops `client_key_data`, `client_certificate_data` and `content_b64`. The
+documented consumer binds `NAME` to a Terraform variable, and OpenTofu
+persists root-module variable values in the plan file — which pipelines
+archive. Nothing is lost: `run` always materializes, so `path` is a real
+on-disk kubeconfig containing everything that was removed. `tunstrap start`
+is unaffected and still emits the complete envelope on stdout.
 
 ```bash
 tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
@@ -240,8 +250,8 @@ tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
 
 The scalar environment is lossy by construction: it is single-node only, and
 it drops `warnings`, `started_at`, and every `kube_targets` field except
-`path` and `endpoint`. `--output-var` is the lossless channel, and it is keyed
-by node.
+`path` and `endpoint`. `--output-var` is the structured channel — keyed by
+node, and lossless apart from the credential projection above.
 
 - `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`, else exit `64`.
 - `NAME` may not collide with a variable `run` itself injects, else exit `64`.
@@ -253,8 +263,9 @@ by node.
 - **More than one node without `--output-var`:** exit `1`
   (`MultiNodeEnvUnsupported`), decided before any daemon is started.
 
-> This is the flag the Terragrunt/OpenTofu recipe builds on — it puts the whole
-> connection envelope into `TF_VAR_tunstrap` for a module to decode. See
+> This is the flag the Terragrunt/OpenTofu recipe builds on — it puts the
+> credential-free connection envelope into `TF_VAR_tunstrap` for a module to
+> decode. See
 > [`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md).
 
 #### `run` never writes to stdout
