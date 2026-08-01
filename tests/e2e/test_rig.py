@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e.rig import HERE
+from tests.e2e.rig import CLUSTER_NAME, CONTROL_PLANE, HERE, kubectl_in_node
 
 pytestmark = [pytest.mark.e2e]
 
@@ -98,3 +98,23 @@ def test_generated_rig_paths_are_gitignored() -> None:
     assert "tests/e2e/_sshd_conf/allow_tcpfwd.conf" in tracked
     assert not [p for p in tracked if p.startswith("tests/e2e/_keys/")]
     assert not [p for p in tracked if p.startswith("tests/e2e/_kube/")]
+
+
+def test_cluster_node_is_ready_through_the_independent_oracle(kind_cluster: str) -> None:
+    """The in-node kubectl oracle reaches the API server without any tunnel."""
+    probe = kubectl_in_node("get", "nodes", "-o", "name")
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == f"node/{CONTROL_PLANE}"
+    assert kind_cluster == CLUSTER_NAME
+
+
+def test_in_node_kubeconfig_has_the_shape_the_tunnel_flow_depends_on(
+    node_kubeconfig: Path,
+) -> None:
+    """admin.conf names the control plane by DNS and embeds CA + client creds."""
+    text = node_kubeconfig.read_text()
+    assert f"server: https://{CONTROL_PLANE}:6443" in text
+    assert "certificate-authority-data:" in text
+    assert "client-certificate-data:" in text
+    assert "client-key-data:" in text
+    assert node_kubeconfig.stat().st_mode & 0o777 == 0o644

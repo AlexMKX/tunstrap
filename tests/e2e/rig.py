@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import NoReturn
 
@@ -59,3 +60,27 @@ def require_tools(*names: str) -> None:
     missing = [name for name in names if shutil.which(name) is None]
     if missing:
         skip_or_fail("e2e tier requires " + ", ".join(missing) + " on PATH")
+
+
+def kubectl_in_node(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run kubectl *inside* the kind control-plane container.
+
+    Deliberately an independent oracle. It does not traverse the tunnel, so a
+    broken tunnel can never make a read-back appear to succeed, and it uses the
+    version-matched kubectl shipped in the node image rather than whatever the
+    host happens to have installed.
+    """
+    return subprocess.run(
+        [
+            "docker",
+            "exec",
+            CONTROL_PLANE,
+            "kubectl",
+            "--kubeconfig",
+            "/etc/kubernetes/admin.conf",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
