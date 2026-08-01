@@ -188,10 +188,87 @@ tunstrap run root@edge1 \
 Everything after `--` is the child command and its arguments. `SIGINT` /
 `SIGTERM` are forwarded to the child.
 
+**`--` is mandatory** whenever the child command or any of its arguments
+begins with `-`. Without it Click parses those tokens as tunstrap's own
+options: `tunstrap run --input-env X tofu -version` fails with
+`No such option: '-v'`. Everything after `--` reaches the child verbatim,
+including flags spelled like tunstrap's own.
+
+#### Env input: `--input-env VAR`
+
+`run` can take the complete `InputSchema` as JSON from an environment
+variable instead of from a connection argument and flags. This is the only
+out-of-band input channel a foreground wrapper has: `run`'s child inherits
+stdin, so stdin is not available to `run` as a control channel.
+
+```bash
+TUNSTRAP_INPUT="$(cat payload.json)" \
+  tunstrap run --input-env TUNSTRAP_INPUT -- helm list
+```
+
+In this mode there is no `USER@HOST[:PORT]` argument — every token after `--`
+is the child command. The following are usage errors (exit `64`), because the
+payload's own `nodes` and `daemon` blocks are complete and authoritative and
+there must be exactly one place to look:
+
+- any connection flag: `--ssh-key`, `--ssh-key-passphrase`,
+  `--ssh-password-stdin`, `--target`, `--kube`, `--fetch`;
+- any daemon flag: `--auto-stop-idle-seconds` (use `daemon.auto_stop_idle_seconds`),
+  `--log-file` (use `daemon.log_file`), `--materialize` (redundant, see below).
+
+Payload problems are exit `1` with a `SchemaValidationError` envelope on
+**stderr**: the variable unset, empty or whitespace-only; its content not
+JSON; or the JSON not satisfying `InputSchema`. All of these are decided
+before any daemon is started.
+
+**`run` always materializes.** It overrides `daemon.materialize` to `true`
+even when the payload sets it to `false`. `KUBECONFIG` injection needs a real
+file on disk, and an unmaterialized kube target would give `--output-var`
+consumers `"path": null`. This is the one place `run` modifies the supplied
+schema.
+
+#### Structured output: `--output-var NAME`
+
+`--output-var NAME` puts the **complete** `OutputSchema`, JSON-encoded, into
+the child's environment under `NAME`, *alongside* the usual `TUNSTRAP_*`
+scalars rather than instead of them.
+
+```bash
+tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
+  -- tofu plan
+```
+
+The scalar environment is lossy by construction: it is single-node only, and
+it drops `warnings`, `started_at`, and every `kube_targets` field except
+`path` and `endpoint`. `--output-var` is the lossless channel, and it is keyed
+by node.
+
+- `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`, else exit `64`.
+- `NAME` may not collide with a variable `run` itself injects, else exit `64`.
+  Collision with an unrelated inherited variable is a documented overwrite.
+- **One node:** scalars and `KUBECONFIG` as usual, plus `NAME` if given.
+- **More than one node:** `NAME` only — no `TUNSTRAP_*` scalars, because
+  `TUNSTRAP_<TARGET>_*` has no node dimension and same-named targets across
+  nodes would collide.
+- **More than one node without `--output-var`:** exit `1`
+  (`MultiNodeEnvUnsupported`), decided before any daemon is started.
+
+#### `run` never writes to stdout
+
+After the child starts, `run` writes nothing to file descriptor 1 — stdout
+belongs exclusively to the child. Every tunstrap diagnostic, including
+teardown failures, goes to stderr, and a teardown failure never changes the
+exit code. (`tunstrap stop` is unaffected: its JSON line on stdout is still
+its documented contract.)
+
 **Exit codes (`run`):** the child's exit code wins on success. Before the
-child runs, `run` may exit with `2` (required tunnel failure), `3` (a live
-session already holds the requested `--session-dir`), or `4` (daemon error);
-`127` if the child binary cannot be launched.
+child runs, `run` may exit with `64` (usage error, including every row of the
+`--input-env` conflict matrix and an invalid or colliding `--output-var`),
+`1` (bad `--input-env` payload, or multi-node input without `--output-var`),
+`2` (required tunnel failure), `3` (a live session already holds the
+requested `--session-dir`), or `4` (daemon error). `127` if the child binary
+cannot be launched, and `4` for any unexpected failure after the tunnel came
+up — in which case the daemon has already been torn down.
 
 ## Input reference (`InputSchema`)
 
