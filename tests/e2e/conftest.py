@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Iterator
 
@@ -82,30 +83,44 @@ def e2e_ssh_keypair() -> tuple[str, str]:
 def kind_cluster(e2e_preflight: None) -> Iterator[str]:
     """Create `tunstrap-e2e` from a pinned node image; always delete it after."""
     del e2e_preflight  # ordering only
-    require_tools("docker", "kind", "kubectl")
+    # Deliberately not "kubectl": this tier never runs a host kubectl. The oracle
+    # runs the version-matched binary *inside* the node image via docker exec
+    # (see rig.kubectl_in_node), and `kind` shells out to no kubectl of its own.
+    # Requiring it here would skip locally - and, under
+    # TUNSTRAP_E2E_REQUIRE_ALL=1, fail CI - over a binary nothing uses. A later
+    # task that genuinely needs a host kubectl should require it where it uses it.
+    require_tools("docker", "kind")
 
-    # A crashed prior run can leave a half-configured cluster of this name, which
-    # would silently change every result. Delete first, unconditionally.
-    subprocess.run(
-        ["kind", "delete", "cluster", "--name", CLUSTER_NAME],
-        check=False,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "kind",
-            "create",
-            "cluster",
-            "--name",
-            CLUSTER_NAME,
-            "--image",
-            NODE_IMAGE,
-            "--wait",
-            "90s",
-        ],
-        check=True,
-    )
+    # `try` opens *before* the pre-delete, so the teardown covers cluster
+    # creation too. `kind` self-cleans when it exits non-zero itself, but a
+    # KeyboardInterrupt propagates straight out of subprocess.run - and Ctrl-C
+    # during a ~35s create is a routine developer action, not an edge case.
+    # Opened here rather than after the create, which would leave exactly that
+    # expensive window uncovered.
     try:
+        # A crashed prior run can leave a half-configured cluster of this name,
+        # which would silently change every result. Delete first,
+        # unconditionally. This also absorbs a cluster leaked by a SIGKILLed run,
+        # where no teardown can possibly have run.
+        subprocess.run(
+            ["kind", "delete", "cluster", "--name", CLUSTER_NAME],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "kind",
+                "create",
+                "cluster",
+                "--name",
+                CLUSTER_NAME,
+                "--image",
+                NODE_IMAGE,
+                "--wait",
+                "90s",
+            ],
+            check=True,
+        )
         ready = kubectl_in_node("get", "nodes", "-o", "name")
         if ready.returncode != 0 or ready.stdout.strip() != f"node/{CONTROL_PLANE}":
             pytest.fail(
@@ -114,10 +129,23 @@ def kind_cluster(e2e_preflight: None) -> Iterator[str]:
             )
         yield CLUSTER_NAME
     finally:
-        subprocess.run(
+        # Captured, not inherited: an uncaptured delete prints kind's progress
+        # over `-q` output. check=False because a teardown must not mask the
+        # failure that got us here - but a silent failed delete leaks ~1 GB, so
+        # it is reported rather than swallowed.
+        removed = subprocess.run(
             ["kind", "delete", "cluster", "--name", CLUSTER_NAME],
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if removed.returncode != 0:
+            warnings.warn(
+                f"failed to delete kind cluster {CLUSTER_NAME!r} "
+                f"(rc={removed.returncode}); it is still running and will consume "
+                f"~1 GB until removed: {removed.stderr.strip()}",
+                stacklevel=1,
+            )
 
 
 @pytest.fixture(scope="session")
@@ -134,22 +162,51 @@ def node_kubeconfig(kind_cluster: str) -> Iterator[Path]:
     del kind_cluster  # ordering only
     kube_dir = HERE / "_kube"
     kube_dir.mkdir(exist_ok=True)
-    dest = kube_dir / "admin.conf"
-    dumped = subprocess.run(
-        ["docker", "exec", CONTROL_PLANE, "cat", "/etc/kubernetes/admin.conf"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    if f"server: https://{CONTROL_PLANE}:6443" not in dumped.stdout:
+
+    # The Docker daemon creates a missing bind-mount source directory as root,
+    # and the compose rig declares `./_kube:/etc/kube:ro`. So on any machine
+    # where compose has ever come up before this fixture ran, `_kube` already
+    # exists owned by root: mkdir(exist_ok=True) succeeds silently and the write
+    # below dies with a bare EACCES that names no cause. Ordering this fixture
+    # ahead of compose-up avoids *creating* that state but cannot heal a machine
+    # that already has it, so the condition is detected here and reported with
+    # its remedy.
+    if not os.access(kube_dir, os.W_OK):
         pytest.fail(
-            "in-node kubeconfig does not name the control plane by DNS; the "
-            "forward target would be wrong. Got:\n" + dumped.stdout
+            f"{kube_dir} exists but is not writable by this user - it is almost "
+            "certainly root-owned, created by the Docker daemon for the "
+            "./_kube bind mount before this fixture ran. Remove it and re-run:\n"
+            "  sudo rm -rf tests/e2e/_kube"
         )
-    dest.write_text(dumped.stdout)
-    # 0644, not 0600: the unprivileged `tester` user inside sshd-kube reads it.
-    os.chmod(dest, 0o644)
+
+    dest = kube_dir / "admin.conf"
+    # The `try` covers the write, not just the yield. Previously the write sat
+    # outside it, so a failure there left `_kube` behind with no teardown armed.
     try:
+        dumped = subprocess.run(
+            ["docker", "exec", CONTROL_PLANE, "cat", "/etc/kubernetes/admin.conf"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        if f"server: https://{CONTROL_PLANE}:6443" not in dumped.stdout:
+            pytest.fail(
+                "in-node kubeconfig does not name the control plane by DNS; the "
+                "forward target would be wrong. Got:\n" + dumped.stdout
+            )
+        dest.write_text(dumped.stdout)
+        # 0644, not 0600: the unprivileged `tester` user inside sshd-kube reads it.
+        os.chmod(dest, 0o644)
         yield dest
     finally:
+        # ignore_errors so a teardown failure cannot mask a real one, but not
+        # silently: a `_kube` that survives is exactly the sticky root-owned
+        # state the guard above has to fail on next run.
         shutil.rmtree(kube_dir, ignore_errors=True)
+        if kube_dir.exists():
+            warnings.warn(
+                f"could not remove {kube_dir}; it likely holds root-owned "
+                "contents and will fail the next run's writability guard. "
+                "Remove it with:\n  sudo rm -rf tests/e2e/_kube",
+                stacklevel=1,
+            )

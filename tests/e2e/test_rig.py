@@ -104,20 +104,66 @@ def test_generated_rig_paths_are_gitignored() -> None:
 
 
 def test_cluster_node_is_ready_through_the_independent_oracle(kind_cluster: str) -> None:
-    """The in-node kubectl oracle reaches the API server without any tunnel."""
+    """The in-node kubectl oracle reaches the API server without any tunnel.
+
+    Assertion audit - what each line can actually catch:
+    - `returncode`/`stdout`: BEHAVIOURAL, but weakly so. Re-runs the oracle live,
+      so it catches a control plane that died between fixture setup and now, and
+      it catches `kindest/node` dropping the bundled kubectl - which would
+      silently disable this tier's only independent read-back path. It is weakly
+      self-referential about the *name*: CONTROL_PLANE is both the `docker exec`
+      target and the expected value, so a rename moves both sides together. What
+      survives is a real pin on kind's convention that the node name equals the
+      container name, which `kube_targets` depends on.
+    - `kind_cluster == CLUSTER_NAME`: PIN, not behavioural. The fixture yields
+      that constant, so this cannot fail against a broken cluster. Kept because
+      that name is also the SSH forward target and the expected tls_server_name,
+      so it documents the coupling at the point of use.
+    - the `wait` probe: BEHAVIOURAL, and the only line here that makes this
+      test's name true.
+    """
     probe = kubectl_in_node("get", "nodes", "-o", "name")
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.strip() == f"node/{CONTROL_PLANE}"
     assert kind_cluster == CLUSTER_NAME
 
+    # `get nodes -o name` prints the node whatever its condition, so nothing
+    # above distinguishes Ready from NotReady. Readiness is really enforced by
+    # `kind create --wait 90s` + check=True in the fixture; this asserts it
+    # directly so the test's name is earned rather than assumed. --timeout=0
+    # means "check once and do not wait", so a NotReady node fails immediately
+    # instead of hanging.
+    ready = kubectl_in_node("wait", "--for=condition=Ready", "node", "--all", "--timeout=0")
+    assert ready.returncode == 0, ready.stderr
+
 
 def test_in_node_kubeconfig_has_the_shape_the_tunnel_flow_depends_on(
     node_kubeconfig: Path,
 ) -> None:
-    """admin.conf names the control plane by DNS and embeds CA + client creds."""
+    """admin.conf names the control plane by DNS and embeds CA + client creds.
+
+    Assertion audit - two of these five are deliberate belt-and-braces, not
+    behavioural checks, and saying so is the point:
+    - `server:` line: PIN. The fixture already `pytest.fail`s on this exact
+      substring and then writes that same string to the file, so it is strictly
+      implied and cannot fire while the fixture is as it is. Kept as a
+      regression guard on the *fixture*: if someone later rewrites the file, or
+      drops the fixture's check, this catches it here where the dependency is
+      documented. The fixture's own failure message is the better diagnostic.
+    - mode 0644: PIN, for the same reason - the fixture chmods 0644
+      unconditionally with an absolute mode, so no fixture-produced file can
+      violate this. Kept because 0600 would break the unprivileged `tester` user
+      reading it over SSH, which is otherwise invisible until Task 2.4 fails
+      obscurely.
+    - the three `-data:` assertions: BEHAVIOURAL. Nothing in the fixture looks at
+      them, so they pin upstream kubeconfig content: if kind ever emitted
+      external credentials (an exec plugin, or a `client-key` path instead of
+      embedded data), `parse_kubeconfig` would raise and these fail first,
+      naming the reason.
+    """
     text = node_kubeconfig.read_text()
-    assert f"server: https://{CONTROL_PLANE}:6443" in text
+    assert f"server: https://{CONTROL_PLANE}:6443" in text  # pin (see docstring)
     assert "certificate-authority-data:" in text
     assert "client-certificate-data:" in text
     assert "client-key-data:" in text
-    assert node_kubeconfig.stat().st_mode & 0o777 == 0o644
+    assert node_kubeconfig.stat().st_mode & 0o777 == 0o644  # pin (see docstring)
