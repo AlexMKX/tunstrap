@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import ast
 import json
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.e2e import conftest
 from tests.e2e.rig import (
     CLUSTER_NAME,
     COMPOSE_FILE,
@@ -296,3 +300,136 @@ def test_tunnel_carries_real_kube_api_traffic(kube_rig: dict[str, Any], tmp_path
             text=True,
             check=False,
         )
+
+
+def test_ssh_readiness_bounds_each_attempt_and_honours_its_deadline(
+    e2e_ssh_keypair: tuple[str, str],
+) -> None:
+    """A stalled listener cannot make the readiness poll overrun its deadline.
+
+    Needs no cluster and no Docker. AsyncSSH's default login timeout is 120s -
+    longer than the probe's own 90s deadline - so an unbounded attempt against a
+    peer that accepts and then never speaks SSH blocks past the deadline
+    entirely, and the "within Ns" in the failure message becomes a false claim.
+
+    Fails-when-broken: without a per-attempt bound this takes ~120s for a 4s
+    deadline and the elapsed assertion fires. It cannot pass vacuously either -
+    if the probe wrongly reported success against a listener that never sent a
+    version banner, `pytest.raises` would fail instead.
+    """
+    private_pem, _public_line = e2e_ssh_keypair
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    # Closing a socket does not wake a thread already blocked in accept() on
+    # Linux, so the loop polls with a timeout and watches a stop flag instead -
+    # otherwise cleanup would sit out a full join timeout on every run.
+    listener.settimeout(0.25)
+    port = int(listener.getsockname()[1])
+    held: list[socket.socket] = []
+    stop = threading.Event()
+
+    def _accept_and_stay_silent() -> None:
+        while not stop.is_set():
+            try:
+                conn, _addr = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            # Deliberately never write an SSH version banner. This is the
+            # "listening but not speaking" peer that hangs a login.
+            held.append(conn)
+
+    accepter = threading.Thread(target=_accept_and_stay_silent, daemon=True)
+    accepter.start()
+
+    deadline_s = 4.0
+    try:
+        started = time.monotonic()
+        with pytest.raises(pytest.fail.Exception) as excinfo:
+            conftest._wait_for_ssh(port, private_pem, timeout=deadline_s)
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        accepter.join(timeout=5.0)
+        listener.close()
+        for conn in held:
+            conn.close()
+
+    assert f"127.0.0.1:{port}" in str(excinfo.value)
+    # The claim in the message must be true: it says "within 4s", so it must not
+    # have taken 120. Slack covers one in-flight attempt plus scheduling.
+    overran = f"readiness poll overran: claimed {deadline_s:.0f}s, took {elapsed:.1f}s"
+    assert elapsed < deadline_s + 5.0, overran
+
+
+def _kubeconfig_stub(tmp_path: Path) -> Path:
+    """A file that satisfies kube_rig's ordering guard without a real cluster."""
+    stub = tmp_path / "admin.conf"
+    stub.write_text("stub\n")
+    return stub
+
+
+def test_kube_rig_arms_its_teardown_before_compose_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compose up that half-starts and then fails must still be torn down.
+
+    Needs no cluster and no Docker: `subprocess.run` is replaced, so this
+    exercises the fixture's control flow directly.
+
+    Fails-when-broken: if `try` opens *after* `compose up`, the finally is never
+    armed, no `down` is issued, and the leaked stack survives the run. That is
+    the same defect the 2.3 review found in `kind_cluster`.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(cmd))
+        if "up" in cmd:
+            # Containers may already exist at this point - this is precisely the
+            # case where teardown matters.
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    generator = conftest.kube_rig.__wrapped__(("pem", "pub"), _kubeconfig_stub(tmp_path))
+    with pytest.raises(subprocess.CalledProcessError):
+        next(generator)
+
+    assert any("down" in call for call in calls), (
+        "compose up failed and no `compose down` followed - the teardown was "
+        f"never armed. Calls seen: {calls}"
+    )
+
+
+def test_kube_rig_reports_a_failed_compose_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A teardown that fails must be visible, not silent.
+
+    Fails-when-broken: with `check=False` and no inspection, a failed
+    `compose down` leaves the stack running and says nothing, so the next run
+    inherits a dirty rig with no clue why. `pytest.warns` reports DID NOT WARN.
+    """
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "port" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "127.0.0.1:12345\n", "")
+        if "down" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "error: network kind is in use")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(conftest, "_wait_for_ssh", lambda *a, **k: None)
+
+    generator = conftest.kube_rig.__wrapped__(("pem", "pub"), _kubeconfig_stub(tmp_path))
+    rig = next(generator)
+    assert rig["port"] == 12345  # discovered, not assumed
+
+    with pytest.warns(UserWarning, match="network kind is in use"), pytest.raises(StopIteration):
+        next(generator)

@@ -217,35 +217,58 @@ def node_kubeconfig(kind_cluster: str) -> Iterator[Path]:
             )
 
 
-def _wait_for_ssh(port: int, private_pem: str, timeout: float = 90.0) -> None:
+def _wait_for_ssh(
+    port: int,
+    private_pem: str,
+    timeout: float = 90.0,
+    attempt_timeout: float = 10.0,
+) -> None:
     """Poll a real authenticated SSH exec until it succeeds.
 
     A TCP connect is not sufficient: the listener accepts before
     linuxserver/openssh-server has installed the authorized key, so a
     connect-only probe returns ready while every later connection is rejected
     with `Permission denied (publickey)`.
+
+    Every attempt is bounded. AsyncSSH's default login timeout is 120s - longer
+    than this function's own 90s deadline - so a peer that accepts the
+    connection and then never sends a version banner would hang a single attempt
+    past the deadline, and the "within 90s" below would be a false claim. The
+    budget is the smaller of ``attempt_timeout`` and the time actually left, and
+    the retry sleep is clamped the same way, so the reported elapsed time is
+    true.
     """
     key = asyncssh.import_private_key(private_pem)
 
-    async def _probe() -> bool:
+    async def _probe(budget: float) -> bool:
         try:
-            async with asyncssh.connect(
-                "127.0.0.1",
-                port=port,
-                username="tester",
-                client_keys=[key],
-                known_hosts=None,
-            ) as conn:
-                result = await conn.run("echo ssh-ready", check=True)
-                return "ssh-ready" in str(result.stdout)
-        except (OSError, asyncssh.Error):
+            async with asyncio.timeout(budget):
+                async with asyncssh.connect(
+                    "127.0.0.1",
+                    port=port,
+                    username="tester",
+                    client_keys=[key],
+                    known_hosts=None,
+                    connect_timeout=budget,
+                    login_timeout=budget,
+                ) as conn:
+                    result = await conn.run("echo ssh-ready", check=True)
+                    return "ssh-ready" in str(result.stdout)
+        # TimeoutError covers both asyncio.timeout and asyncssh's own timeouts.
+        except (OSError, asyncssh.Error, TimeoutError):
             return False
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if asyncio.run(_probe()):
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if asyncio.run(_probe(min(attempt_timeout, remaining))):
             return
-        time.sleep(1.0)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(1.0, remaining))
     pytest.fail(
         f"sshd-kube never accepted an authenticated SSH exec on 127.0.0.1:{port} "
         f"within {timeout:.0f}s"
@@ -274,11 +297,15 @@ def kube_rig(
         )
 
     private_pem, _public_line = e2e_ssh_keypair
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait"],
-        check=True,
-    )
+    # `try` opens *before* `compose up`, for the same reason it opens before
+    # `kind create` in kind_cluster: `up` can create containers and then exit
+    # non-zero (an unhealthy --wait, a Ctrl-C mid-pull), and a finally armed
+    # only afterwards would never run, leaking the whole stack.
     try:
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait"],
+            check=True,
+        )
         published = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "port", "sshd-kube", "2222"],
             capture_output=True,
@@ -300,7 +327,19 @@ def kube_rig(
             "kubeconfig_in_node_path": IN_NODE_KUBECONFIG,
         }
     finally:
-        subprocess.run(
+        # Captured and inspected, matching kind_cluster's teardown: check=False
+        # so a teardown failure cannot mask the failure that got us here, but a
+        # silent one leaves containers and a volume behind for the next run to
+        # trip over, so a non-zero exit is reported rather than swallowed.
+        removed = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
             check=False,
+            capture_output=True,
+            text=True,
         )
+        if removed.returncode != 0:
+            warnings.warn(
+                f"`docker compose down -v` failed (rc={removed.returncode}); the "
+                f"sshd-kube stack may still be running: {removed.stderr.strip()}",
+                stacklevel=1,
+            )
