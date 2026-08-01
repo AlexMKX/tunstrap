@@ -88,12 +88,10 @@ def e2e_ssh_keypair() -> tuple[str, str]:
 def kind_cluster(e2e_preflight: None) -> Iterator[str]:
     """Create `tunstrap-e2e` from a pinned node image; always delete it after."""
     del e2e_preflight  # ordering only
-    # Deliberately not "kubectl": this tier never runs a host kubectl. The oracle
-    # runs the version-matched binary *inside* the node image via docker exec
-    # (see rig.kubectl_in_node), and `kind` shells out to no kubectl of its own.
-    # Requiring it here would skip locally - and, under
-    # TUNSTRAP_E2E_REQUIRE_ALL=1, fail CI - over a binary nothing uses. A later
-    # task that genuinely needs a host kubectl should require it where it uses it.
+    # Deliberately not "kubectl": this *fixture* needs none. The read-back oracle
+    # (rig.kubectl_in_node) runs the node image's own binary via docker exec, and
+    # `kind` itself shells out to no kubectl. The tier's read-through-the-tunnel
+    # gate in test_rig.py does use a host kubectl, and requires it where it uses it.
     require_tools("docker", "kind")
 
     # `try` opens *before* the pre-delete, so the teardown covers cluster
