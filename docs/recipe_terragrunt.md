@@ -300,6 +300,35 @@ stdout, a pipe consumed directly by the caller who already supplied the input,
 and without `--materialize` its `content_b64` is the only way to obtain the
 kubeconfig at all.
 
+### Fetched files are exported verbatim, not projected
+
+The projection above touches only `kube_targets`. Every `fetch_files` entry
+keeps its `content_b64` whole — the bytes the operator asked `--fetch` to
+pull, unchanged. That asymmetry is deliberate, not an oversight:
+
+- The kube credentials were **tunstrap's own** material, injected without the
+  operator asking, with a lossless on-disk alternative (`path`) already in the
+  envelope — dropping them cost nothing.
+- A fetched file is **opt-in twice**: the operator names it with `--fetch`
+  *and* elects `--output-var`, and it is the operator's own content under their
+  own classification. `FetchedFile` has no `path` (`schemas.py:292`), so
+  dropping `content_b64` would be a silent, unrecoverable breakage of any
+  consumer that reads it.
+
+Silently discarding data the operator explicitly requested is a worse failure
+mode than persisting data they asked to be exported. The same plan-file
+persistence applies, so **do not `--fetch` a secret while using `--output-var`**
+— tunstrap fetches into the envelope (`content_b64`), not onto disk, so the
+bytes would be persisted. Deliver a secret to the module by a path it reads
+directly, not through this channel. The intended end-state (materialize fetched
+files under the session dir at `0o600`, give `FetchedFile` a `path`, then drop
+`content_b64`) is recorded in the spec's "Out of scope".
+
+One other free-form string rides this channel unprojected: `warnings[*].error`.
+It is exception text from an optional-node or kube-target failure (`manager.py`,
+`kube.py`) — connection, auth or TLS messages, not key material — so it is left
+intact rather than truncated.
+
 ### The input variable is scrubbed
 
 The variable named by `--input-env` — `TUNSTRAP_INPUT` in the shim above —

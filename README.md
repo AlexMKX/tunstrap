@@ -251,7 +251,18 @@ tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
 The scalar environment is lossy by construction: it is single-node only, and
 it drops `warnings`, `started_at`, and every `kube_targets` field except
 `path` and `endpoint`. `--output-var` is the structured channel — keyed by
-node, and lossless apart from the credential projection above.
+node, and lossless apart from the kube-credential projection above.
+
+**Fetched-file content is exported verbatim, not projected.** The projection
+above removes only the kube credentials tunstrap itself injects. A fetched
+file is opt-in twice — the operator names it with `--fetch` and elects
+`--output-var` — and it is the operator's own content; `FetchedFile` has no
+on-disk `path`, so dropping it would silently lose data a consumer reads. The
+same plan-file persistence applies, so **do not `--fetch` a secret while using
+`--output-var`**: tunstrap fetches into the envelope (`content_b64`), not onto
+disk, so the bytes would be persisted. Deliver a secret to the module by a path
+it reads directly, not through this channel. The intended symmetry is tracked in
+the spec's "Out of scope".
 
 - The variable named by `--input-env` is **removed** from the child's
   environment. It holds the `InputSchema`, whose `ssh_pkey` is an SSH private
@@ -269,8 +280,8 @@ node, and lossless apart from the credential projection above.
   (`MultiNodeEnvUnsupported`), decided before any daemon is started.
 
 > This is the flag the Terragrunt/OpenTofu recipe builds on — it puts the
-> credential-free connection envelope into `TF_VAR_tunstrap` for a module to
-> decode. See
+> connection envelope (kube credentials projected out) into `TF_VAR_tunstrap`
+> for a module to decode. See
 > [`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md).
 
 #### `run` never writes to stdout

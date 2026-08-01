@@ -124,7 +124,7 @@ stdin path verbatim (`cli.py:194-211`), with the same three
 
 ### Addition 2 — `--output-var NAME`
 
-Inject the complete `OutputSchema`, JSON-encoded, into the child's environment
+Inject the `OutputSchema`, JSON-encoded, into the child's environment
 under `NAME`, alongside (not instead of) the existing scalar `TUNSTRAP_*` set.
 
 ```
@@ -134,10 +134,13 @@ tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap -- CMD
 Generic framing: *give the child the structure, not a flattened projection of
 one node*. The scalar env is lossy by construction — single-node
 (`envrender.py:19-20`), and it drops `warnings`, `started_at` and every
-`kube_targets` field except `path`/`endpoint`. `--output-var` is the lossless
+`kube_targets` field except `path`/`endpoint`. `--output-var` is the structured
 channel; consumers wanting structure parse JSON, consumers wanting `KUBECONFIG`
-keep the scalars. Value = the same JSON bytes `start` writes to stdout on
-success (`cli.py:219`), i.e. `OutputSchema.model_dump_json()`.
+keep the scalars. It is **not** byte-identical to `start`'s stdout: the kube
+credentials are projected out before export (`render_output_var`, not
+`OutputSchema.model_dump_json()`), and `fetch_files[*].content_b64` passes
+through verbatim — see "Out of scope" and `docs/recipe_terragrunt.md`. `start`
+stdout is unchanged and still writes the complete envelope.
 
 `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`, else usage error; `NAME` colliding
 with a `render_env` key is a usage error too, mirroring the collision discipline
@@ -1405,3 +1408,14 @@ Added for the `e2e` tier:
   pre-existing, needs a version pin and a docs decision, not this spec.
 - **Migrating the consumer repo.** This spec specifies the tunstrap side and the
   recipe; the `consumer-repo/garuda` edit is a consumer-repo change.
+- **Symmetric projection for fetched files.** `--output-var` projects
+  `kube_targets` (drops the kube credentials) but passes
+  `fetch_files[*].content_b64` through verbatim. The asymmetry is documented
+  and deliberate for now (see `docs/recipe_terragrunt.md`): fetched files are
+  operator-requested and `FetchedFile` has no on-disk `path`, so dropping
+  `content_b64` would lose data. The end-state is symmetry with kube targets —
+  materialize fetched files under the session dir at mode `0o600`, add a `path`
+  field to `FetchedFile`, force that materialization in `run` (as is already
+  done for kubeconfigs), and *then* drop `content_b64` from the projection.
+  That is a schema addition plus a new forced-materialization rule,
+  deliberately not done in a security fix at the tail of a 64-commit branch.
