@@ -7,11 +7,13 @@ the shim and tunstrap rather than about OpenTofu.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.e2e.rig import CONTROL_SHIM, SHIM
+from tests.e2e.rig import CONTROL_SHIM, SHIM, recorded_argvs, write_fake_tofu
 
 pytestmark = [pytest.mark.e2e]
 
@@ -49,3 +51,79 @@ def test_shim_uses_the_documented_invocation() -> None:
     assert '-- env -u KUBECONFIG tofu "$@"' in real
     assert 'case "$1" in init|-version) exec tofu "$@" ;; esac' in real
     assert '[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"' in real
+
+
+def _shim_env(bin_dir: Path) -> dict[str, str]:
+    """Parent environment with the fake tofu first on PATH and no stale payload."""
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env.pop("TUNSTRAP_INPUT", None)
+    env.pop("KUBECONFIG", None)
+    return env
+
+
+def test_init_passes_through_even_with_a_poisoned_payload(
+    e2e_preflight: None, tmp_path: Path
+) -> None:
+    """`init` never reads TUNSTRAP_INPUT, so an invalid one cannot stop it."""
+    del e2e_preflight
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    write_fake_tofu(bin_dir, marker_dir, exit_code=0, stdout_line="FAKE_TOFU_RAN")
+    env = _shim_env(bin_dir)
+    # Deliberately invalid *and* non-empty: any accidental `tunstrap run` exits 1
+    # with SchemaValidationError, pre-spawn, and tofu never launches.
+    env["TUNSTRAP_INPUT"] = "{invalid"
+
+    result = subprocess.run(
+        [str(SHIM), "init", "-input=false"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert recorded_argvs(marker_dir) == [["init", "-input=false"]]
+
+
+def test_version_passes_through_even_with_a_poisoned_payload(
+    e2e_preflight: None, tmp_path: Path
+) -> None:
+    """`-version` takes the same skip; Terragrunt probes it once per run."""
+    del e2e_preflight
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    write_fake_tofu(bin_dir, marker_dir, exit_code=0, stdout_line="FAKE_TOFU_RAN")
+    env = _shim_env(bin_dir)
+    env["TUNSTRAP_INPUT"] = "{invalid"
+
+    result = subprocess.run(
+        [str(SHIM), "-version"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert recorded_argvs(marker_dir) == [["-version"]]
+
+
+def test_unset_payload_passes_through(e2e_preflight: None, tmp_path: Path) -> None:
+    """With TUNSTRAP_INPUT unset the shim is a transparent exec to tofu."""
+    del e2e_preflight
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    write_fake_tofu(bin_dir, marker_dir, exit_code=0, stdout_line="FAKE_TOFU_RAN")
+    env = _shim_env(bin_dir)
+    assert "TUNSTRAP_INPUT" not in env
+
+    result = subprocess.run(
+        [str(SHIM), "plan"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == "FAKE_TOFU_RAN\n"
+    assert recorded_argvs(marker_dir) == [["plan"]]
