@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probe-cm
+  namespace: {{ .Release.Namespace }}
+data:
+  proof: through-the-tunnel
