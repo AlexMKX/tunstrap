@@ -88,3 +88,55 @@ def test_schema_error_never_echoes_the_private_key(
     with pytest.raises(SchemaValidationError) as excinfo:
         build_schema_from_env(VAR)
     assert "DEADBEEF" not in json.dumps(excinfo.value.to_error_output())
+
+
+def test_include_input_false_is_load_bearing_for_a_non_dict_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolates ``include_input=False`` from the ``_scrub`` layer behind it.
+
+    Two independent layers keep the PEM out of the error envelope, and the
+    test above cannot tell them apart: its failure lands on ``port``, so
+    pydantic's ``input`` is the whole node *dict*, which still has a literal
+    ``ssh_pkey`` key -- and ``TunstrapError._scrub`` strips that by key name
+    whether or not ``include_input=False`` was passed. Reverting the guard
+    leaves that test green (verified).
+
+    Here the failure lands *on* ``ssh_pkey`` and its input is a bare list, so
+    there is no ``ssh_pkey`` key for ``_scrub`` to match on and the secret is
+    just a string inside a list it copies verbatim. ``include_input=False`` is
+    then the only thing standing between the PEM and stderr.
+
+    Fails with the PEM in the rendered envelope if the guard at
+    ``cli_input.py:159`` is dropped. The same shape would isolate the other
+    three call sites (``cli_input.py:124``, ``schemas.py:217``,
+    ``cli.py:217``); this pins the one whose docstring makes the claim.
+    """
+    secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nDEADBEEF\n"
+    monkeypatch.setenv(
+        VAR,
+        json.dumps(
+            {
+                "nodes": {
+                    "node": {
+                        "user": "u",
+                        "host": "h.example.net",
+                        # A list where a string belongs: the error is reported
+                        # against ssh_pkey itself, with the list as its input.
+                        "ssh_pkey": [secret],
+                        "remote_targets": {"p": "127.0.0.1:6443"},
+                    }
+                }
+            }
+        ),
+    )
+    with pytest.raises(SchemaValidationError) as excinfo:
+        build_schema_from_env(VAR)
+
+    # Guard the premise: if no error lands on ssh_pkey there is nothing for
+    # include_input to leak, and the assertion below would be vacuous.
+    locs = [error["loc"] for error in excinfo.value.details["errors"]]
+    assert any("ssh_pkey" in loc for loc in locs), f"no error landed on ssh_pkey: {locs}"
+
+    rendered = json.dumps(excinfo.value.to_error_output())
+    assert "DEADBEEF" not in rendered, f"the private key reached the error envelope: {rendered}"
