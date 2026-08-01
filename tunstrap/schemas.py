@@ -259,7 +259,7 @@ class NodeInput(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_node_does_something(self) -> "NodeInput":
+    def _validate_node_does_something(self) -> NodeInput:
         if not self.remote_targets and not self.kube_targets and not self.fetch_files:
             raise ValueError(
                 "node must define at least one of remote_targets, kube_targets, fetch_files"
@@ -300,7 +300,7 @@ class FetchedFile(BaseModel):
     error: str | None = None
 
     @model_validator(mode="after")
-    def _validate_xor(self) -> "FetchedFile":
+    def _validate_xor(self) -> FetchedFile:
         has_success = self.content_b64 is not None
         has_error = self.error is not None
         if has_success and has_error:

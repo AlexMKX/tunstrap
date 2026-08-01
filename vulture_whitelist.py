@@ -12,6 +12,6 @@ from __future__ import annotations
 from tunstrap import schemas as _schemas
 
 # Each @field_validator below has a ``cls`` parameter we cannot omit.
-_ = _schemas.FileSpec._validate_absolute  # noqa: SLF001
-_ = _schemas.NodeInput._validate_fetch_files  # noqa: SLF001
-_ = _schemas.InputSchema._validate_auth  # noqa: SLF001
+_ = _schemas.FileSpec._validate_absolute
+_ = _schemas.NodeInput._validate_fetch_files
+_ = _schemas.InputSchema._validate_auth

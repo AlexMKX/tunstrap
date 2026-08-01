@@ -20,7 +20,7 @@ dev = [
     "pytest-asyncio>=1.3,<2",
     "pytest-cov>=5.0",
     "mypy>=1.13",
-    "ruff>=0.8",
+    "ruff>=0.16,<0.17",
     "black>=24.10,<26",
     "pylint>=3.3,<4",
     "vulture>=2.13,<3",
@@ -52,6 +52,26 @@ allow-direct-references = true
 [tool.ruff]
 line-length    = 100
 target-version = "py310"
+
+[tool.ruff.format]
+# Design documents intentionally use Python fences as illustrative, often
+# output-sensitive examples; only exclude those Markdown files from formatting.
+exclude = ["docs/**/*.md"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures deliberately model process failures, legacy annotations, and
+# naive certificates; keep test code unchanged while retaining these rules in
+# production modules.
+"tests/**/*.py" = ["DTZ001", "I001", "PLW1510", "PYI034", "PYI036", "RUF012", "RUF059", "UP024", "UP035", "UP037"]
+# Coverage instrumentation is deliberately fail-open: startup must continue
+# even when the optional coverage bootstrap fails.
+"sitecustomize.py" = ["S110"]
+# Pydantic validators must raise ValueError so invalid input is reported as a
+# validation error rather than escaping model validation as TypeError.
+"tunstrap/schemas.py" = ["SIM102", "TRY004"]
+# The nested contexts name the TCP socket before wrapping it for TLS, which is
+# clearer for this security-sensitive probe than a compact combined statement.
+"tunstrap/kube.py" = ["SIM117"]
 
 [tool.mypy]
 strict         = true

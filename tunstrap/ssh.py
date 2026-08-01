@@ -9,7 +9,8 @@ multiplex an SFTP channel without a second authentication.
 from __future__ import annotations
 
 import socket
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import asyncssh
 

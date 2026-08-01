@@ -250,7 +250,7 @@ ProbeFn = Callable[[str, int], Awaitable[bytes]]
 
 
 async def run_kube_targets(  # pylint: disable=too-many-locals,too-many-branches  # reason: per-target try/except/warning fan-out
-    conn: "asyncssh.SSHClientConnection",
+    conn: asyncssh.SSHClientConnection,
     kube_targets: dict[str, KubeTarget],
     *,
     connect_timeout: int,
@@ -360,7 +360,7 @@ def _split_host_port(server: str) -> tuple[str, int]:
     return host, port if port is not None else 443
 
 
-async def _fetch_one(conn: "asyncssh.SSHClientConnection", path: str) -> bytes:
+async def _fetch_one(conn: asyncssh.SSHClientConnection, path: str) -> bytes:
     """Read a single small file over SFTP (1 MiB cap), return raw bytes."""
     async with conn.start_sftp_client() as sftp:
         stat = await sftp.stat(path)

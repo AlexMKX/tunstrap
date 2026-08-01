@@ -22,7 +22,7 @@ def _open_log_target(path: str | None) -> int | IO[bytes]:
     """
     if path is None:
         return subprocess.DEVNULL
-    return open(path, "ab", buffering=0)  # noqa: SIM115  # closed by caller
+    return open(path, "ab", buffering=0)  # closed by caller
 
 
 def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[str, Any]:
@@ -38,7 +38,7 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
     try:
-        proc = subprocess.Popen(  # noqa: SIM115  # pylint: disable=consider-using-with  # detached; never wait()ed
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with  # detached; never wait()ed
             [
                 sys.executable,
                 "-m",

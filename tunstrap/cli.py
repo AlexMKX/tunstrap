@@ -9,7 +9,8 @@ import signal
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import click
 from pydantic import ValidationError
@@ -21,8 +22,8 @@ from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import (
     DaemonError,
     MultiNodeEnvUnsupported,
-    TunstrapError,
     SchemaValidationError,
+    TunstrapError,
     exit_code_for,
 )
 from tunstrap.identity import IdentityCheckResult, verify_session
@@ -404,9 +405,8 @@ def _run_child(
     child_env = _build_child_env(out, output_var=output_var, inject_scalars=inject_scalars)
     # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
     # forwarded to the child while it runs in the foreground.
-    proc = subprocess.Popen(  # noqa: SIM115  # pylint: disable=consider-using-with
-        cmd, env=child_env
-    )
+    # pylint: disable-next=consider-using-with
+    proc = subprocess.Popen(cmd, env=child_env)
 
     def _forward(signum: int, _frame: object) -> None:
         try:

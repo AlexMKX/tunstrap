@@ -45,7 +45,7 @@ class SessionDir:
         self._lock_fd = lock_fd
 
     @classmethod
-    def create(cls, *, supplied: str | None, base: Path | None = None) -> "SessionDir":
+    def create(cls, *, supplied: str | None, base: Path | None = None) -> SessionDir:
         """Resolve the session dir, acquire session.lock, (re)create tunnel-data/.
 
         Raises ``SessionActive`` if a live daemon already holds the lock.
