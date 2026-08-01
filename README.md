@@ -253,6 +253,10 @@ by node.
 - **More than one node without `--output-var`:** exit `1`
   (`MultiNodeEnvUnsupported`), decided before any daemon is started.
 
+> This is the flag the Terragrunt/OpenTofu recipe builds on — it puts the whole
+> connection envelope into `TF_VAR_tunstrap` for a module to decode. See
+> [`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md).
+
 #### `run` never writes to stdout
 
 After the child starts, `run` writes nothing to file descriptor 1 — stdout
@@ -414,7 +418,6 @@ explicit `tls_server_name` is set:
     }
   },
   "pid": 12345,
-  "token": "<opaque>",
   "session_dir": "/tmp/tunstrap-session-abc123",
   "started_at": "2026-05-30T10:00:00Z",
   "warnings": []
@@ -459,8 +462,6 @@ failure.
 - `daemon.log_file` (if set) receives only asyncssh/asyncio debug noise. No
   `print`/`log` call path in this codebase carries decoded file bytes.
 - `content_b64` is base64; callers must decode and protect it.
-- `token` returned by `start` is the authorization handle for `stop`/`status`.
-  Store it like a credential.
 - Private keys (`ssh_pkey`) stay in process memory; they are never written
   to `~/.ssh` or to a tempfile. Parsing happens via
   `asyncssh.import_private_key`.
@@ -503,7 +504,6 @@ future feature.
 | `kube_targets[name]` missing or has error | Check `warnings[]` for SAN-probe details; try setting explicit `tls_server_name`. |
 | `start` with a supplied `--session-dir` fails with "tunnel-data already exists" | Orphaned `tunnel-data/` from a previous `kill -9`. Remove it: `rm -rf <session-dir>/tunnel-data`. |
 | `start` hangs | Node firewalled / DNS-stuck. Increase `ssh_options.connect_timeout` or remove the node. |
-| `status` says alive but `stop` says "token mismatch" | The PID was reused. Token guards against this — investigate which process holds the PID. |
 
 ## Migration from `v2026.10516.11702`
 
@@ -594,6 +594,7 @@ pytest tests/integration -m integration
 
 ## Project documents
 
+- Terragrunt / OpenTofu recipe: [`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md)
 - Kube-targets design: `docs/specs/2026-05-30-kube-targets-design.md`
 - Fetch-files design: `docs/specs/2026-05-20-feature-fetch-files-design.md`
 - Original design (historical): `docs/specs/2026-05-16-tunstrap-design.md`
