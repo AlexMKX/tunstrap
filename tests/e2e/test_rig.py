@@ -8,6 +8,7 @@ the kind cluster and talk to the API server through the resulting tunnel.
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from tests.e2e.rig import (
     CONTROL_PLANE,
     HERE,
     kubectl_in_node,
+    require_tools,
+    tunstrap_input_json,
 )
 
 pytestmark = [pytest.mark.e2e]
@@ -220,3 +223,76 @@ def test_rig_publishes_a_dynamic_port_and_accepts_the_generated_key(
         check=True,
     )
     assert "sshd-kube" in listed.stdout
+
+
+def test_tunnel_carries_real_kube_api_traffic(kube_rig: dict[str, Any], tmp_path: Path) -> None:
+    """A tunstrap tunnel to sshd-kube reaches the real API server, warning-free.
+
+    The tier's first-failure gate. Everything before it tests the harness; this
+    is the first test that pushes real Kubernetes API traffic through a real
+    tunstrap tunnel, so once it is green a later failure can be attributed to
+    the feature under test rather than to the rig.
+
+    Assertion audit - every assertion here is behavioural, and each has a
+    distinct symptom (measured; see docs/artifacts/2026-08-01-e2e-tier-baseline.md):
+    - `started.returncode == 0`: fires if the forwarding drop-in is missing or
+      the service is off kind's network, because the SAN probe itself traverses
+      the forward during `start` and is refused `administratively prohibited`.
+    - `warnings == []` and `tls_server_name == CONTROL_PLANE`: pin the clean,
+      exact-SAN-match branch. A silent downgrade to insecure-skip-tls-verify
+      would still let kubectl succeed, so without these the test would pass
+      while the security property it exists to prove had regressed.
+    - `endpoint` is a local https URL and `path` is not None: materialization
+      and patching. `run` forces materialize, `start` does not, hence the
+      explicit materialize=True here.
+    - the `kubectl` probe: the actual gate. `node/<control-plane>` distinguishes
+      "reached the real API server" from "reached something that answered" - a
+      TLS handshake that terminated anywhere else cannot produce that exact node
+      name. Proven to fail while `start` still exits 0 by breaking the forward
+      after a successful start, with the independent in-node oracle staying
+      green throughout to show the cluster was healthy and the tunnel was not.
+    """
+    # The in-node oracle deliberately uses the node image's own kubectl, so the
+    # tier needs no host kubectl until here - this is the first consumer of one.
+    require_tools("kubectl")
+
+    session_dir = str(tmp_path / "session")
+    started = subprocess.run(
+        ["tunstrap", "start", "--session-dir", session_dir],
+        input=tunstrap_input_json(kube_rig, materialize=True),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert started.returncode == 0, f"stdout={started.stdout!r} stderr={started.stderr!r}"
+    envelope = json.loads(started.stdout)
+    try:
+        assert envelope["warnings"] == []
+        target = envelope["connections"]["node"]["kube_targets"]["k3s"]
+        assert target["tls_server_name"] == CONTROL_PLANE
+        assert target["endpoint"].startswith("https://127.0.0.1:")
+        kubeconfig = target["path"]
+        assert kubeconfig is not None, "materialize=True must yield a path"
+
+        probe = subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stdout.strip() == f"node/{CONTROL_PLANE}"
+    finally:
+        subprocess.run(
+            [
+                "tunstrap",
+                "stop",
+                "--session-dir",
+                session_dir,
+                "--grace-seconds",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
