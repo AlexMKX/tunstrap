@@ -1,0 +1,34 @@
+#!/bin/sh
+# Consumer-facing OpenTofu shim. Terraform-specific decisions live here, not in
+# tunstrap; see docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md,
+# "The tofu shim - consumer-facing, Terraform-specific, outside tunstrap".
+#
+# Never write to stdout. Terragrunt captures and labels tofu's stdout by
+# default, and `terragrunt output -json` consumers parse it. Diagnostics go to
+# stderr or a file.
+#
+# `exec` is correct in both pass-through branches: there is nothing to clean up.
+# `exec`ing *into* `tunstrap run` is also correct - run owns the child via Popen
+# + signal forwarding + a finally teardown, so nothing execs past teardown, and
+# Terragrunt's signals reach tunstrap directly.
+
+# Pass through when the payload is absent: the consumer omits the env_vars key
+# entirely when the infrastructure is not applied yet.
+[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"
+
+# Skip the tunnel for init and -version. `tofu init` configures the backend and
+# downloads providers; it contacts neither the Kubernetes API nor Helm, and the
+# consumer's state backend is S3-compatible over the public internet, not
+# tunnelled. Without this, env-var scoping yields two tunnels per
+# `terragrunt plan` - one for the auto-init, one for the plan.
+case "$1" in init|-version) exec tofu "$@" ;; esac
+
+# `env -u KUBECONFIG` is not optional. `run` builds
+# child_env = {**os.environ, **render_env(out)} and render_env sets KUBECONFIG
+# last, so it wins over anything inherited - the clearing has to happen inside
+# the child command. Left in place it is a silent fallback pointing at the same
+# materialized file config_path would use, so a broken TF_VAR_tunstrap chain
+# would still find a working cluster and every positive assertion in the e2e
+# tier would prove nothing.
+exec tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
+  -- env -u KUBECONFIG tofu "$@"

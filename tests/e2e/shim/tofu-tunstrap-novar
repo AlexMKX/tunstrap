@@ -1,0 +1,20 @@
+#!/bin/sh
+# NEGATIVE CONTROL - test-only, never shipped to a consumer.
+#
+# Byte-identical to tofu-tunstrap except that `--output-var TF_VAR_tunstrap` is
+# absent. With it gone, var.tunstrap keeps its "" default, local.kubepath is "",
+# and the providers take their inert branch - so an apply through this shim MUST
+# fail. If it succeeds, something other than the decoded config_path is reaching
+# the cluster and every positive assertion in this tier is worthless. That is
+# why `env -u KUBECONFIG` is still here: removing it would let the injected
+# KUBECONFIG rescue the apply and quietly destroy the control.
+#
+# test_shim.py::test_control_shim_differs_only_in_output_var pins the
+# "identical except" claim so this file cannot drift away from the real shim.
+
+[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"
+
+case "$1" in init|-version) exec tofu "$@" ;; esac
+
+exec tunstrap run --input-env TUNSTRAP_INPUT \
+  -- env -u KUBECONFIG tofu "$@"
