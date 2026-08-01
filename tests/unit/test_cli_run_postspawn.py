@@ -27,7 +27,7 @@ from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap import session as session_mod
 from tunstrap.cli import main
-from tunstrap.exceptions import DaemonError
+from tunstrap.exceptions import DaemonError, DaemonHandshakeError
 from tunstrap.identity import IdentityCheckResult
 from tunstrap.session import StopOutcome
 
@@ -349,10 +349,19 @@ def test_production_teardown_keeps_a_supplied_session_dir(
     assert sentinel.read_text() == "do not delete me", "teardown destroyed caller-owned content"
 
 
-def test_minted_root_is_discarded_when_spawn_fails(
+def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
     monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
 ) -> None:
-    """A failed spawn leaves no empty minted directory behind."""
+    """A worker-authored failure needs no teardown, and leaves no minted dir.
+
+    This is the narrower of the two spawn-failure classes. A plain
+    ``DaemonError`` is what the worker itself authored: it reached its own
+    guard, released the session lock and removed its session dir before
+    reporting (``_worker.py:169-190``), then exited. Nothing is running, so
+    ``teardowns == []`` is right *here* — but it is right because of who
+    failed, not because "spawn raised". The sibling test below covers the case
+    where that inference does not hold.
+    """
     seen: list[str | None] = []
 
     def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
@@ -364,7 +373,38 @@ def test_minted_root_is_discarded_when_spawn_fails(
     assert result.exit_code == 4
     assert seen[0] is not None
     assert not Path(seen[0]).exists(), "a failed spawn leaked a minted session root"
-    assert teardowns == [], "no daemon exists, so there is nothing to tear down"
+    assert teardowns == [], "the worker cleaned up after itself; nothing to tear down"
+
+
+def test_handshake_failure_stops_the_worker_instead_of_orphaning_it(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """A parent-side handshake failure tears down: the worker may be alive.
+
+    ``spawn_daemon`` detaches the worker at ``Popen`` and only then attempts
+    the handshake. If *that* fails, the worker is running, holding the session
+    lock, with a tunnel open — and the old code took the worker-authored path:
+    delete the session root and exit, leaving a daemon with no directory and
+    nobody to stop it.
+
+    Fails if the handler is collapsed back into the generic ``TunstrapError``
+    arm: ``teardowns`` is then empty and the daemon is orphaned.
+    """
+    seen: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        seen.append(session_dir)
+        raise DaemonHandshakeError("worker IPC produced invalid JSON", {"position": 0})
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    minted = seen[0]
+    assert minted is not None
+    assert result.exit_code == 4, "a handshake failure keeps DaemonError's exit code"
+    assert teardowns == [(minted, 10, minted)], "a possibly-live worker must be stopped"
+    assert not Path(minted).exists(), "teardown must still remove the minted session root"
+    assert json.loads(result.stderr)["error"] == "DaemonHandshakeError"
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
 
 
 def test_minted_root_is_removed_after_a_successful_run(monkeypatch: pytest.MonkeyPatch) -> None:

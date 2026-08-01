@@ -50,6 +50,25 @@ class DaemonError(TunstrapError):
     """Generic daemon-side failure surfaced via the IPC handshake."""
 
 
+class DaemonHandshakeError(DaemonError):
+    """The *parent* could not complete the handshake with a worker it launched.
+
+    The distinction from ``DaemonError`` is **who failed**, and it decides
+    whether a daemon is left running. A ``daemon_error`` IPC frame is
+    worker-authored: the worker reached its own guard, released the session
+    lock and removed its session dir before reporting, then exited — nothing
+    survives it. This one is raised only past the point where
+    ``subprocess.Popen`` has already detached the worker, so the worker may be
+    perfectly healthy, holding the session lock with tunnels open, while the
+    parent is the side that failed. Callers must stop it rather than delete its
+    session directory and walk away.
+
+    A subclass so that every existing ``except DaemonError`` keeps working; it
+    needs its own ``_EXIT_CODES`` entry because ``exit_code_for`` keys on the
+    exact type.
+    """
+
+
 class KubeParseError(TunstrapError):
     """A kubeconfig could not be parsed or lacked a usable current-context."""
 
@@ -75,6 +94,7 @@ _EXIT_CODES: dict[type[TunstrapError], int] = {
     KubeParseError: 2,
     SessionActive: 3,
     DaemonError: 4,
+    DaemonHandshakeError: 4,
 }
 
 

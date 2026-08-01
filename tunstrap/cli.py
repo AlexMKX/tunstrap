@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 import click
 from pydantic import ValidationError
@@ -21,6 +21,7 @@ from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import (
     DaemonError,
+    DaemonHandshakeError,
     MultiNodeEnvUnsupported,
     SchemaValidationError,
     TunstrapError,
@@ -374,6 +375,18 @@ def _discard_minted_root(minted_root: str | None) -> None:
         SessionDir.remove_root(minted_root)
 
 
+def _fail_before_child(exc: TunstrapError) -> NoReturn:
+    """Report a ``run`` failure raised before the child started, then exit.
+
+    stderr rather than stdout because under the tofu-proxy pattern fd 1 belongs
+    to the child; the exit code is the exception's mapped one, never a generic
+    failure code. Shared by all three pre-child handlers so that they differ
+    only in the cleanup each one owes.
+    """
+    sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
+    sys.exit(exit_code_for(exc))
+
+
 def _report_unexpected(exc: BaseException) -> None:
     """Report an unexpected post-spawn failure as DaemonError JSON on stderr.
 
@@ -488,7 +501,6 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     `-`.
     """
     connection, cmd = _split_run_args(args, input_env=input_env)
-    minted_root: str | None = None
     try:
         if input_env is not None:
             _reject_flags_under_input_env(
@@ -539,16 +551,31 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
                 {"nodes": sorted(schema.nodes)},
             )
         inject_scalars = len(schema.nodes) == 1
-        # Minting is the last statement before the spawn, so every usage check
-        # above it runs while minted_root is still None. A click.UsageError
-        # needs no discard, and is unrelated to TunstrapError, so it passes the
-        # handler below untouched.
-        session_path, minted_root = _mint_session_dir(session_dir)
-        message = spawn_daemon(schema, session_dir=session_path)
     except TunstrapError as exc:
+        # The validation window: nothing has been minted and nothing spawned,
+        # so there is nothing to clean up. A click.UsageError is unrelated to
+        # TunstrapError and passes this handler untouched.
+        _fail_before_child(exc)
+
+    # The spawn window opens here. Minting is its first statement and the last
+    # before the spawn itself, so every check above ran before the first side
+    # effect, and both names below are bound on every path that can reach the
+    # handlers -- `spawn_daemon` is the only source of either exception.
+    session_path, minted_root = _mint_session_dir(session_dir)
+    try:
+        message = spawn_daemon(schema, session_dir=session_path)
+    except DaemonHandshakeError as exc:
+        # Parent-side, past the detach: `Popen` has already launched a worker,
+        # so one may be running and holding the session lock. Taking the
+        # worker-authored path below would delete a live daemon's directory and
+        # leave nothing able to stop it.
+        _teardown_run(session_path, grace_seconds, minted_root=minted_root)
+        _fail_before_child(exc)
+    except TunstrapError as exc:
+        # Worker-authored, or raised before the detach: nothing of ours is
+        # running, so there is only the empty minted directory to remove.
         _discard_minted_root(minted_root)
-        sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
-        sys.exit(exit_code_for(exc))
+        _fail_before_child(exc)
 
     try:
         kind = message["kind"]

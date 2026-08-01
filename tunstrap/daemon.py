@@ -8,7 +8,7 @@ import subprocess
 import sys
 from typing import IO, Any
 
-from tunstrap.exceptions import DaemonError
+from tunstrap.exceptions import DaemonHandshakeError
 from tunstrap.schemas import InputSchema
 
 
@@ -28,12 +28,18 @@ def _open_log_target(path: str | None) -> int | IO[bytes]:
 def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[str, Any]:
     """Spawn the worker, send the schema, read the IPC response, return it.
 
-    Returns the structured IPC message for any of the three worker outcomes:
-    ``success``, ``required_failure``, ``daemon_error``. Callers dispatch on
-    ``message["kind"]`` and map to CLI exit codes.
+    Returns the structured IPC message for any of the four worker outcomes:
+    ``success``, ``required_failure``, ``daemon_error``, ``session_active``.
+    Callers dispatch on ``message["kind"]`` and map to CLI exit codes. Those
+    are worker-authored: the worker cleaned up after itself before writing the
+    frame, so no daemon of ours survives them.
 
-    Raises ``DaemonError`` only when the parent itself cannot complete the
-    handshake (empty pipe, malformed JSON, unknown kind).
+    **This function is not atomic, and the seam is ``Popen``.** Before it, no
+    worker exists and a failure leaves nothing behind. After it, the worker is
+    launched and detached — so every failure from there on is *parent-side* and
+    raises ``DaemonHandshakeError``, telling the caller a daemon may be running
+    and must be stopped rather than abandoned. Callers that treat any spawn
+    failure as "no daemon exists" orphan the worker on exactly those paths.
     """
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
@@ -61,7 +67,15 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
         else:
             log_target.close()
 
-    assert proc.stdin is not None
+    # Everything below this line runs with a detached worker already alive.
+    if proc.stdin is None:
+        # Unreachable with stdin=PIPE, but it must not be an `assert`: that is
+        # an AssertionError, which is outside TunstrapError and so escapes the
+        # CLI's handler as a traceback, and `python -O` erases the check
+        # altogether, leaving an AttributeError on the next line instead.
+        os.close(ipc_read_fd)
+        raise DaemonHandshakeError("worker stdin pipe unavailable", {})
+
     try:
         proc.stdin.write(schema.model_dump_json().encode("utf-8"))
         proc.stdin.close()
@@ -75,22 +89,30 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
 
 
 def _read_ipc_response(read_fd: int) -> dict[str, Any]:
-    """Block on the IPC pipe until EOF, parse, and return the message."""
+    """Block on the IPC pipe until EOF, parse, and return the message.
+
+    Called only after ``Popen`` has detached the worker, so every failure here
+    is parent-side by construction and raises ``DaemonHandshakeError``. A
+    truncated or unparsable frame is precisely the case where we cannot tell
+    whether a worker is live, which is why the caller must assume one is.
+    """
     try:
         with os.fdopen(read_fd, "rb") as reader:
             raw = reader.read()
     except OSError as exc:
-        raise DaemonError("failed to read worker IPC pipe", {"errno": exc.errno}) from exc
+        raise DaemonHandshakeError("failed to read worker IPC pipe", {"errno": exc.errno}) from exc
 
     if not raw:
-        raise DaemonError("worker IPC pipe closed without a message", {})
+        raise DaemonHandshakeError("worker IPC pipe closed without a message", {})
 
     try:
         message: dict[str, Any] = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
-        raise DaemonError("worker IPC produced invalid JSON", {"position": exc.pos}) from exc
+        raise DaemonHandshakeError(
+            "worker IPC produced invalid JSON", {"position": exc.pos}
+        ) from exc
 
     kind = message.get("kind")
     if kind in {"success", "required_failure", "daemon_error", "session_active"}:
         return message
-    raise DaemonError("unexpected IPC message kind", {"kind": str(kind)})
+    raise DaemonHandshakeError("unexpected IPC message kind", {"kind": str(kind)})
