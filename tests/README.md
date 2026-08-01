@@ -68,7 +68,9 @@ Defined in `tests/e2e/conftest.py` (constants and helpers live in
 ## Local prerequisites for e2e
 
 - Everything the integration suite needs, plus:
-- `kind` (0.30.x) and `kubectl` (matched to `kindest/node:v1.34.0`).
+- `kind` (0.30.x). No host `kubectl`: the oracle runs the version-matched binary
+  *inside* the node image via `docker exec` (`kubectl_in_node` in
+  `tests/e2e/rig.py`), and `kind` itself shells out to no kubectl of its own.
 - `tofu` (OpenTofu 1.12.x). Network access on first run: `tofu init` downloads
   the `kubernetes` and `helm` providers from `registry.opentofu.org` (~9s). That
   is the *runner's* network and has nothing to do with the tunnel.
