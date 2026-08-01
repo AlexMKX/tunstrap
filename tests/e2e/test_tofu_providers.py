@@ -8,6 +8,7 @@ cluster; read results back through an oracle that does not use the tunnel.
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -217,3 +218,71 @@ def test_apply_without_output_var_fails_even_with_the_tunnel_up(
     health = kubectl_in_node("get", "--raw", "/healthz")
     assert health.returncode == 0, health.stderr
     assert health.stdout.strip() == "ok"
+
+
+def test_real_provider_failure_surfaces_as_nonzero(
+    tofu_module: Path, tofu_plugin_cache: Path, tmp_path: Path
+) -> None:
+    """A config_path pointing at a dead endpoint fails, and names that endpoint."""
+    with socket.socket() as probe_sock:
+        probe_sock.bind(("127.0.0.1", 0))
+        dead_port = probe_sock.getsockname()[1]
+    # The socket is closed on exit from the `with`, so nothing listens there.
+
+    dead_kubeconfig = tmp_path / "dead.kubeconfig"
+    dead_kubeconfig.write_text(
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "clusters:\n"
+        "- name: dead\n"
+        "  cluster:\n"
+        f"    server: https://127.0.0.1:{dead_port}\n"
+        "    insecure-skip-tls-verify: true\n"
+        "contexts:\n"
+        "- name: dead\n"
+        "  context: {cluster: dead, user: dead}\n"
+        "current-context: dead\n"
+        "users:\n"
+        "- name: dead\n"
+        "  user: {}\n"
+    )
+    envelope = {
+        "connections": {
+            "node": {
+                "ports": {},
+                "kube_targets": {
+                    "k3s": {
+                        "endpoint": f"https://127.0.0.1:{dead_port}",
+                        "path": str(dead_kubeconfig),
+                    }
+                },
+            }
+        }
+    }
+    env = tofu_env(
+        tofu_module,
+        tofu_plugin_cache,
+        extra={"TF_VAR_tunstrap": json.dumps(envelope)},
+    )
+
+    init = subprocess.run(
+        ["tofu", "init", "-input=false"],
+        cwd=tofu_module,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    applied = subprocess.run(
+        ["tofu", "apply", "-auto-approve", "-input=false"],
+        cwd=tofu_module,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = applied.stdout + applied.stderr
+    assert applied.returncode != 0, combined
+    assert f"127.0.0.1:{dead_port}" in combined, combined
