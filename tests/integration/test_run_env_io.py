@@ -16,14 +16,13 @@ Method: run the installed `tunstrap` console script as a subprocess with the
 payload in its environment; the child is a Python probe that asserts on the
 injected variables and opens real TCP connections to the forwarded ports.
 
-Deliberately no assertion on `result.stderr`: against a real daemon every
-successful run currently emits `run: daemon not stopped cleanly: identity
-changed during grace` and spends the whole 10s grace window doing it
-(measured 10.7s). That is pre-existing -- the same loop and message are in
-`_kill_with_identity` at the branch base a4f086d, and Task 2.1 moved them
-verbatim into `stop_session` -- and these are simply the first tests to drive
-`run` against a live daemon. Asserting a clean stderr here would fail on that
-defect rather than on anything this task owns; see task-5.1-report.md.
+No assertion on `result.stderr` here: these tests own the env-injection
+contract, and the separate claim that a successful run leaves stderr empty is
+asserted in test_run_teardown_latency.py. An earlier version of this note said
+the opposite -- that every successful run emitted `run: daemon not stopped
+cleanly: identity changed during grace` and spent the whole 10s grace window
+doing it. That was the unreaped-zombie defect in the grace poll, since fixed
+in session.py (`_has_exited`).
 """
 
 from __future__ import annotations

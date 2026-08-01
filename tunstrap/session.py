@@ -156,8 +156,14 @@ class SessionDir:
         ``SessionDir`` non-generated, so the worker never removes the root.
         ``run`` therefore removes the root it minted itself, and only that one
         — a caller-supplied ``--session-dir`` is never touched.
+
+        ``.resolve()`` for parity with ``cleanup_path`` and ``read_identity``.
+        It is safe to follow a symlink here specifically because the only
+        caller passes a ``tempfile.mkdtemp`` path, which is always a real
+        directory this process just created — unlike ``--session-dir``, this
+        argument is never caller-controlled.
         """
-        return cls._rmtree_reporting(Path(root))
+        return cls._rmtree_reporting(Path(root).resolve())
 
     @staticmethod
     def _rmtree_reporting(path: Path) -> list[str]:
@@ -235,10 +241,11 @@ def stop_session(  # pylint: disable=too-many-return-statements
 ) -> StopOutcome:
     """Stop the daemon recorded for ``session_dir``. Performs the stop, writes nothing.
 
-    Split out of ``cli._kill_with_identity``, which wrote its result to stdout
-    on every branch. ``stop`` renders the same JSON from the returned outcome;
-    ``run`` prints nothing on success and stderr on failure, so a foreground
-    child keeps fd 1 to itself.
+    Silent by design, because it has two callers wanting different channels:
+    ``cli.stop_command`` renders the returned outcome as ``stop``'s stdout JSON
+    (``cli._stop_outcome_json``), while ``cli._teardown_run_inner`` prints
+    nothing on success and stderr on failure, so a foreground child keeps fd 1
+    to itself. Deciding here would serve only one of them.
     """
     check = verify_session(session_dir, pid)
     if check == IdentityCheckResult.not_found:

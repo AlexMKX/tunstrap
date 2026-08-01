@@ -98,3 +98,17 @@ def test_multi_node_env_unsupported_exit_code_is_1() -> None:
     assert exit_code_for(exc) == 1
     assert exc.to_error_output()["error"] == "MultiNodeEnvUnsupported"
     assert exc.to_error_output()["details"] == {"nodes": ["a", "b"]}
+
+
+def test_multi_node_env_unsupported_is_registered_not_defaulted() -> None:
+    """The registry entry is asserted directly, because 1 is also the default.
+
+    ``exit_code_for`` returns 1 for any unregistered type, so
+    ``exit_code_for(MultiNodeEnvUnsupported(...)) == 1`` holds whether or not
+    the mapping exists -- the assertion above cannot see the entry being
+    deleted. Reading ``_EXIT_CODES`` directly can: removing the line raises
+    KeyError here.
+    """
+    from tunstrap.exceptions import _EXIT_CODES, MultiNodeEnvUnsupported
+
+    assert _EXIT_CODES[MultiNodeEnvUnsupported] == 1

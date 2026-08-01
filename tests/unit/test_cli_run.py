@@ -8,6 +8,7 @@ relies on: ``.wait()``, ``.send_signal()`` and ``.returncode``.
 
 from __future__ import annotations
 
+import signal as signal_mod
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from click.testing import CliRunner
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
+
+pytestmark = pytest.mark.unit
 
 
 def _success_payload() -> dict[str, Any]:
@@ -87,6 +90,61 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
     # Child env is os.environ + render_env(output), not a bare dict.
     assert "PATH" in FakePopen.last_env
     assert stops == [("/x", 10)], "teardown must run with the session dir run owns"
+
+
+class SignalledPopen(FakePopen):
+    """Child killed by a signal: ``Popen.wait()`` reports that as ``-N``."""
+
+    def __init__(self, cmd: list[str], env: dict[str, str] | None = None) -> None:
+        super().__init__(cmd, env)
+        self.returncode = -signal_mod.SIGTERM
+
+
+def test_signalled_child_exits_with_the_shell_convention(monkeypatch):
+    """A child killed by SIGTERM surfaces as 143, not the truncated 241.
+
+    ``Popen.wait()`` returns ``-N`` for "killed by signal N", and ``sys.exit``
+    hands that straight to the OS, which truncates it modulo 256 -- so SIGTERM
+    arrived as 241 (verified: ``sys.exit(-15)`` yields returncode 241), a value
+    no caller can interpret. 128+N is what every shell puts in ``$?`` and what
+    a wrapper around tofu will compare against.
+
+    Fails with ``-15`` if the normalisation in ``_run_child`` is removed. The
+    OS truncation to 241 is stdlib behaviour and is not re-tested here; what
+    this pins is the value tunstrap chooses to exit with.
+    """
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+    )
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", SignalledPopen)
+
+    res = CliRunner().invoke(
+        main,
+        ["run", "u@h", "--target", "db=127.0.0.1:5432", "--ssh-password-stdin", "--", "sleep", "1"],
+        input="secret\n",
+    )
+    assert res.exit_code == 128 + signal_mod.SIGTERM
+
+
+def test_normal_child_exit_code_is_untouched(monkeypatch):
+    """The negative control: a plain non-zero code is passed through as-is.
+
+    Without this, normalising unconditionally (say ``abs(code)``) would pass
+    the test above while corrupting every ordinary exit code.
+    """
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+    )
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
+
+    res = CliRunner().invoke(
+        main,
+        ["run", "u@h", "--target", "db=127.0.0.1:5432", "--ssh-password-stdin", "--", "true"],
+        input="secret\n",
+    )
+    assert res.exit_code == 7
 
 
 def test_run_requires_command():

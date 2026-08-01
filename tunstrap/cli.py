@@ -429,7 +429,14 @@ def _run_child(
 
     signal.signal(signal.SIGINT, _forward)
     signal.signal(signal.SIGTERM, _forward)
-    return proc.wait()
+    returncode = proc.wait()
+    if returncode < 0:
+        # Popen reports "killed by signal N" as -N, and sys.exit hands that to
+        # the OS, which truncates modulo 256 -- a SIGTERMed child surfaced as
+        # 241. 128+N is the shell convention every caller already reads out of
+        # $?, so a wrapped tofu killed by a signal reports 143, not 241.
+        return 128 - returncode
+    return returncode
 
 
 def _supervise_child(  # pylint: disable=too-many-arguments
@@ -675,9 +682,10 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
 def _stop_outcome_json(outcome: StopOutcome) -> str:
     """Render a StopOutcome as ``stop``'s documented stdout JSON, key for key.
 
-    Key order and omission rules reproduce the pre-refactor writes in
-    ``_kill_with_identity``: ``stopped`` first, then ``reason`` when there is
-    one, then ``forced`` only when True.
+    Key order and omission rules are a public contract, pinned byte for byte
+    across all seven outcomes by ``tests/unit/test_cli_stop_output.py``:
+    ``stopped`` first, then ``reason`` when there is one, then ``forced`` only
+    when True.
     """
     body: dict[str, object] = {"stopped": outcome.stopped}
     if outcome.reason is not None:

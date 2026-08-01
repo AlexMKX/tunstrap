@@ -4,6 +4,8 @@ from tunstrap.cli_input import parse_endpoint, parse_named, build_single_node_sc
 from tunstrap.exceptions import SchemaValidationError
 from tunstrap.schemas import DaemonOptions
 
+pytestmark = pytest.mark.unit
+
 
 def test_parse_endpoint_defaults_port():
     assert parse_endpoint("root@host") == ("root", "host", 22)

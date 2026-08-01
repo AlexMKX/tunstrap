@@ -158,6 +158,34 @@ def test_remove_root_missing_is_not_a_failure(tmp_path: Path) -> None:
     assert SessionDir.remove_root(str(tmp_path / "gone")) == []
 
 
+def test_remove_root_resolves_its_argument(tmp_path: Path) -> None:
+    """remove_root normalises the path like cleanup_path and read_identity do.
+
+    Reached through a symlink, an unresolved ``rmtree`` refuses to descend
+    (a symlink is not a directory), the error is swallowed by
+    ``ignore_errors=True``, and the follow-through ``stat()`` then finds the
+    target alive and reports the root as an unremovable survivor -- so ``run``
+    prints "could not remove session root" for a root it never actually tried
+    to delete.
+
+    The only caller passes a ``tempfile.mkdtemp`` path, which is always a real
+    directory, so this is a consistency fix rather than a live bug; the test
+    exists because a symlink is the one input that can tell the two
+    implementations apart.
+
+    Fails with ``[<symlink>]`` and a surviving target if ``.resolve()`` is
+    removed.
+    """
+    real = tmp_path / "real-root"
+    real.mkdir()
+    (real / "tunnel-data").mkdir()
+    link = tmp_path / "link-root"
+    link.symlink_to(real, target_is_directory=True)
+
+    assert SessionDir.remove_root(str(link)) == []
+    assert not real.exists(), "the resolved root was not removed"
+
+
 @pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory execute permission")
 def test_rmtree_reporting_reports_unstatable_survivor(tmp_path: Path) -> None:
     """An unstatable leaf is reported rather than letting exists() raise."""

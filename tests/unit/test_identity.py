@@ -16,6 +16,8 @@ from tunstrap.identity import (
     verify_session,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _spawn_locker(session_dir: Path) -> subprocess.Popen[bytes]:
     """Child that acquires session.lock and sleeps, holding the flock."""

@@ -4,6 +4,8 @@ from tunstrap.envrender import format_exports, predicted_env_keys, render_env
 from tunstrap.exceptions import MultiNodeEnvUnsupported
 from tunstrap.schemas import InputSchema, KubeTargetOutput, NodeOutput, OutputSchema
 
+pytestmark = pytest.mark.unit
+
 
 def _kube_out(port, path):
     return KubeTargetOutput(
