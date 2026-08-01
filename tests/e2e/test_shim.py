@@ -163,3 +163,31 @@ def test_child_exit_code_propagates_verbatim(kube_rig: dict[str, Any], tmp_path:
     assert result.returncode == 42, detail
     assert result.stdout == "FAKE_TOFU_EXIT_42\n"
     assert recorded_argvs(marker_dir) == [["apply"]]
+
+
+def test_tunnelled_stdout_is_byte_identical_to_the_untunnelled_child(
+    kube_rig: dict[str, Any], tmp_path: Path
+) -> None:
+    """Under the shim, fd 1 belongs to tofu and to nothing else."""
+    bin_dir = tmp_path / "bin"
+    marker_dir = tmp_path / "marks"
+    write_fake_tofu(bin_dir, marker_dir, exit_code=0, stdout_line="FAKE_TOFU_STDOUT_SENTINEL")
+    base = _shim_env(bin_dir)
+
+    # Oracle: the same shim, the same fake tofu, the same argv - but with
+    # TUNSTRAP_INPUT unset, so the shim's first line execs straight into the
+    # child and tunstrap is not in the picture at all.
+    direct = subprocess.run([str(SHIM), "apply"], env=base, capture_output=True, check=False)
+    tunnelled = subprocess.run(
+        [str(SHIM), "apply"],
+        env={**base, "TUNSTRAP_INPUT": tunstrap_input_json(kube_rig)},
+        capture_output=True,
+        check=False,
+    )
+
+    assert direct.returncode == 0, direct.stderr
+    assert tunnelled.returncode == 0, tunnelled.stderr
+    # Pin the oracle itself, so "both produced nothing" cannot pass.
+    assert direct.stdout == b"FAKE_TOFU_STDOUT_SENTINEL\n"
+    assert tunnelled.stdout == direct.stdout
+    assert recorded_argvs(marker_dir) == [["apply"], ["apply"]]
