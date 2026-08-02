@@ -554,19 +554,21 @@ each stands now:
    three fast-path invocations per `terragrunt plan`, a naive entry point that
    imported `cli` on every call would add ~0.7 s per plan.
    **The `tunstrap_tofu` entry point does not import `cli` (or anything heavy)
-   on the pass-through paths** — it `execvp`s `tofu` before any tunstrap import
-   beyond the package `__init__`. Measured fast path: **~59 ms end-to-end**
-   (≈17 ms interpreter + ≈41 ms `importlib.metadata` in `tunstrap/__init__`,
-   which is structural and unavoidable without changing that file, + ~1 ms
-   execvp handoff; the `tofu_proxy` module itself adds nothing observable).
-   That is ~28 ms over the bare-Python floor and ~166 ms under the naive 225
-   ms — roughly **~180 ms added per `terragrunt plan`**, noise beside an 8 s
-   `tofu init`. The cost discipline is guarded by a unit test that imports only
-   `tunstrap.tofu_proxy` in a fresh interpreter and asserts none of
-   `tunstrap.cli`/`click`/`pydantic`/`asyncssh`/`cryptography`/`ruamel` loaded.
-   The shell shim remains cheaper (≈2 ms); if a consumer's plan runs dozens of
-   fast-path invocations and every millisecond matters, the consumer file is
-   still the lower-overhead choice.
+   on the pass-through paths** — it `execvp`s `tofu` first — and
+   `tunstrap/__init__.py` resolves `__version__` lazily (PEP 562), so the
+   package import loads no `importlib.metadata` either. Measured fast path,
+   end-to-end via the installed entry: **~25 ms** (≈17 ms interpreter + a
+   now-cheap package import + the execvp handoff). That is about **12× the
+   ~2 ms shell shim**, i.e. **~74 ms added per `terragrunt plan`**, noise beside
+   an 8 s `tofu init`. (Before the lazy `__init__`, the same path was ~59 ms —
+   `importlib.metadata` contributed ~41 ms; making `__version__` lazy dropped
+   `import tunstrap` 67.3→17.5 ms and the pass-through 58.8→24.6 ms.) The cost
+   discipline is guarded by a unit test that imports only `tunstrap.tofu_proxy`
+   in a fresh interpreter and asserts none of `tunstrap.cli`/`click`/`pydantic`/
+   `asyncssh`/`cryptography`/`ruamel`/`importlib.metadata` loaded. The shell
+   shim remains cheaper (≈2 ms); a consumer for whom every millisecond of the
+   fast path matters can still write the 3-line shim — but for everyone else
+   ~25 ms is noise, and the entry point removes the copy/commit/drift entirely.
 2. **A committed file is the stable path `terraform_binary` wants.** Answered.
    `uv tool install` yields a stable `tunstrap_tofu` entry point at
    `~/.local/bin/tunstrap_tofu` (mirroring `tunstrap`), identical across

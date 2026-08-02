@@ -9,11 +9,17 @@ into the consumer's repo.
 
 Cost discipline. The pass-through branches (``TUNSTRAP_INPUT`` unset, or a
 no-cluster subcommand like ``init``/``version``) ``execvp`` straight into
-``tofu`` **without importing ``tunstrap.cli`` or any heavy dependency**, so
-they pay only interpreter startup plus this package's ``__init__`` (the
-``importlib.metadata`` lookup, measured at ~43 ms; see the task report). The
-tunnelled branch imports ``tunstrap.cli`` lazily — that path already costs
-seconds for the SSH handshake and the child, so the import is noise there.
+``tofu`` **without importing ``tunstrap.cli`` or any heavy dependency**.
+``tunstrap/__init__.py`` resolves ``__version__`` lazily (PEP 562), so the
+package import itself loads no ``importlib.metadata`` on this path. Measured
+end-to-end via the installed entry point the fast path is **~25 ms** (≈17 ms
+interpreter + a now-cheap package import + the execvp handoff) — about **12×
+the ~2 ms shell shim**, i.e. **~74 ms added per ``terragrunt plan``** at three
+fast-path hits, still noise beside an 8 s ``tofu init``. For a consumer for
+whom every millisecond of the fast path matters, a 3-line shell shim remains
+the lower-overhead option (see ``docs/recipe_terragrunt.md``). The tunnelled
+branch imports ``tunstrap.cli`` lazily — that path already costs seconds for the
+SSH handshake and the child, so the import is noise there.
 
 Terraform vocabulary lives here by deliberate owner decision; see the
 "Shipping the shim" history in

@@ -456,12 +456,16 @@ approach. Measured (see `docs/recipe_terragrunt.md` "Why a console script
 (now)"): `sh` shim ~2 ms; bare Python ~17 ms; Python plus `import
 tunstrap.cli` ~225 ms (the import alone ~184 ms). The shipped `tunstrap_tofu`
 does **not** import `cli` on the pass-through paths — it `execvp`s `tofu`
-first — so its measured fast path is **~59 ms** end-to-end (~17 ms interpreter
-+ ~41 ms `importlib.metadata` in the package `__init__`, structural, + ~1 ms
-execvp; the `tofu_proxy` module itself adds nothing observable). At three
-fast-path invocations per `terragrunt plan` that is ~180 ms/plan, judged noise
-beside an 8 s `tofu init`. The discipline (no `cli`/`click`/`pydantic`/etc. on
-the pass-through paths) is guarded by a unit test; the consumer-file shim
+first — and `tunstrap/__init__.py` resolves `__version__` lazily (PEP 562), so
+the package import loads no `importlib.metadata` either. The measured fast
+path is **~25 ms end-to-end via the installed entry** (≈17 ms interpreter + a
+now-cheap package import + the execvp handoff) — about **12× the ~2 ms shell
+shim**, i.e. **~74 ms per `terragrunt plan`** at three fast-path hits, judged
+noise beside an 8 s `tofu init`. (Before the lazy `__init__`, the same path was
+~59 ms — `importlib.metadata` contributed ~41 ms; making `__version__` lazy
+dropped `import tunstrap` 67.3→17.5 ms and the pass-through 58.8→24.6 ms.) The
+discipline (no `cli`/`click`/`pydantic`/etc. on the pass-through paths, and no
+`importlib.metadata` either) is guarded by a unit test; the consumer-file shim
 remains the ~2 ms option for cost-sensitive consumers.
 
 (b) **Terraform vocabulary inside the package** — this is the trade being
@@ -1430,14 +1434,15 @@ Added post-land (the `tunstrap_tofu` entry point):
     `uv tool install` yields a stable `tunstrap_tofu` entry point (item (c) of
     "Shipping the shim" answered), so `terraform_binary` points at a stable
     installed path with nothing copied into the consumer's repo. The fast-path
-    cost (item (a)) is managed by `execvp`-ing `tofu` before any `cli` import —
-    measured ~59 ms end-to-end vs ~225 ms naive (see the recipe). The
-    Terraform-vocabulary objection (item (b)) is the trade being deliberately
-    taken: `init`/`-version`/`TF_VAR_tunstrap`/`tofu` live in
-    `tunstrap/tofu_proxy.py`, while `cli.py` stays generic (it gains only a
-    `suppress_kubeconfig` parameter and a `run_via_env_input` entry, no
-    Terraform names). The consumer-file shim remains supported and is still
-    what the e2e tier drives. The `env -u KUBECONFIG` incantation becomes
+    cost (item (a)) is managed by `execvp`-ing `tofu` before any `cli` import
+    and resolving `__version__` lazily — measured **~25 ms end-to-end via the
+    installed entry** (~12× the ~2 ms shell shim; ~74 ms per plan) vs ~225 ms
+    naive (see the recipe). The Terraform-vocabulary objection (item (b)) is
+    the trade being deliberately taken: `init`/`-version`/`TF_VAR_tunstrap`/
+    `tofu` live in `tunstrap/tofu_proxy.py`, while `cli.py` stays generic (it
+    gains only a `suppress_kubeconfig` parameter and a `run_via_env_input`
+    entry, no Terraform names). The consumer-file shim remains supported and is
+    still what the e2e tier drives. The `env -u KUBECONFIG` incantation becomes
     `suppress_kubeconfig=True` inside the built child env — same property (a
     broken `config_path` chain cannot fall back to KUBECONFIG), no child-side
     wrapper; the property is pinned by a unit test proven red against the wrong

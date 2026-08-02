@@ -261,7 +261,7 @@ def test_bypass_decision_execs_tofu(
 
 
 @pytest.mark.parametrize("cmd", ["plan", "output", "validate", "test", "-chdir=x plan"])
-def test_tunnel_decision_runs_toFu_in_process(
+def test_tunnel_decision_runs_tofu_in_process(
     monkeypatch: pytest.MonkeyPatch,
     capturing_execvp: list[list[str]],
     spawn: list[Any],
