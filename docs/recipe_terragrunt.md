@@ -534,10 +534,15 @@ exact. Cite it for what it proves; do not let prose drift past it.
 > `uv tool install` produces both `tunstrap` and `tunstrap_tofu` and
 > `terraform_binary` can point at a stable installed path with nothing copied
 > into the consumer's repo. The consumer-file shim above remains available and
-> is still what the e2e tier drives; the two are behaviourally equivalent
-> except where this section says otherwise. The original three objections are
-> kept below, each with its resolution, because the trade is real and worth
-> knowing before you choose between them.
+> is still what the e2e tier drives. The two agree on what matters: both tunnel
+> every command the consumer deliberately opted into Terragrunt's `commands`
+> (the proxy must not veto that with a cluster-only allow-list of its own), and
+> both bypass `init`. The two deliberate differences: the proxy also bypasses
+> `version`/`-version`/`-help`/no-subcommand (harmless no-cluster cases the shell
+> pointlessly tunnelled), and it parses argv past `-chdir` so `tofu -chdir=DIR
+> init` bypasses correctly — closing the shell shim's documented gap. The
+> original three objections are kept below, each with its resolution, because the
+> trade is real and worth knowing before you choose between them.
 
 The three reasons the design originally argued for a consumer file, and where
 each stands now:

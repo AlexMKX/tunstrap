@@ -30,16 +30,23 @@ _INPUT_ENV = "TUNSTRAP_INPUT"
 _OUTPUT_VAR = "TF_VAR_tunstrap"
 _TOFU = "tofu"
 
-# tofu subcommands that make Kubernetes/Helm provider API calls and so need a
-# tunnel. Anything not listed takes the pass-through branch when
-# TUNSTRAP_INPUT is set, because it does not contact the cluster. ``init`` is
-# the load-bearing entry: Terragrunt's extra_arguments.env_vars scopes the
-# variable to the listed commands AND their automatic ``init`` (measured fact
-# 4 in the design spec), so a ``terragrunt plan`` sets TUNSTRAP_INPUT for the
-# auto-init too — without this bypass the auto-init would build a needless
-# second tunnel. ``console`` can evaluate provider data sources; the recipe
-# lists it as "yes, if you use it".
-_CLUSTER_COMMANDS = frozenset({"plan", "apply", "destroy", "refresh", "import", "console"})
+# tofu subcommands that BYPASS the tunnel when TUNSTRAP_INPUT is set — the ones
+# that provably do not contact the cluster. Behaviourally equivalent to the
+# shell shim's ``case "$1" in init|-version)`` plus the no-cluster extras
+# (``version`` subcommand, and ``-help``/no-subcommand, which ``_find_subcommand``
+# returns ``None`` for, also bypassing). ``init`` is the load-bearing entry:
+# Terragrunt's extra_arguments.env_vars scopes TUNSTRAP_INPUT to the listed
+# commands AND their automatic ``init`` (measured fact 4 in the design spec), so
+# a ``terragrunt plan`` sets it for the auto-init too — without this bypass the
+# auto-init would build a needless second tunnel.
+#
+# Everything NOT in this set TUNNELS. TUNSTRAP_INPUT is set only for commands
+# the consumer deliberately listed in Terragrunt's ``commands``, so the proxy
+# must honour that opt-in (e.g. ``output`` — the e2e tier lists it in
+# ``commands`` and asserts the tunnelled row) rather than second-guess it with a
+# cluster-only allow-list of its own. An earlier allow-list version did exactly
+# that and was a behaviour change, not the ``-chdir`` gap fix it posed as.
+_BYPASS_COMMANDS = frozenset({"init", "version"})
 
 # Global flags that take their value as a SEPARATE argv token (``-chdir DIR``).
 # Their ``=`` form (``-chdir=DIR``) is one token and is handled by the bare
@@ -61,10 +68,22 @@ def main() -> int:
     raw = os.environ.get(_INPUT_ENV, "")
     if not raw.strip():
         _exec_tofu(argv)
-    if _find_subcommand(argv) not in _CLUSTER_COMMANDS:
+    if _should_bypass(argv):
         _exec_tofu(argv)
     _run_tunnelled(argv)
     return 0  # pragma: no cover — _run_tunnelled exits
+
+
+def _should_bypass(argv: list[str]) -> bool:
+    """True iff the subcommand needs no tunnel (``TUNSTRAP_INPUT`` assumed set).
+
+    The pinned bypass set: ``init`` and ``version`` subcommands, plus anything
+    ``_find_subcommand`` returns ``None`` for (``-version``/``-help`` global
+    flags, or no subcommand at all). Everything else tunnels. Pinned exhaustively
+    by the ``_should_bypass`` table test; do not broaden without updating it.
+    """
+    subcmd = _find_subcommand(argv)
+    return subcmd is None or subcmd in _BYPASS_COMMANDS
 
 
 def _exec_tofu(argv: list[str]) -> None:

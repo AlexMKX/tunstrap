@@ -169,79 +169,116 @@ def test_passthrough_when_input_env_whitespace_execs_tofu(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    ("argv", "why"),
-    (
-        (["init"], "auto-init shares the plan command's env_vars (measured fact 4)"),
-        (["-version"], "version flag prints and exits; no cluster contact"),
-        (["version"], "version subcommand (modern tofu); no cluster contact"),
-        (["-help"], "help prints and exits; no cluster contact"),
-        ([], "no subcommand prints help; no cluster contact"),
-        # The documented gap the shell shim could not close:
-        (["-chdir=somewhere", "init"], "-chdir=DIR init: shell matched $1 only"),
-        (["-chdir", "somewhere", "init"], "-chdir DIR init (space form)"),
-        (["--chdir=somewhere", "init"], "long --chdir=DIR init"),
-        (["-chdir=somewhere", "-version"], "-chdir=DIR -version"),
-    ),
-)
-def test_no_cluster_subcommand_execs_tofu_even_with_input_set(
+# The bypass set the proxy ships, pinned exhaustively. Behaviour must match the
+# shell shim (``case "$1" in init|-version)``) plus the no-cluster extras
+# (``version`` subcommand, ``-help``, no subcommand), so that everything else
+# TUNNELS when TUNSTRAP_INPUT is set. Tunelling everything-not-bypassed is the
+# load-bearing half: TUNSTRAP_INPUT is set only for commands the consumer
+# deliberately listed in Terragrunt's ``commands``, so the proxy must honour a
+# deliberate opt-in (e.g. ``output`` — the e2e tier at test_terragrunt_apply.py
+# lists it and asserts the tunnelled row) rather than second-guess it with an
+# allow-list of its own.
+_BYPASS_CASES = [
+    (["init"], "auto-init shares the plan command's env_vars (measured fact 4)"),
+    (["version"], "version subcommand (modern tofu); no cluster contact"),
+    (["-version"], "version flag prints and exits; no cluster contact"),
+    (["-help"], "help prints and exits; no cluster contact"),
+    ([], "no subcommand prints help; no cluster contact"),
+    # The documented gap the shell shim could not close (its ``case "$1"`` saw
+    # ``-chdir`` as the first token, so it tunnelled a needless init):
+    (["-chdir=somewhere", "init"], "-chdir=DIR init: shell matched $1 only"),
+    (["-chdir", "somewhere", "init"], "-chdir DIR init (space form)"),
+    (["--chdir=somewhere", "init"], "long --chdir=DIR init"),
+    (["-chdir=somewhere", "-version"], "-chdir=DIR -version"),
+]
+_TUNNEL_CASES = [
+    # The provider-API commands the recipe enumerates as needing a tunnel:
+    "plan",
+    "apply",
+    "destroy",
+    "refresh",
+    "import",
+    "console",
+    # Commands that read state/files only — these tunnel too, NOT because they
+    # need the cluster, but because TUNSTRAP_INPUT being set means the CONSUMER
+    # asked for them (Terragrunt's ``commands`` list is the authority). The
+    # proxy must not veto that:
+    "output",
+    "validate",
+    "show",
+    "state",
+    "taint",
+    "untaint",
+    "fmt",
+    "providers",
+    "test",
+    # An unknown subcommand tunnels rather than guesses — failing loudly inside
+    # run/tofu beats silently bypassing something the consumer opted into.
+    "weird-unknown-cmd",
+]
+
+
+@pytest.mark.parametrize(("argv", "_why"), _BYPASS_CASES)
+def test_should_bypass_returns_true_for_the_pinned_bypass_set(argv: list[str], _why: str) -> None:
+    """Every bypass row bypasses (decided structurally, past global flags)."""
+    del _why
+    # pylint: disable=protected-access
+    assert proxy._should_bypass(argv) is True
+
+
+@pytest.mark.parametrize("cmd", _TUNNEL_CASES)
+def test_should_bypass_returns_false_for_everything_else(cmd: str) -> None:
+    """Everything not in the bypass set tunnels — incl. consumer opt-ins.
+
+    This is the row that caught the v1 allow-list defect: an allow-list of
+    ``{plan,apply,…}`` bypassed ``output``/``validate``/``test``, vetoing a
+    consumer that had deliberately listed them in Terragrunt's ``commands``.
+    """
+    # pylint: disable=protected-access
+    assert proxy._should_bypass([cmd]) is False
+
+
+def test_should_bypass_is_not_a_substring_match() -> None:
+    """``init`` as a flag value is consumed, not read as the subcommand."""
+    # pylint: disable=protected-access
+    assert proxy._should_bypass(["-chdir", "init", "plan"]) is False
+    assert proxy._should_bypass(["-chdir=init", "plan"]) is False
+
+
+@pytest.mark.parametrize(("argv", "_why"), _BYPASS_CASES)
+def test_bypass_decision_execs_tofu(
     monkeypatch: pytest.MonkeyPatch,
     capturing_execvp: list[list[str]],
     argv: list[str],
-    why: str,
+    _why: str,
 ) -> None:
-    """TUNSTRAP_INPUT set but the subcommand needs no tunnel → exec tofu.
-
-    Each row is one the shell shim's literal-``$1`` match either bypassed
-    correctly (init/-version) or missed (every -chdir form). The parametrize
-    ``why`` documents why the row belongs here, not just what it asserts.
-    """
+    """A bypass-row argv with TUNSTRAP_INPUT set execs tofu untouched."""
+    del _why
     monkeypatch.setenv(VAR, _payload())
     with pytest.raises(_ExecvpCalled):
         _run_main(argv)
-    assert capturing_execvp == [["tofu", *argv]], f"row failed ({why})"
+    assert capturing_execvp == [["tofu", *argv]]
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["plan"],
-        ["apply"],
-        ["destroy"],
-        ["refresh"],
-        ["import"],
-        ["-chdir=somewhere", "plan"],  # gap fix must NOT over-broaden: plan still tunnels
-        ["-chdir", "x", "apply"],
-    ],
-)
-def test_cluster_subcommand_tunnels_even_with_input_set(
+@pytest.mark.parametrize("cmd", ["plan", "output", "validate", "test", "-chdir=x plan"])
+def test_tunnel_decision_runs_toFu_in_process(
     monkeypatch: pytest.MonkeyPatch,
     capturing_execvp: list[list[str]],
     spawn: list[Any],
-    argv: list[str],
+    cmd: str,
 ) -> None:
-    """A cluster-contacting subcommand must NOT take the pass-through branch."""
+    """Everything outside the bypass set tunnels — honouring the consumer opt-in.
+
+    ``output`` is the casualty that caught the v1 allow-list: the e2e tier lists
+    it in ``commands`` and asserts the tunnelled row, which an allow-list of
+    cluster-only commands would have bypassed.
+    """
     monkeypatch.setenv(VAR, _payload())
     spawn[0](_success({"node": _conn(db=5432)}))
     with pytest.raises(SystemExit) as excinfo:  # run_command exits with child code
-        _run_main(argv)
+        _run_main(cmd.split())
     assert excinfo.value.code == 0
-    assert capturing_execvp == [], "a cluster command must not exec tofu directly"
-
-
-def test_subcommand_parsing_is_not_a_substring_match() -> None:
-    """``init`` appearing only as a flag value must NOT be read as the subcommand.
-
-    A naive "``init`` anywhere in argv" predicate (one of the shell shim's
-    documented fix options) would wrongly bypass ``tofu -chdir init plan``.
-    The proxy parses argv structurally — ``-chdir`` consumes its value — so the
-    subcommand is ``plan``, which is a cluster command and tunnels.
-    """
-    # pylint: disable=protected-access
-    assert proxy._find_subcommand(["-chdir", "init", "plan"]) == "plan"
-    assert proxy._find_subcommand(["-chdir=init", "plan"]) == "plan"
-    # And the bypass set is still matched when init really is the subcommand.
-    assert proxy._find_subcommand(["-chdir=init", "init"]) == "init"
+    assert capturing_execvp == [], "a tunnel-row command must not exec tofu directly"
 
 
 # --------------------------------------------------------------------------- #
@@ -326,6 +363,40 @@ def test_tunnelled_suppresses_kubeconfig_in_child_env(
     assert FakePopen.last_env.get("TUNSTRAP_SESSION_DIR") == "/s"
 
 
+def test_tunnelled_drops_an_inherited_kubeconfig_in_the_multi_node_case(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """An operator-inherited KUBECONFIG is dropped in the multi-node case.
+
+    The pre-injection pop in ``_build_child_env`` is load-bearing ONLY when
+    ``inject_scalars`` is False — i.e. a multi-node payload, where ``render_env``
+    is not called and so the post-injection pop never runs. (For single-node the
+    post-injection pop already removes KUBECONFIG regardless of source, so a
+    single-node "inherited KUBECONFIG" test would not isolate it — verified by
+    mutation.) The proxy supports multi-node via its hardcoded ``--output-var``,
+    so this case is reachable and must stay guarded.
+
+    Without this test the pre-injection pop is deletable with the suite green.
+    """
+    # Inherited operator KUBECONFIG present.
+    monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config-some-other-cluster")
+    # Multi-node payload → inject_scalars=False → no render_env, no post-injection pop.
+    monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node()}))
+    spawn[0](_success({"a": _conn(db=5432), "b": _conn(db=5433)}))
+    with pytest.raises(SystemExit) as excinfo:
+        _run_main(["plan"])
+    assert excinfo.value.code == 0
+    assert FakePopen.last_env is not None
+    assert "KUBECONFIG" not in FakePopen.last_env, (
+        "inherited operator KUBECONFIG survived the multi-node path: a broken "
+        "chain could reach the operator's own cluster via this fallback"
+    )
+    # Multi-node still gets the structured channel (and no TUNSTRAP_* scalars).
+    assert "TF_VAR_tunstrap" in FakePopen.last_env
+    leaked_scalars = [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR]
+    assert leaked_scalars == []
+
+
 def test_tunnelled_propagates_child_exit_code(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
 ) -> None:
@@ -343,6 +414,31 @@ def test_tunnelled_propagates_child_exit_code(
     with pytest.raises(SystemExit) as excinfo:
         _run_main(["plan"])
     assert excinfo.value.code == 42
+
+
+def test_run_via_env_input_preserves_the_exit_64_usage_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``click.UsageError`` from ``run`` surfaces as exit 64, not a traceback.
+
+    ``run_via_env_input`` calls ``run_command.callback`` outside Click's group,
+    so the ``_UsageExit64`` wrapper that normally turns a ``UsageError`` into
+    exit 64 does not apply. Without an explicit guard the error propagates as a
+    raw traceback. Triggered here with an ``--output-var`` name that collides
+    with a key ``run`` injects (``KUBECONFIG`` for a kube-target payload): the
+    collision is detected pre-spawn, so no daemon is orphaned either.
+    """
+    monkeypatch.setenv(
+        VAR, _payload({"node": _node(kube_targets={"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}})})
+    )
+
+    def _spawn_must_not_run(*args: object, **kwargs: object) -> object:
+        raise AssertionError("spawn_daemon must not be reached on a pre-spawn usage error")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn_must_not_run)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_mod.run_via_env_input(VAR, "KUBECONFIG", ["true"])  # KUBECONFIG collides
+    assert excinfo.value.code == 64
 
 
 # --------------------------------------------------------------------------- #

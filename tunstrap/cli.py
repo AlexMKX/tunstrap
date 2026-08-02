@@ -711,26 +711,39 @@ def run_via_env_input(  # pylint: disable=too-many-arguments
     variables and flags a programmatic ``run`` caller supplies. The Terraform-
     specific decisions (``TUNSTRAP_INPUT``, ``TF_VAR_tunstrap``, ``tofu``) live
     in the proxy module.
+
+    ``run_command`` is invoked via ``.callback``, outside Click's group, so the
+    ``_UsageExit64`` wrapper that turns a ``click.UsageError`` into exit 64 does
+    not apply here. A ``UsageError`` from ``run``'s pre-spawn validation
+    (e.g. an ``--output-var`` name that collides with an injected key) is caught
+    and rendered with Click's own formatter, then exits 64 — preserving the
+    group's contract rather than surfacing as a raw traceback.
     """
     run = run_command.callback
     assert run is not None  # always set by the @main.command decorator
-    run(
-        ssh_key=None,
-        ssh_key_passphrase=None,
-        ssh_password_stdin=False,
-        targets=(),
-        kube=(),
-        fetch=(),
-        auto_stop_idle_seconds=None,
-        materialize=False,
-        log_file=None,
-        input_env=input_env,
-        output_var=output_var,
-        session_dir=None,
-        grace_seconds=grace_seconds,
-        args=tuple(child_cmd),
-        suppress_kubeconfig=suppress_kubeconfig,
-    )
+    try:
+        run(
+            ssh_key=None,
+            ssh_key_passphrase=None,
+            ssh_password_stdin=False,
+            targets=(),
+            kube=(),
+            fetch=(),
+            auto_stop_idle_seconds=None,
+            materialize=False,
+            log_file=None,
+            input_env=input_env,
+            output_var=output_var,
+            session_dir=None,
+            grace_seconds=grace_seconds,
+            args=tuple(child_cmd),
+            suppress_kubeconfig=suppress_kubeconfig,
+        )
+    except click.UsageError as exc:
+        # Mirror _UsageExit64 (cli.py:53-59): render Click's usage message and
+        # exit 64, never a raw traceback. Fires pre-spawn, so no daemon to clean.
+        exc.show()
+        sys.exit(64)
     sys.exit(0)  # pragma: no cover — run_command.callback always exits
 
 
