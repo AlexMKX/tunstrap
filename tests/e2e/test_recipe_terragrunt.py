@@ -14,7 +14,6 @@ AST guard in test_rig.py and the drift guards in test_shim.py.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -64,13 +63,18 @@ def _uncomment(block: str) -> str:
     )
 
 
-def test_root_block_parses_and_resolves_the_shim(tmp_path: Path) -> None:
-    """The recipe's root block is valid Terragrunt and terraform_binary reaches the shim.
+def test_root_block_points_terraform_binary_at_the_proxy(tmp_path: Path) -> None:
+    """The recipe's root block is valid Terragrunt and points at tunstrap_tofu.
 
-    Fails-when-broken: a misplaced terraform_binary (back inside terraform{})
-    fails `hcl validate` with "An argument named terraform_binary is not expected
-    here"; a broken path expression fails `render`; a path that resolves to a
-    non-executable fails the is_file/os.access check. (The verbatim red for the
+    The recipe's ``terragrunt-root`` block is a literal-path
+    ``terraform_binary = "/home/you/.local/bin/tunstrap_tofu"`` (a placeholder a
+    consumer substitutes with ``command -v tunstrap_tofu``'s output). hcl validate
+    catches a misplaced terraform_binary (back inside terraform{}, which TG
+    rejects with "An argument named terraform_binary is not expected here") and
+    any syntax error; render confirms the attribute survives evaluation as a
+    string naming ``tunstrap_tofu``. The literal is a placeholder, so real-path
+    execution (apply through the installed proxy) is exercised separately by
+    test_terragrunt_apply_destroy_through_the_proxy. (The verbatim red for the
     misplaced-terraform_binary case is in the SDD report for the original pin.)
     """
     require_tools("terragrunt", "git")
@@ -82,15 +86,7 @@ def test_root_block_parses_and_resolves_the_shim(tmp_path: Path) -> None:
     assert "terragrunt-root" in blocks, missing_root
 
     repo = _consumer_repo(tmp_path)
-    # A real tofu is not needed: hcl validate is static, render evaluates the path
-    # but does not invoke the binary.
-    shim = repo / "bin" / "tofu-tunstrap"
-    shim.parent.mkdir(parents=True)
-    shim.write_text("#!/bin/sh\nexit 0\n")
-    shim.chmod(0o755)
-
-    root_config = repo / "terragrunt.hcl"
-    root_config.write_text(blocks["terragrunt-root"])
+    (repo / "terragrunt.hcl").write_text(blocks["terragrunt-root"])
     root_validate = subprocess.run(
         ["terragrunt", "hcl", "validate", "--working-dir", str(repo)],
         capture_output=True,
@@ -111,11 +107,33 @@ def test_root_block_parses_and_resolves_the_shim(tmp_path: Path) -> None:
     render_detail = f"root terragrunt.hcl failed to render:\n{rendered.stderr}{rendered.stdout}"
     assert rendered.returncode == 0, render_detail
     resolved = json.loads(rendered.stdout)["terraform_binary"]
-    expected = str(shim)
-    resolved_msg = f"terraform_binary resolved to {resolved!r}, expected the shim at {expected}"
-    assert resolved == expected, resolved_msg
-    exec_msg = f"terraform_binary resolved to {resolved!r}, which is not an executable file"
-    assert Path(resolved).is_file() and os.access(resolved, os.X_OK), exec_msg
+    name_msg = f"terraform_binary resolved to {resolved!r}, which does not name tunstrap_tofu"
+    assert "tunstrap_tofu" in resolved, name_msg
+
+
+def test_recipe_install_fence_tells_the_consumer_to_install(tmp_path: Path) -> None:
+    """The recipe's install fence points at the package, not a copied file.
+
+    Re-aims the drift guard that used to pin the recipe's ```sh tofu-shim```
+    snippet byte-identical to tests/e2e/shim/tofu-tunstrap. That shim is retired
+    (tunstrap_tofu replaces it), so the pin now guards what the recipe tells a
+    consumer to DO to get the proxy: a ```sh install``` fence whose command
+    installs the package (yielding both tunstrap and tunstrap_tofu). Fails-when-
+    broken: the fence is removed, renamed, or stops installing the package (e.g.
+    reverts to a `cp bin/tofu-tunstrap` instruction), and the guard catches it.
+    """
+    del tmp_path
+    blocks = extract_labeled_blocks(RECIPE.read_text())
+    missing_install = (
+        "recipe is missing its ```sh install``` block - the label that pins the "
+        "install instruction is gone (it replaced the retired ```sh tofu-shim```)"
+    )
+    assert "install" in blocks, missing_install
+    install_cmd = blocks["install"]
+    uv_msg = f"install fence no longer uses `uv tool install`: {install_cmd!r}"
+    assert "uv tool install" in install_cmd, uv_msg
+    pkg_msg = f"install fence no longer installs the tunstrap package: {install_cmd!r}"
+    assert "tunstrap" in install_cmd, pkg_msg
 
 
 @pytest.mark.parametrize("empty_host", [False, True], ids=["host-set", "host-empty"])

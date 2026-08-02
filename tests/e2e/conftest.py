@@ -34,17 +34,21 @@ from tests.e2e.rig import (
 
 @pytest.fixture(scope="session")
 def e2e_preflight() -> None:
-    """Linux, and the product itself on PATH.
+    """Linux, and the product itself (both entry points) on PATH.
 
-    A missing ``tunstrap`` is a hard failure rather than a skip: it means the
-    suite was launched without the venv on PATH, and silently skipping would
-    report a green tier that tested nothing.
+    A missing ``tunstrap`` or ``tunstrap_tofu`` is a hard failure rather than a
+    skip: it means the suite was launched without the venv on PATH, and silently
+    skipping would report a green tier that tested nothing. ``tunstrap_tofu`` is
+    the proxy the tier drives now (it replaced the consumer shell shim); both
+    entry points come from the same ``pip install -e`` so if one is missing the
+    install itself is broken.
     """
     if sys.platform != "linux":
         skip_or_fail("e2e tier requires Linux + Docker")
-    if shutil.which("tunstrap") is None:
+    missing = [name for name in ("tunstrap", "tunstrap_tofu") if shutil.which(name) is None]
+    if missing:
         pytest.fail(
-            "tunstrap is not on PATH. Run the e2e tier as:\n"
+            f"{missing} not on PATH. Run the e2e tier as:\n"
             '  PATH="$PWD/.venv/bin:$PATH" .venv/bin/pytest tests/e2e -m e2e -q'
         )
 

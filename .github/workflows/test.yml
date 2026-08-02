@@ -189,9 +189,15 @@ jobs:
           # count and the JUnit `tests` count in lockstep and the guard would
           # stay GREEN for exactly the deletion it exists to catch (proven
           # tautological). Only an independent literal anchors against deletion;
-          # at 32 == the current tier it catches the loss of any one test. Bump
-          # to the new total whenever the tier grows.
-          assert counts["tests"] >= 32, f"expected at least 32 e2e tests, ran {counts['tests']}"
+          # at 31 == the current tier it catches the loss of any one test. Bump
+          # to the new total whenever the tier grows. (Was 32; lowered to 31 by
+          # the tunstrap_tofu migration: retired 4 shell-shim-text/drift tests
+          # that the in-package proxy makes obsolete, added 3 proxy/install/gap-
+          # fix replacements, net -1. test_terragrunt_apply's pollution sub-check
+          # retired too - the proxy runs run in-process so the tunstrap-wrapper
+          # negative control no longer reaches the stream; purity is now proven
+          # by the byte-equality test.)
+          assert counts["tests"] >= 31, f"expected at least 31 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 

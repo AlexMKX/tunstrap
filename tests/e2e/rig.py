@@ -41,7 +41,19 @@ CONTROL_PLANE = f"{CLUSTER_NAME}-control-plane"
 NODE_IMAGE = "kindest/node:v1.34.0"
 COMPOSE_FILE = HERE / "docker-compose.yml"
 IN_NODE_KUBECONFIG = "/etc/kube/admin.conf"
-SHIM = HERE / "shim" / "tofu-tunstrap"
+
+# The proxy under test: the shipped ``tunstrap_tofu`` console entry, invoked by
+# name (it is on PATH — e2e_preflight fails the tier if either tunstrap or
+# tunstrap_tofu is absent). Replaces the consumer shell shim the tier used to
+# drive; the proxy is the documented path now (see docs/recipe_terragrunt.md).
+TOFU_PROXY = "tunstrap_tofu"
+
+# The --output-var negative control: a test-only shell script that runs
+# ``tunstrap run`` WITHOUT --output-var, so var.tunstrap keeps its "" default and
+# the providers take their inert branch. Earns its keep independently of the
+# main proxy — it is the proof that an apply without --output-var fails, i.e.
+# that the decoded config_path is the only route to the cluster. Never shipped
+# to a consumer; test-only.
 CONTROL_SHIM = HERE / "shim" / "tofu-tunstrap-novar"
 
 

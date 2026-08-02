@@ -16,172 +16,109 @@ modes you will hit, and an honest statement of what is and is not proven.
 
 ## The model in one paragraph
 
-Terragrunt lets you point `terraform_binary` at any executable. The shim is that
-executable. For commands that touch a live cluster (`plan`, `apply`, …) the
-shim `exec`s into `tunstrap run`, which **becomes `tofu`'s parent**: it opens
-the tunnel, injects the connection details into `tofu`'s environment, waits for
-`tofu`, and tears the tunnel down in a `finally` — so the tunnel's lifetime is
-exactly the child's. For commands that do not need a tunnel (`init`,
-`-version`), and whenever no tunnel is wanted, the shim `exec`s `tofu` directly.
-tunstrap is never a daemon you start and stop by hand in this model; it owns the
-child, so orphans become impossible by construction.
+Terragrunt lets you point `terraform_binary` at any executable. `tunstrap_tofu`
+is that executable. For commands that touch a live cluster (`plan`, `apply`, …)
+the proxy opens the tunnel and **becomes `tofu`'s parent**: it injects the
+connection details into `tofu`'s environment, waits for `tofu`, and tears the
+tunnel down in a `finally` — so the tunnel's lifetime is exactly the child's.
+For commands that do not need a tunnel (`init`, `-version`), and whenever no
+tunnel is wanted, the proxy `execvp`s `tofu` directly. tunstrap is never a
+daemon you start and stop by hand in this model; it owns the child, so orphans
+become impossible by construction.
 
 ## Prerequisites
 
-- `tunstrap` on `PATH` (the shim `exec`s `tunstrap run` — see Installation below
-  for a one-line install).
-- `tofu` on `PATH` (the shim `exec`s it for the pass-through branches and as the
-  tunnelled child).
-- The shim itself, committed at `bin/tofu-tunstrap` relative to your repo root.
-  Terragrunt's `terraform_binary` resolves a path and probes it every run, so it
-  wants a stable, reviewable home (see Installation).
+- `tunstrap_tofu` on `PATH` (the installed proxy entry point — see Installation
+  below for a one-line install). `tofu` on `PATH` too (the proxy `execvp`s it
+  for the pass-through branches and as the tunnelled child).
 - An OpenTofu/Terraform module that reads the connection details from a
   `TF_VAR_*` variable. The shape is given below and is load-bearing.
 
 ## Installation
 
-Two pieces, installed once: `tunstrap` on `PATH`, and the shim at a stable path.
-
-### tunstrap
+One piece, installed once: the `tunstrap` package, which ships **two** console
+entry points — `tunstrap` and `tunstrap_tofu` (the proxy).
 
 tunstrap is **not on PyPI** — a direct-reference dependency (the asyncssh fork
 the package is built on) blocks publishing — so install it from the git source
 or a local checkout:
 
-```sh
+```sh install
 uv tool install "git+https://github.com/AlexMKX/tunstrap.git"
 # or from a local checkout:
 uv tool install /path/to/tunstrap
 ```
 
-Use `uv tool install`, not `uvx`. `uv tool install` yields a **stable** entry
-point at `~/.local/bin/tunstrap`
-(→ `~/.local/share/uv/tools/tunstrap/bin/tunstrap`), identical across reinstalls;
-`uvx` runs from an ephemeral `~/.cache/uv/archive-v0/…` path that changes per
-resolution. (This is the correction to reason 3 in "Why not a console script"
-below: that stable-path caveat held for `uvx`, not for `uv tool install`.)
+Use `uv tool install`, not `uvx`. `uv tool install` yields **stable** entry
+points at `~/.local/bin/tunstrap` and `~/.local/bin/tunstrap_tofu`, identical
+across reinstalls; `uvx` runs from an ephemeral `~/.cache/uv/archive-v0/…` path
+that changes per resolution. There is nothing to copy into your repo: point
+`terraform_binary` at the installed `tunstrap_tofu` and you are done.
 
-### The shim
+## How the proxy works
 
-Copy the snippet in the next section into `bin/tofu-tunstrap`, `chmod 0755` it,
-and commit it. Committing it — rather than generating it at runtime — keeps it
-reviewable and pinned alongside the config, with no runtime moving parts.
-
-### Localizing install in `terragrunt.hcl` (`run_cmd`, optional)
-
-If you would rather the bootstrap lived entirely in `terragrunt.hcl`, the
-`terraform_binary` attribute also accepts `run_cmd(...)`. The command runs
-**before** the `-version` probe, is cached once per `plan`, and runs once **per
-unit** under `run --all`:
-
-```hcl
-# runs before the -version probe; its stdout becomes terraform_binary
-terraform_binary = run_cmd("${get_repo_root()}/bin/materialize-shim.sh")
-```
-
-where `materialize-shim.sh` idempotently writes the shim and `echo`s its path.
-The cost is one shell-script exec per unit per run (there is no cross-unit
-cache), and the script is a runtime moving part that can drift from the reviewed
-shim — which is why the committed file remains the default.
-
-A `before_hook` **cannot** install the shim instead. Terragrunt probes
-`<terraform_binary> -version` roughly 50 ms *before* any hook runs, and with the
-binary missing it fails outright before the hook executes (measured; the hook's
-marker file never appears). Hook-based install is a dead end.
-
-## The shim
-
-This is the shim verbatim — copy it into your repo (e.g. `bin/tofu-tunstrap`),
-`chmod 0755` it, and commit it. It is identical to the one the e2e tier drives
-(`tests/e2e/shim/tofu-tunstrap`).
-
-```sh tofu-shim
-#!/bin/sh
-# Consumer-facing OpenTofu shim. Terraform-specific decisions live here, not in
-# tunstrap; see docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md,
-# "The tofu shim - consumer-facing, Terraform-specific, outside tunstrap".
-#
-# Never write to stdout. Terragrunt captures and labels tofu's stdout by
-# default, and `terragrunt output -json` consumers parse it. Diagnostics go to
-# stderr or a file.
-#
-# `exec` is correct in both pass-through branches: there is nothing to clean up.
-# `exec`ing *into* `tunstrap run` is also correct - run owns the child via Popen
-# + signal forwarding + a finally teardown, so nothing execs past teardown, and
-# Terragrunt's signals reach tunstrap directly.
-
-# Pass through when the payload is absent: the consumer omits the env_vars key
-# entirely when the infrastructure is not applied yet.
-[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"
-
-# Skip the tunnel for init and -version. `tofu init` configures the backend and
-# downloads providers; it contacts neither the Kubernetes API nor Helm, and the
-# consumer's state backend is S3-compatible over the public internet, not
-# tunnelled. Without this, env-var scoping yields two tunnels per
-# `terragrunt plan` - one for the auto-init, one for the plan.
-case "$1" in init|-version) exec tofu "$@" ;; esac
-
-# `env -u KUBECONFIG` is not optional. `run` builds
-# child_env = {**os.environ, **render_env(out)} and render_env sets KUBECONFIG
-# last, so it wins over anything inherited - the clearing has to happen inside
-# the child command. Left in place it is a silent fallback pointing at the same
-# materialized file config_path would use, so a broken TF_VAR_tunstrap chain
-# would still find a working cluster and every positive assertion in the e2e
-# tier would prove nothing.
-exec tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
-  -- env -u KUBECONFIG tofu "$@"
-```
-
-### What each branch does
+`tunstrap_tofu` is a thin dispatcher around `tofu` with three branches, decided
+from `argv` and `TUNSTRAP_INPUT`:
 
 | Condition | Branch | What happens |
 |---|---|---|
-| `TUNSTRAP_INPUT` unset | line 1 | `exec tofu "$@"` — no tunnel, no tunstrap. This is the "infra not applied yet" path: Terragrunt simply omits the `env_var`, so the shim is a transparent `tofu` wrapper. |
-| `$1` is `init` or `-version` | line 2 | `exec tofu "$@"` — same. `init` only configures the backend and downloads providers; it never reaches the cluster API. Skipping it avoids a redundant tunnel. |
-| otherwise | line 3 | `exec tunstrap run --input-env … --output-var … -- env -u KUBECONFIG tofu "$@"` — tunstrap opens the tunnel, injects `TF_VAR_tunstrap` (the full connection envelope) plus the scalar env, runs `tofu`, and tears down. |
+| `TUNSTRAP_INPUT` unset | pass-through | `execvp tofu "$@"` — no tunnel, no `tunstrap`. This is the "infra not applied yet" path: Terragrunt omits the env_var, so the proxy is a transparent `tofu` wrapper. |
+| subcommand is `init`/`version`/`-version`/`-help`, or no subcommand | pass-through | `execvp tofu "$@"` — same. `init` only configures the backend and downloads providers; it never reaches the cluster API. Skipping it avoids a redundant tunnel per `terragrunt plan` (Terragrunt's `extra_arguments.env_vars` reaches the listed commands **and** their automatic `init`). The subcommand is parsed past global flags, so `tofu -chdir=DIR init` also bypasses (see "A fixed gap" below). |
+| otherwise | tunnelled | opens the tunnel, injects `TF_VAR_tunstrap` (the connection envelope) plus the scalar env, runs `tofu`, and tears the tunnel down in a `finally` — so the tunnel's lifetime is exactly the child's. Reuses `tunstrap run`'s hardened path in-process; no second process level. |
 
-`exec` is correct everywhere here: in the pass-through branches there is nothing
-to clean up, and `exec`ing *into* `tunstrap run` is desirable — one fewer
-process level, and Terragrunt's signals reach tunstrap directly. tunstrap owns
-the child via `Popen` + signal forwarding + a `finally` teardown, so nothing
-`exec`s *past* teardown.
+**Never write to stdout.** Terragrunt captures and labels `tofu`'s stdout by
+default, and `terragrunt output -json` consumers parse it. Diagnostics go to
+stderr or a file. `tunstrap run` is silent on stdout after the child starts.
 
-### `env -u KUBECONFIG` is load-bearing — do not drop it
+**`KUBECONFIG` is suppressed in the child environment, not on the command line.**
+For a single-node payload `run` injects `KUBECONFIG` (pointing at the same
+materialized file `config_path` would use); left in place it is a **silent
+fallback** — if the `TF_VAR_tunstrap` → `config_path` wiring were broken, the
+providers would still find a working cluster via `KUBECONFIG` and everything
+would appear fine. The proxy sets `suppress_kubeconfig`, so `run` builds the
+child environment with `KUBECONFIG` removed (both anything inherited and what it
+would inject), making the decoded `config_path` the **only** route to the
+cluster. This is the property the earlier shell shim bought with
+`env -u KUBECONFIG` on the child command line; in-process it is a direct removal
+inside the built environment — same property, no wrapper. The e2e tier proves it
+by recording `tofu`'s actual environment and asserting `KUBECONFIG` is absent.
 
-This is the single most important line in the shim, and the temptation to
-"clean it up" must be resisted. Here is why, in full:
+### Wiring it into Terragrunt
 
-For a single-node payload, `tunstrap run` injects `KUBECONFIG` into the child
-environment (pointing at the same materialized kubeconfig file that
-`config_path` would use). It does this by building
-`child_env = {**os.environ, **render_env(out)}`, and `render_env` places
-`KUBECONFIG` **last** — so it overrides anything inherited. Clearing it has to
-happen *inside the child command*, with `env -u KUBECONFIG`.
-
-Left in place, `KUBECONFIG` is a **silent fallback**: if the
-`TF_VAR_tunstrap` → `try(jsondecode(...))` → `config_path` wiring were broken or
-removed, the `kubernetes` and `helm` providers would still find a working
-cluster via `KUBECONFIG` and everything would *appear* fine.
-
-This is not hypothetical. The e2e tier proved it behaviourally: with
-`env -u KUBECONFIG` removed, an `apply` with a deliberately broken
-`config_path` chain **succeeded** — reaching the cluster through the injected
-`KUBECONFIG` instead of through the decoded path. With `env -u KUBECONFIG` in
-place, the same broken chain fails. Dropping the flag turns a hard failure into
-a silent wrong result that looks identical to success.
-
-## Wiring it into Terragrunt
-
-`terraform_binary` takes a **path only** (see "Measured Terragrunt facts" below).
-Set it once in your root `terragrunt.hcl`:
+`terraform_binary` takes a **path only** (see "Measured Terragrunt facts"
+below), so point it at the absolute path of the installed entry point. Find it
+once with `command -v tunstrap_tofu` and paste the result:
 
 ```hcl terragrunt-root
 # root.hcl (or the top of each unit's terragrunt.hcl)
 # terraform_binary is a TOP-LEVEL attribute, not a member of the terraform {}
 # block: TG rejects it there with "An argument named terraform_binary is not
 # expected here." See "Measured Terragrunt facts" below.
-terraform_binary = "${get_repo_root()}/bin/tofu-tunstrap"
+#
+# The absolute path of the installed tunstrap_tofu entry point. Find it with
+# `command -v tunstrap_tofu` (uv tool install places it at
+# ~/.local/bin/tunstrap_tofu). A literal path, not run_cmd: Terragrunt's run_cmd
+# execs its first arg without a shell and lets the command's stdout leak into the
+# parent's, which corrupts `terragrunt output -json`; a literal path has neither
+# problem (measured against Terragrunt v1.1.1).
+terraform_binary = "/home/you/.local/bin/tunstrap_tofu"
 ```
+
+A `before_hook` **cannot** install the proxy instead. Terragrunt probes
+`<terraform_binary> -version` roughly 50 ms *before* any hook runs, and with the
+binary missing it fails outright before the hook executes (measured; the hook's
+marker file never appears).
+
+### Alternative: a shell shim for the fast path
+
+For the unusual consumer for whom every millisecond of the fast path matters,
+`tunstrap_tofu` costs ~25 ms per pass-through invocation (vs ~2 ms for a shell
+`exec`) — about ~74 ms added per `terragrunt plan`, noise beside an 8 s
+`tofu init`. A 3-line `/bin/sh` shim (`[ -n "$TUNSTRAP_INPUT" ] || exec tofu
+"$@"; case "$1" in init|-version) exec tofu "$@" ;; esac; exec tunstrap run
+--input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap -- env -u KUBECONFIG
+tofu "$@"`) recovers the ~2 ms fast path at the cost of copying, committing and
+keeping it in sync. For nearly everyone the entry point is the better trade.
 
 Then, in the unit that needs the tunnel, declare `TUNSTRAP_INPUT` as an
 `extra_arguments` env var scoped to the commands that actually contact the
@@ -242,8 +179,8 @@ reference inline in `env_vars` above. Expected shape (uncomment and fill):
 ```
 
 When `local.cluster_host == ""` (infra not applied, or a mock-state run), the
-`env_vars` map is empty, `TUNSTRAP_INPUT` is unset, and the shim takes its
-first pass-through branch — so the same unit plans cleanly with no tunnel and
+`env_vars` map is empty, `TUNSTRAP_INPUT` is unset, and the proxy takes its
+pass-through branch — so the same unit plans cleanly with no tunnel and
 no mock-state workaround. This replaces the entire `--placeholder-host` idea:
 `env_vars` is an ordinary HCL map, so "no tunnel" is just "key omitted".
 
@@ -262,13 +199,13 @@ commands make provider API calls". Concretely:
 | `init`, `validate` | no | backend config / schema checks only; no cluster contact |
 | `output`, `show`, `state *`, `taint`, `untaint`, `fmt`, `providers` | no | read/rewrite state and files |
 
-Everything not listed gets `TUNSTRAP_INPUT` unset and takes the shim's
+Everything not listed gets `TUNSTRAP_INPUT` unset and takes the proxy's
 pass-through branch, so the failure mode of forgetting a command is a **provider
 error against an inert loopback endpoint**, not a silent wrong result.
 
 ## The module side
 
-The shim hands the module the connection envelope as a JSON string in
+The proxy hands the module the connection envelope as a JSON string in
 `TF_VAR_tunstrap`. The module decodes it and derives its provider `config_path`
 from it. This is the exact chain the e2e tier exists to prove:
 
@@ -393,7 +330,7 @@ intact rather than truncated.
 
 ### The input variable is scrubbed
 
-The variable named by `--input-env` — `TUNSTRAP_INPUT` in the shim above —
+The variable named by `--input-env` — `TUNSTRAP_INPUT` in the proxy above —
 holds the `InputSchema`, including `ssh_pkey`. `run` removes it from the child's
 environment before exec'ing `tofu`, because `tofu` passes its environment to
 every provider plugin, `external` data source and `local-exec` provisioner.
@@ -415,7 +352,8 @@ recipe rests on them.
    / `--tf-path` / `TG_TF_PATH`, and it accepts a **path only**:
    `--tf-path "/tmp/wrapper.sh --flag"` fails on the `-version` probe with
    `fork/exec /tmp/wrapper.sh --flag: no such file or directory`. This is why
-   the shim is a file, not a command-line template.
+   `terraform_binary` resolves a path (whether the `tunstrap_tofu` entry point
+   or a shell-shim alternative), not a command-line template.
 2. **`inputs` are delivered to the child as `TF_VAR_<name>` environment
    variables** (JSON-encoded values), not `.tfvars.json`, not `-var-file`. This
    is why the envelope travels as `TF_VAR_tunstrap`.
@@ -423,15 +361,15 @@ recipe rests on them.
    `init`, but not `-version`.** So a `terragrunt plan` with
    `commands = ["plan","apply"]` sets your env var for the auto-`init` and for
    `plan`, but leaves it unset for the `-version` probe — which is exactly why
-   the shim's `-version` pass-through works without a tunnel.
-4. **`dependency.*` resolves inside `extra_arguments.env_vars`, but not inside
-   `locals`.** In `locals` you get `"dependency" is not defined`. This is why
-   the recipe keeps any `dependency.*` reference inline in the `env_vars` block.
-5. **Payloads survive byte-for-byte.** A ~10 KB JSON value arrived at both the
-   auto-`init` and `plan` with identical length and SHA-256 — no truncation, no
-   `E2BIG`. Multi-line content with PEM delimiters, `"` and `$` arrived
-   byte-identical. So embedding SSH private keys in the payload is safe at the
-   transport level (see "Security" for the stronger alternative).
+   the proxy's `-version` pass-through works without a tunnel.
+ 4. **`dependency.*` resolves inside `extra_arguments.env_vars`, but not inside
+    `locals`.** In `locals` you get `"dependency" is not defined`. This is why
+    the recipe keeps any `dependency.*` reference inline in the `env_vars` block.
+ 5. **Payloads survive byte-for-byte.** A ~10 KB JSON value arrived at both the
+    auto-`init` and `plan` with identical length and SHA-256 — no truncation, no
+    `E2BIG`. Multi-line content with PEM delimiters, `"` and `$` arrived
+    byte-identical. So embedding SSH private keys in the payload is safe at the
+    transport level (see "Security" for the stronger alternative).
 
 ## Failure modes you will hit
 
@@ -439,50 +377,43 @@ recipe rests on them.
   the module takes its inert branch, and the provider errors against
   `https://127.0.0.1:0`. That is the *designed* loud failure — add the command
   to the list. `import` is the classic omission.
-- **A `--` you forgot inside `tunstrap run`.** This is a `run`-level rule, but
-  surfaces through the shim: `--` is mandatory whenever the child command or any
-  of its arguments begins with `-`. The shim always passes `--`, so this only
-  bites if you hand-edit it.
+- **A `--` you forgot inside `tunstrap run`.** This is a `run`-level rule. The
+  proxy always passes `--` for the user, so a consumer driving `tunstrap_tofu`
+  never hits it; it only surfaces if you hand-edit the `run` invocation (e.g. in
+  the shell-shim alternative). `--` is mandatory whenever the child command or
+  any of its arguments begins with `-`.
 - **A broken `config_path` chain that *succeeds*.** This is the silent one, and
-  it is what `env -u KUBECONFIG` exists to prevent. If you ever see an apply
+  it is what `suppress_kubeconfig` exists to prevent. If you ever see an apply
   succeed after a wiring change you expected to break it, the first thing to
-  check is whether `KUBECONFIG` is still being cleared.
-- **An `init` that *builds* a tunnel.** If the shim's `init` skip stops
+  check is whether `KUBECONFIG` is still being cleared from the child env.
+- **An `init` that *builds* a tunnel.** If the proxy's `init` bypass stops
   matching, you get two tunnels per `plan` (one for auto-`init`, one for the
-  plan itself). See the gap below for one known way this happens.
+  plan itself). See "A fixed gap" below for one known way this used to happen.
 
-## A real gap: `tofu -chdir=DIR init` builds a needless tunnel
+## A fixed gap: `tofu -chdir=DIR init` bypasses correctly
 
-The shim's skip branch is:
+The original consumer shell shim matched the bypass with a literal first token:
 
 ```sh
 case "$1" in init|-version) exec tofu "$@" ;; esac
 ```
 
-This matches only a **literal first token**. `tofu init` matches; `tofu
--version` matches. But `tofu -chdir=somewhere init` does **not**, because the
-first token is `-chdir=…`, not `init`. So a `-chdir` invocation misses the
-bypass and builds a tunnel it does not need.
+This matched `tofu init` and `tofu -version`, but **not** `tofu -chdir=somewhere
+init`, because the first token is `-chdir=…`, not `init`. So a `-chdir`
+invocation missed the bypass and built a tunnel it did not need — wasteful, not
+dangerous, and silent (a slower `init`, no error).
 
-This is **untested and unfixed for the shell shim**. It is not dangerous — the
-tunnel is harmless, it just costs time — but it is wasteful, and the failure is
-silent (you will not see an error, only a slower `init`).
+**`tunstrap_tofu` closes the gap.** The proxy parses argv structurally past
+global flags (`-chdir DIR` and `-chdir=DIR`, both space and `=` forms), so
+`tunstrap_tofu -chdir=DIR init` correctly identifies `init` as the subcommand
+and bypasses. The bypass set is pinned exhaustively by a unit test
+(`test_should_bypass_*` in `tests/unit/test_tofu_proxy.py`), so a future edit
+that re-broadens or re-narrows it cannot pass silently.
 
-> **Fixed in the `tunstrap_tofu` entry point.** The in-package proxy parses
-> argv structurally past global flags (`-chdir DIR` and `-chdir=DIR`), so
-> `tunstrap_tofu -chdir=DIR init` correctly bypasses the tunnel. If you use the
-> shipped entry point rather than the consumer shim, this gap does not apply.
-
-Guidance, in order of preference:
-
-1. **Let Terragrunt handle `chdir`.** Terragrunt already `cd`s into the unit
-   directory before invoking `terraform_binary`, so `tofu` itself does not need
-   `-chdir`. This is the normal path and avoids the issue entirely.
-2. **If you must call the shim with `-chdir` directly**, extend the `case` to
-   scan past leading global flags, e.g. match `init`/`-version` anywhere in
-   `"$@"` rather than only in `"$1"`. Keep the `exec tofu "$@"` (the flags
-   still belong to `tofu`). Be aware that broadening the match is itself a
-   place to introduce a bug, so test it.
+If you use the shell-shim alternative instead of the entry point, the gap
+returns — the shell `case` cannot parse past flags without becoming a substring
+match (which would wrongly bypass `tofu -chdir init plan`). The entry point is
+the recommended path precisely because it can make this distinction.
 
 ## What is proven — and what is not
 
@@ -517,10 +448,10 @@ exact. Cite it for what it proves; do not let prose drift past it.
   proof does not generalise to them.
 - **`terragrunt output -json` parsing IS now tested end-to-end** (in
   `tests/e2e/test_terragrunt_apply.py`), in two configurations: with `output`
-  absent from `commands` (the pass-through shim → `tofu`) and with `output`
+  absent from `commands` (the pass-through proxy → `tofu`) and with `output`
   added (the worst case: output routed through `tunstrap run`, proving tunstrap
   run's own stdout survives a real Terragrunt consumer's parse — the property
-  the shim's `# Never write to stdout` comment guards). **Still not tested:**
+  the proxy's "never write to stdout" rule guards). **Still not tested:**
   stdout purity for `plan`/`apply` under real Terragrunt (their stdout is the
   plan/apply diff, consumed differently) and any consumer other than
   `terragrunt output -json`. The worst-case test proves the purity property; it
@@ -533,8 +464,9 @@ exact. Cite it for what it proves; do not let prose drift past it.
 > console script, `tunstrap_tofu` (`tunstrap/tofu_proxy.py`), so
 > `uv tool install` produces both `tunstrap` and `tunstrap_tofu` and
 > `terraform_binary` can point at a stable installed path with nothing copied
-> into the consumer's repo. The consumer-file shim above remains available and
-> is still what the e2e tier drives. The two agree on what matters: both tunnel
+> into the consumer's repo. The consumer-file shell shim is retired from this
+> recipe (the e2e tier now drives `tunstrap_tofu`); it survives only as the
+> lower-overhead alternative the section after next mentions. The two agree on
 > every command the consumer deliberately opted into Terragrunt's `commands`
 > (the proxy must not veto that with a cluster-only allow-list of its own), and
 > both bypass `init`. The two deliberate differences: the proxy also bypasses

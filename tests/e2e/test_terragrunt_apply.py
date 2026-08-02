@@ -1,13 +1,14 @@
-"""Real `terragrunt apply`/`destroy`/`output` through the shim, against the cluster.
+"""Real `terragrunt apply`/`destroy`/`output` through the proxy, against the cluster.
 
-Code: docs/recipe_terragrunt.md, tests/e2e/shim/tofu-tunstrap, tests/e2e/module/.
+Code: docs/recipe_terragrunt.md, tunstrap/tofu_proxy.py (driven as TOFU_PROXY),
+tests/e2e/shim/tofu-tunstrap-novar (the --output-var negative control).
 Method: stand up a consumer repo whose terragrunt.hcl uses the recipe's pinned
 root block (verbatim) plus a copy of its extra_arguments mechanism, then drive
 real Terragrunt through it. Read every result through the in-node oracle
 (`kubectl_in_node`) and a recording `tofu` - never Terragrunt's own exit code.
 
 Two configurations:
-- ``test_terragrunt_apply_destroy_through_the_shim``: the recipe's recommended
+- ``test_terragrunt_apply_destroy_through_the_proxy``: the recipe's recommended
   `commands` list (output absent). Drives apply/destroy and asserts the full
   four-row env asymmetry (-version / init / apply+destroy / output) from the
   recording tofu, AFTER destroy so every command's invocation is captured.
@@ -32,10 +33,7 @@ import pytest
 
 from tests.e2e.rig import (
     CONTROL_SHIM,
-    RECIPE_MD,
-    SHIM,
     collect_tofu_invocations,
-    extract_labeled_blocks,
     kubectl_in_node,
     require_tools,
     tofu_env,
@@ -55,20 +53,38 @@ pytestmark = [pytest.mark.e2e]
 RECIPE_COMMANDS = ["plan", "apply", "destroy", "refresh", "import"]
 
 
+def _installed_proxy() -> str:
+    """The absolute path of the ``tunstrap_tofu`` entry point on PATH.
+
+    What a real consumer pastes into ``terraform_binary`` after running
+    ``command -v tunstrap_tofu``. e2e_preflight guarantees it is installed.
+    """
+    path = shutil.which("tunstrap_tofu")
+    assert path is not None, "tunstrap_tofu not on PATH; e2e_preflight should have failed the tier"
+    return path
+
+
 def _consumer_repo(
     tmp_path: Path,
     rig: dict[str, Any],
     module_src: Path,
-    shim: Path,
     *,
     commands: list[str],
+    terraform_binary: str,
+    control_shim: Path | None = None,
 ) -> Path:
-    """A consumer working tree whose root block comes from the recipe verbatim.
+    """A consumer working tree wired to the installed ``tunstrap_tofu`` (or the control).
 
-    The `terragrunt.hcl` is the recipe's pinned **root block** (extracted, so a
-    doc edit drifts this test) followed by a copy of the recipe's
-    extra_arguments *mechanism* - the same `local.X != "" ? { ... } : {}`
-    conditional - carrying a rig-built payload and the supplied `commands` list.
+    The positive path (``control_shim is None``) copies nothing into the repo:
+    ``terraform_binary`` is the absolute path of the installed entry point (the
+    caller passes ``shutil.which("tunstrap_tofu")``), exactly as a real consumer
+    would after finding it with ``command -v tunstrap_tofu``. The negative-control
+    path copies the control shim into ``bin/`` and points ``terraform_binary`` at
+    it - the control is a test tool, not a consumer artifact.
+
+    The unit block carries a copy of the recipe's extra_arguments *mechanism* -
+    the same `local.X != "" ? { ... } : {}` conditional - with a rig-built
+    payload and the supplied `commands` list.
 
     Scaffolding the recipe does NOT carry, and why it does not need it:
     - the `locals` block. The recipe defers locals to the consumer; this supplies
@@ -81,14 +97,13 @@ def _consumer_repo(
     - the module at the repo root (`source = "."`), copied from tests/e2e/module/.
 
     git-init'd so the recipe's ${get_repo_root()} resolves to this directory.
+    The recipe's literal-path root block is NOT extracted here (it carries a
+    consumer-specific placeholder); the recipe-pin test (test_recipe_terragrunt)
+    validates that block separately. This repo uses the resolved real path.
     """
     repo = tmp_path / "consumer"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
-    bin_dir = repo / "bin"
-    bin_dir.mkdir()
-    shutil.copy2(shim, bin_dir / "tofu-tunstrap")
-    os.chmod(bin_dir / "tofu-tunstrap", 0o755)
     for entry in module_src.iterdir():
         dst = repo / entry.name
         if dst.exists():
@@ -98,7 +113,17 @@ def _consumer_repo(
         else:
             shutil.copy2(entry, dst)
 
-    root_block = extract_labeled_blocks(RECIPE_MD.read_text())["terragrunt-root"]
+    if control_shim is not None:
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        copied = bin_dir / "tofu-tunstrap-novar"
+        shutil.copy2(control_shim, copied)
+        os.chmod(copied, 0o755)
+        binary_value = str(copied)
+    else:
+        binary_value = terraform_binary
+    root_block = f'terraform_binary = "{binary_value}"\n'
+
     payload = tunstrap_input_json(rig)
     commands_hcl = ", ".join(f'"{c}"' for c in commands)
     unit_block = (
@@ -130,12 +155,12 @@ def _terragrunt_env(module: Path, cache: Path, recorder_bin: Path | None = None)
     whole tier depends on); TF_DATA_DIR is dropped because under Terragrunt tofu
     runs in .terragrunt-cache/<hash>/, not the module copy. TUNSTRAP_INPUT and
     TF_VAR_tunstrap are both popped, so within this env extra_arguments.env_vars
-    is the *only* source of TUNSTRAP_INPUT and `tunstrap run --output-var` the
+    is the *only* source of TUNSTRAP_INPUT and the proxy's `--output-var` the
     only source of TF_VAR_tunstrap. The TF_VAR_tunstrap pop makes the
     tunnelled-branch inference hermetic by construction: the value the recorder
     sees in an apply/destroy env could only have been set by tunstrap run, not
     inherited from an ambient export. The ambient KUBECONFIG scrub here is the
-    OUTER guard; the shim's `env -u KUBECONFIG` is the inner one - both are
+    OUTER guard; the proxy's ``suppress_kubeconfig`` is the inner one - both are
     needed for the routing exclusion to hold.
     """
     env = tofu_env(module, cache)
@@ -180,7 +205,7 @@ def _assert_row(
     Fails-when-broken per row: an empty `envs` (the command never ran through the
     recording tofu) fails first; a missing key fails naming it; a present
     forbidden key fails naming it. The asymmetry this encodes is the recipe's
-    measured behaviour, so a regression in the shim's init/-version bypass or in
+    measured behaviour, so a regression in the proxy's init/-version bypass or in
     tunstrap run's TUNSTRAP_INPUT scrub surfaces here.
     """
     assert envs, f"no `{label}` invocation was recorded"
@@ -192,17 +217,17 @@ def _assert_row(
         assert all(key not in e for e in envs), msg
 
 
-def test_terragrunt_apply_destroy_through_the_shim(
+def test_terragrunt_apply_destroy_through_the_proxy(
     kube_rig: dict[str, Any],
     tofu_module: Path,
     tofu_plugin_cache: Path,
     tmp_path: Path,
 ) -> None:
-    """Apply+destroy through the shim with the recommended commands; full asymmetry.
+    """Apply+destroy through the proxy with the recommended commands; full asymmetry.
 
     `output` is deliberately ABSENT from `commands` (the recipe's
     recommendation: output reads state, not the cluster). So `terragrunt output
-    -json` here takes the shim's pass-through branch (line 17, `exec tofu`);
+    -json` here takes the proxy's pass-through branch (`execvp tofu`);
     `tunstrap run` is NOT in that pipeline. The tunnelled-output purity claim has
     its own test below - this one is about apply/destroy and the four-row
     delivery/bypass asymmetry.
@@ -212,10 +237,10 @@ def test_terragrunt_apply_destroy_through_the_shim(
     - apply rc 0 + oracle namespace/configmap/release: a broken env_vars delivery
       or --output-var chain drops tofu to the inert branch (127.0.0.1:0); apply
       fails, nothing is created (demonstrated in the no-output-var test below).
-    - -version row (neither var): env_vars skips -version and the shim bypasses
+    - -version row (neither var): env_vars skips -version and the proxy bypasses
       it; if either regressed, -version would carry a var and the row fails.
     - init row (TUNSTRAP_INPUT set, no TF_VAR_tunstrap): env_vars reaches
-      auto-init but the shim bypasses init; if the bypass regressed, init would
+      auto-init but the proxy bypasses init; if the bypass regressed, init would
       carry TF_VAR_tunstrap (a redundant tunnel per plan) and the row fails. The
       row quantifies over every recorded init via ``all()``, so a future
       Terragrunt that auto-inits for a command outside ``commands`` (an init
@@ -223,8 +248,10 @@ def test_terragrunt_apply_destroy_through_the_shim(
       pass; both failure shapes are the intended behaviour.
     - apply/destroy rows (TF_VAR_tunstrap set; TUNSTRAP_INPUT and KUBECONFIG
       absent): TUNSTRAP_INPUT absence is the ssh_pkey scrub (recipe:"The input
-      variable is scrubbed"); KUBECONFIG absence is the shim's `env -u`. If
-      either leaked, the row fails.
+      variable is scrubbed"); KUBECONFIG absence is the proxy's
+      ``suppress_kubeconfig`` (the property the shell shim used to buy with
+      ``env -u KUBECONFIG`` on the command line; observed here in the child env).
+      If either leaked, the row fails.
     - output row (neither var): output pass-through; if it carried a var, output
       was not pass-through and the row fails.
     - output value == envelope path: a STATE-integrity check (the path tofu
@@ -235,7 +262,13 @@ def test_terragrunt_apply_destroy_through_the_shim(
     bin_rec = tmp_path / "bin_rec"
     dump_dir = tmp_path / "dumps"
     write_tofu_recorder(bin_rec, dump_dir)
-    repo = _consumer_repo(tmp_path, kube_rig, tofu_module, SHIM, commands=RECIPE_COMMANDS)
+    repo = _consumer_repo(
+        tmp_path,
+        kube_rig,
+        tofu_module,
+        commands=RECIPE_COMMANDS,
+        terraform_binary=_installed_proxy(),
+    )
     env = _terragrunt_env(tofu_module, tofu_plugin_cache, bin_rec)
 
     applied = _tg(repo, env, "apply", "-auto-approve")
@@ -311,11 +344,11 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     """`terragrunt output -json` through `tunstrap run` parses cleanly (the claim).
 
     This is the test the branch review named as missing. With `output` ADDED to
-    `commands`, env_vars delivers TUNSTRAP_INPUT for output, the shim routes it
+    `commands`, env_vars delivers TUNSTRAP_INPUT for output, the proxy routes it
     through `tunstrap run`, and `terragrunt output -json` parses tofu's stdout
-    that has traversed tunstrap run. That is the purity risk the shim's `# Never
-    write to stdout` comment guards, and it was previously proven only with a
-    FAKE tofu under a pass-through shim - the wrong path.
+    that has traversed tunstrap run. That is the purity risk the proxy's "never
+    write to stdout" rule guards, and it was previously proven only with a
+    FAKE tofu under a pass-through proxy - the wrong path.
 
     Framing: tunnelled `output` is the WORST CASE, not a recommendation. The
     recipe omits `output` from `commands` on purpose (output reads state, not the
@@ -328,8 +361,8 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
       JSON would not parse. Proven against a deliberate break below aimed AT this
       claim - a `tunstrap` wrapper on PATH that writes to stdout before exec'ing
       the real binary, so the emission originates at the tunstrap-run step (the
-      stream under test), not at the shim. A shim echo would prove only shim-
-      author discipline and reuses the old pass-through check's shape; this
+      stream under test), not at the proxy. A proxy-branch echo would prove only
+      proxy-author discipline and reuses the old pass-through check's shape; this
       proves the purity property the comment actually guards. Verbatim red in the
       task report.
     - output row carries TF_VAR_tunstrap: confirms the invocation actually went
@@ -344,7 +377,11 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     dump_dir = tmp_path / "dumps"
     write_tofu_recorder(bin_rec, dump_dir)
     repo = _consumer_repo(
-        tmp_path, kube_rig, tofu_module, SHIM, commands=[*RECIPE_COMMANDS, "output"]
+        tmp_path,
+        kube_rig,
+        tofu_module,
+        commands=[*RECIPE_COMMANDS, "output"],
+        terraform_binary=_installed_proxy(),
     )
     env = _terragrunt_env(tofu_module, tofu_plugin_cache, bin_rec)
 
@@ -383,40 +420,20 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     )
     assert kubepath == expected_path, path_detail
 
-    # --- break aimed at THIS claim: `tunstrap run` writes to stdout.
-    # The shim execs into `tunstrap run`, so fd 1 of that invocation IS the stream
-    # terragrunt parses as tofu's stdout. A shim-echo would prove only shim-author
-    # discipline (and reuses the old pass-through check's shape - an inherited
-    # break, which the review correctly rejected). To prove the purity property
-    # the comment actually guards, wrap `tunstrap` on PATH so the wrapper writes a
-    # marker to stdout before exec'ing the real binary: the emission originates at
-    # the tunstrap-run step, the exact stream under test. Nothing under tunstrap/
-    # or the shim is touched (no in-place edit, so no exec-bit trap to restore).
-    real_tunstrap = shutil.which("tunstrap")
-    assert real_tunstrap is not None, "e2e_preflight guarantees tunstrap on PATH"
-    wrap_dir = tmp_path / "tunstrap_wrap"
-    wrap_dir.mkdir()
-    marker = "LEAK-FROM-TUNSTRAP-RUN"
-    wrapper = wrap_dir / "tunstrap"
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        f'if [ "$1" = run ]; then printf "%s\\n" "{marker}"; fi\n'
-        f'exec "{real_tunstrap}" "$@"\n'
-    )
-    wrapper.chmod(0o755)
-    polluted_env = dict(env)
-    polluted_env["PATH"] = f"{wrap_dir}:{env['PATH']}"
-    polluted = _tg(repo, polluted_env, "output", "-json")
-    # Discriminating: the marker MUST be in the stream and MUST be what breaks the
-    # parse, so an unrelated failure (empty stdout) cannot satisfy this check.
-    marker_absent = (
-        f"pollution marker absent from stdout - the break did not reach the "
-        f"stream, so this is not evidence about tunstrap run's stdout purity "
-        f"(rc={polluted.returncode}, stdout={polluted.stdout[:200]!r})"
-    )
-    assert marker in polluted.stdout, marker_absent
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(polluted.stdout)
+    # NOTE on the retired pollution sub-check. An earlier version of this test
+    # appended a discriminating negative control: wrap `tunstrap` on PATH to
+    # write a marker before exec'ing the real binary, proving the marker reached
+    # the stream terragrunt parses AND broke the JSON parse. That worked under the
+    # shell shim (which `exec`d the `tunstrap` binary) but is inapplicable under
+    # the shipped proxy, which runs `tunstrap run` IN-PROCESS and never invokes
+    # the `tunstrap` binary. Wrapping `tofu` instead does not work either:
+    # `terragrunt output -json` mediates tofu's output and discards the stream on
+    # its own parse failure (rc=1, stdout empty), so the marker never reaches the
+    # captured stdout. The purity property the sub-check served - the tunnelled
+    # path adds no bytes to fd 1 beyond tofu's output - is proven MORE directly by
+    # tests/e2e/test_shim.py::test_tunnelled_stdout_is_byte_identical_to_the_untunnelled_child
+    # (byte-equality against a direct-run oracle), so the terragrunt-layer
+    # negative control is retired rather than left as dead, always-red code.
 
     destroyed = _tg(repo, env, "destroy", "-auto-approve")
     destroy_failed = f"terragrunt destroy failed:\n{destroyed.stdout}{destroyed.stderr}"
@@ -432,21 +449,29 @@ def test_terragrunt_apply_without_output_var_fails_through_terragrunt(
 ) -> None:
     """Negative control for the config_path route (NOT the stdout claim).
 
-    The shim's CONTROL variant opens the tunnel (tunstrap run still runs) but
-    never exports TF_VAR_tunstrap, so var.tunstrap keeps its "" default, the
-    module takes its inert branch, and the providers dial https://127.0.0.1:0.
-    That the apply fails - read through the oracle, not Terragrunt's exit code -
-    is what makes the positive apply test's success meaningful.
+    The CONTROL shim (a test-only ``tunstrap run`` invocation WITHOUT
+    --output-var) opens the tunnel but never exports TF_VAR_tunstrap, so
+    var.tunstrap keeps its "" default, the module takes its inert branch, and the
+    providers dial https://127.0.0.1:0. That the apply fails - read through the
+    oracle, not Terragrunt's exit code - is what makes the positive apply test's
+    success meaningful.
 
     This targets the config_path/`--output-var` route. It is NOT the break for
     the stdout-purity claim (that is the pollution sub-check in
     test_tunnelled_output_through_tunstrap_run_parses_cleanly); it overlaps
     test_tofu_providers::test_apply_without_output_var_fails_even_with_the_tunnel_up
-    because the config_path route is worth guarding at both the direct-shim and
+    because the config_path route is worth guarding at both the direct-proxy and
     Terragrunt-env_vars layers. The cluster is confirmed healthy throughout.
     """
     require_tools("terragrunt", "git")
-    repo = _consumer_repo(tmp_path, kube_rig, tofu_module, CONTROL_SHIM, commands=RECIPE_COMMANDS)
+    repo = _consumer_repo(
+        tmp_path,
+        kube_rig,
+        tofu_module,
+        commands=RECIPE_COMMANDS,
+        control_shim=CONTROL_SHIM,
+        terraform_binary="",  # unused: control_shim set means the copied control is the binary
+    )
     env = _terragrunt_env(tofu_module, tofu_plugin_cache)
 
     applied = _tg(repo, env, "apply", "-auto-approve")

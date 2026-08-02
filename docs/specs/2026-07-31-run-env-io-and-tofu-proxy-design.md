@@ -445,8 +445,9 @@ stdout by default (`--tf-forward-stdout` changes this) and `terragrunt output
 > `[project.scripts]` entry, `tunstrap_tofu` (`tunstrap/tofu_proxy.py`), so
 > `uv tool install` yields both `tunstrap` and `tunstrap_tofu` and
 > `terraform_binary` points at a stable installed path with nothing copied into
-> the consumer's repo. The consumer-file shim remains available and is still
-> what the e2e tier drives; the two coexist.
+> the consumer's repo. The consumer-file shim is retired from the recipe and the
+> e2e tier (the tier now drives `tunstrap_tofu`); it remains only as the
+> lower-overhead alternative the recipe mentions for cost-sensitive consumers.
 
 The original three reasons for keeping the proxy out of the package, and where
 each stands after the reversal:
@@ -1442,7 +1443,9 @@ Added post-land (the `tunstrap_tofu` entry point):
     `tofu` live in `tunstrap/tofu_proxy.py`, while `cli.py` stays generic (it
     gains only a `suppress_kubeconfig` parameter and a `run_via_env_input`
     entry, no Terraform names). The consumer-file shim remains supported and is
-    still what the e2e tier drives. The `env -u KUBECONFIG` incantation becomes
+    still what the e2e tier drives (revised again: the e2e tier now drives
+    `tunstrap_tofu`, and the consumer-file shim is retired from the recipe).
+    The `env -u KUBECONFIG` incantation becomes
     `suppress_kubeconfig=True` inside the built child env — same property (a
     broken `config_path` chain cannot fall back to KUBECONFIG), no child-side
     wrapper; the property is pinned by a unit test proven red against the wrong

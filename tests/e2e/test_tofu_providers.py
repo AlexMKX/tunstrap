@@ -1,8 +1,9 @@
 """OpenTofu's kubernetes and helm providers, driven through a tunstrap tunnel.
 
-Code: tests/e2e/module/, tests/e2e/shim/tofu-tunstrap.
-Method: run the real shim against a per-test copy of the module and a real kind
-cluster; read results back through an oracle that does not use the tunnel.
+Code: tests/e2e/module/, tunstrap/tofu_proxy.py (the shipped ``tunstrap_tofu``
+console entry, driven as ``TOFU_PROXY``).
+Method: run the installed proxy against a per-test copy of the module and a real
+kind cluster; read results back through an oracle that does not use the tunnel.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pytest
 
 from tests.e2e.rig import (
     CONTROL_SHIM,
-    SHIM,
+    TOFU_PROXY,
     collect_tofu_invocations,
     kubectl_in_node,
     tofu_env,
@@ -84,7 +85,7 @@ def test_apply_creates_real_objects_through_the_tunnel_and_destroy_removes_them(
     )
 
     init = subprocess.run(
-        [str(SHIM), "init", "-input=false"],
+        [TOFU_PROXY, "init", "-input=false"],
         cwd=tofu_module,
         env=env,
         capture_output=True,
@@ -94,7 +95,7 @@ def test_apply_creates_real_objects_through_the_tunnel_and_destroy_removes_them(
     assert init.returncode == 0, init.stdout + init.stderr
 
     applied = subprocess.run(
-        [str(SHIM), "apply", "-auto-approve", "-input=false"],
+        [TOFU_PROXY, "apply", "-auto-approve", "-input=false"],
         cwd=tofu_module,
         env=env,
         capture_output=True,
@@ -157,7 +158,7 @@ def test_apply_creates_real_objects_through_the_tunnel_and_destroy_removes_them(
 
     # --- assertion 5: destroy really removes them ---
     destroyed = subprocess.run(
-        [str(SHIM), "destroy", "-auto-approve", "-input=false"],
+        [TOFU_PROXY, "destroy", "-auto-approve", "-input=false"],
         cwd=tofu_module,
         env=env,
         capture_output=True,
