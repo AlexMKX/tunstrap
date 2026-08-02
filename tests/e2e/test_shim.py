@@ -69,7 +69,13 @@ def test_recipe_shim_snippet_is_identical_to_the_driven_file() -> None:
     included in the comparison: the recipe claims *identity*, not just
     logic-equivalence, so a comment that drifted is a real divergence.
     """
-    snippet = extract_labeled_blocks(RECIPE_MD.read_text())["tofu-shim"]
+    blocks = extract_labeled_blocks(RECIPE_MD.read_text())
+    missing_shim = (
+        "recipe is missing its ```sh tofu-shim``` block - the label that pins "
+        "the shim snippet is gone"
+    )
+    assert "tofu-shim" in blocks, missing_shim
+    snippet = blocks["tofu-shim"]
     # A fenced block has no final newline; the file does. That is the only
     # allowed difference - everything else is byte-identical.
     mismatch = (

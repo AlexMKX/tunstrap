@@ -102,10 +102,11 @@ jobs:
     # than by weakening any assertion in tests/e2e/.
     runs-on: ubuntu-latest
     # Bounds a hung `kind create`, a stuck image pull, or a wedged provider
-    # download. The tier runs in ~100s locally; on a cold runner add the 1.45 GB
-    # kindest/node pull, provider downloads, ~35s cluster create and the per-test
-    # ~8s inits. 20 min is ~2x a realistic cold-peak and 18x under the 360m
-    # Actions default that a true hang would otherwise ride.
+    # download. Realistic runtime is a few minutes (cluster create + provider
+    # downloads dominate; per-init registry version-resolution is the slowest
+    # step); this has carried a stale local number twice, so it is intentionally
+    # qualitative. 20 min is a comfortable multiple of that peak and well under
+    # the 360m Actions default a true hang would otherwise ride.
     timeout-minutes: 20
     needs: unit
     env:

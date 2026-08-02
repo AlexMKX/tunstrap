@@ -128,16 +128,22 @@ def _terragrunt_env(module: Path, cache: Path, recorder_bin: Path | None = None)
 
     `tofu_env` scrubs KUBECONFIG and redirects HOME (the silent-pass guards the
     whole tier depends on); TF_DATA_DIR is dropped because under Terragrunt tofu
-    runs in .terragrunt-cache/<hash>/, not the module copy. TUNSTRAP_INPUT is
-    absent so extra_arguments.env_vars is the *only* source of it. The ambient
-    KUBECONFIG scrub here is the OUTER guard; the shim's `env -u KUBECONFIG` is
-    the inner one - both are needed for the routing exclusion to hold.
+    runs in .terragrunt-cache/<hash>/, not the module copy. TUNSTRAP_INPUT and
+    TF_VAR_tunstrap are both popped, so within this env extra_arguments.env_vars
+    is the *only* source of TUNSTRAP_INPUT and `tunstrap run --output-var` the
+    only source of TF_VAR_tunstrap. The TF_VAR_tunstrap pop makes the
+    tunnelled-branch inference hermetic by construction: the value the recorder
+    sees in an apply/destroy env could only have been set by tunstrap run, not
+    inherited from an ambient export. The ambient KUBECONFIG scrub here is the
+    OUTER guard; the shim's `env -u KUBECONFIG` is the inner one - both are
+    needed for the routing exclusion to hold.
     """
     env = tofu_env(module, cache)
     env.pop("TF_DATA_DIR", None)
     if recorder_bin is not None:
         env["PATH"] = f"{recorder_bin}:{env['PATH']}"
     env.pop("TUNSTRAP_INPUT", None)
+    env.pop("TF_VAR_tunstrap", None)
     return env
 
 
@@ -210,7 +216,11 @@ def test_terragrunt_apply_destroy_through_the_shim(
       it; if either regressed, -version would carry a var and the row fails.
     - init row (TUNSTRAP_INPUT set, no TF_VAR_tunstrap): env_vars reaches
       auto-init but the shim bypasses init; if the bypass regressed, init would
-      carry TF_VAR_tunstrap (a redundant tunnel per plan) and the row fails.
+      carry TF_VAR_tunstrap (a redundant tunnel per plan) and the row fails. The
+      row quantifies over every recorded init via ``all()``, so a future
+      Terragrunt that auto-inits for a command outside ``commands`` (an init
+      without TUNSTRAP_INPUT) would also redden it - a loud signal, not a silent
+      pass; both failure shapes are the intended behaviour.
     - apply/destroy rows (TF_VAR_tunstrap set; TUNSTRAP_INPUT and KUBECONFIG
       absent): TUNSTRAP_INPUT absence is the ssh_pkey scrub (recipe:"The input
       variable is scrubbed"); KUBECONFIG absence is the shim's `env -u`. If
@@ -350,7 +360,11 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     kubepath = parsed["kubepath_used"]["value"]
 
     # Confirm it actually traversed tunstrap run (not the pass-through branch):
-    # the output invocation must carry TF_VAR_tunstrap, which only tunstrap run sets.
+    # the output invocation must carry TF_VAR_tunstrap. _terragrunt_env pops any
+    # ambient TF_VAR_tunstrap (and `tofu_env` never injects it), so within this
+    # run the only thing that can set it is `tunstrap run --output-var` - its
+    # presence is the tunnelled-branch proof, resting on the env scrub, not on
+    # an absolute "only tunstrap run sets it" (a caller could export it).
     by_cmd = _invocations_by_command(dump_dir)
     _assert_row(
         "output",
