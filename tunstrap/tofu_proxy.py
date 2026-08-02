@@ -1,0 +1,129 @@
+"""``tunstrap_tofu`` console entry: the OpenTofu proxy, in-process.
+
+This is the in-package replacement for the consumer-side shell shim
+(``tests/e2e/shim/tofu-tunstrap``). Shipping it as a second
+``[project.scripts]`` entry point of this package means ``uv tool install``
+yields both ``tunstrap`` and ``tunstrap_tofu``, so Terragrunt's
+``terraform_binary`` can point at a stable installed path with nothing copied
+into the consumer's repo.
+
+Cost discipline. The pass-through branches (``TUNSTRAP_INPUT`` unset, or a
+no-cluster subcommand like ``init``/``version``) ``execvp`` straight into
+``tofu`` **without importing ``tunstrap.cli`` or any heavy dependency**, so
+they pay only interpreter startup plus this package's ``__init__`` (the
+``importlib.metadata`` lookup, measured at ~43 ms; see the task report). The
+tunnelled branch imports ``tunstrap.cli`` lazily — that path already costs
+seconds for the SSH handshake and the child, so the import is noise there.
+
+Terraform vocabulary lives here by deliberate owner decision; see the
+"Shipping the shim" history in
+``docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md`` and the recipe's
+"Why not a console script" section for the trade.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+_INPUT_ENV = "TUNSTRAP_INPUT"
+_OUTPUT_VAR = "TF_VAR_tunstrap"
+_TOFU = "tofu"
+
+# tofu subcommands that make Kubernetes/Helm provider API calls and so need a
+# tunnel. Anything not listed takes the pass-through branch when
+# TUNSTRAP_INPUT is set, because it does not contact the cluster. ``init`` is
+# the load-bearing entry: Terragrunt's extra_arguments.env_vars scopes the
+# variable to the listed commands AND their automatic ``init`` (measured fact
+# 4 in the design spec), so a ``terragrunt plan`` sets TUNSTRAP_INPUT for the
+# auto-init too — without this bypass the auto-init would build a needless
+# second tunnel. ``console`` can evaluate provider data sources; the recipe
+# lists it as "yes, if you use it".
+_CLUSTER_COMMANDS = frozenset({"plan", "apply", "destroy", "refresh", "import", "console"})
+
+# Global flags that take their value as a SEPARATE argv token (``-chdir DIR``).
+# Their ``=`` form (``-chdir=DIR``) is one token and is handled by the bare
+# ``tok.startswith("-")`` skip below. ``-chdir`` is the flag the shell shim's
+# literal-``$1`` match could not see past, so ``tofu -chdir=DIR init`` missed
+# the bypass and built a needless tunnel — the documented gap this parser fixes.
+_GLOBAL_VALUE_FLAGS = frozenset({"-chdir", "--chdir"})
+
+
+def main() -> int:
+    """``tunstrap_tofu`` entry point.
+
+    Never returns on the pass-through branches: it ``execvp``s into ``tofu``
+    and this process image is replaced. The tunnelled branch delegates to
+    ``run`` (in-process) and exits with the child's code, so it does not
+    return either.
+    """
+    argv = sys.argv[1:]
+    raw = os.environ.get(_INPUT_ENV, "")
+    if not raw.strip():
+        _exec_tofu(argv)
+    if _find_subcommand(argv) not in _CLUSTER_COMMANDS:
+        _exec_tofu(argv)
+    _run_tunnelled(argv)
+    return 0  # pragma: no cover — _run_tunnelled exits
+
+
+def _exec_tofu(argv: list[str]) -> None:
+    """Replace this process with ``tofu``, argv untouched."""
+    os.execvp(_TOFU, [_TOFU, *argv])
+    # execvp does not return; this only runs if it failed to replace the image.
+    sys.exit(127)  # pragma: no cover
+
+
+def _find_subcommand(argv: list[str]) -> str | None:
+    """Return the tofu subcommand, parsed past leading global flags.
+
+    Mirrors tofu's own grammar: ``-version``/``-help`` as a global flag and an
+    empty command line short-circuit to "no subcommand" (no cluster contact);
+    ``-chdir DIR`` and ``-chdir=DIR`` are consumed so the real subcommand is
+    reached. The first token that is neither a consumed value-flag nor any
+    other ``-``-prefixed global flag is the subcommand.
+
+    This is structural parsing, not a substring match: ``tofu -chdir init plan``
+    consumes ``init`` as the chdir value and reports ``plan`` as the
+    subcommand, where a naive "``init`` anywhere in argv" predicate would
+    wrongly bypass.
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-version", "--version", "-help", "-h", "--help"):
+            return None
+        if tok in _GLOBAL_VALUE_FLAGS:
+            i += 2  # consume the flag and its separate value
+            continue
+        if tok.startswith("-"):
+            i += 1  # any other global flag (=form or bare); skip one token
+            continue
+        return tok
+    return None
+
+
+def _run_tunnelled(argv: list[str]) -> None:
+    """Open the tunnel and run ``tofu`` as its child, in-process.
+
+    Replaces ``exec tunstrap run --input-env … --output-var … -- env -u
+    KUBECONFIG tofu …``. Going in-process drops one process level (``sh`` →
+    ``tunstrap``) and lets ``run`` build the child environment directly, so
+    ``env -u KUBECONFIG`` becomes ``suppress_kubeconfig=True``: same property
+    (a broken ``config_path`` chain cannot fall back to an inherited or
+    injected ``KUBECONFIG``), no child-side wrapper.
+
+    ``tunstrap.cli`` is imported here, on the tunnelled path only, so the
+    pass-through branches never pay for it.
+    """
+    # Lazy on purpose: importing tunstrap.cli on the pass-through paths would
+    # cost ~180 ms (click/pydantic/asyncssh), defeating the entry point.
+    from tunstrap.cli import run_via_env_input  # pylint: disable=import-outside-toplevel
+
+    run_via_env_input(
+        _INPUT_ENV,
+        _OUTPUT_VAR,
+        [_TOFU, *argv],
+        suppress_kubeconfig=True,
+    )
+    sys.exit(0)  # pragma: no cover — run_via_env_input exits

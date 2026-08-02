@@ -437,24 +437,48 @@ and Terragrunt's signals reach tunstrap directly.
 stdout by default (`--tf-forward-stdout` changes this) and `terragrunt output
 -json` consumers parse it. Diagnostics go to stderr or a file.
 
-### Shipping the shim: consumer file, not a console script
+### Shipping the shim: consumer file *and* a console script (revised)
 
-Recommendation: **the consumer keeps the shim in its own repo**;
-`docs/recipe_terragrunt.md` carries it as a copy-paste snippet. Reasons:
-(a) `[project.scripts]` (`pyproject.toml:29-30`) generates a *Python* entry
-point, so a `tunstrap-tofu` console script would pay interpreter startup on the
-`-version` and `init` fast paths, three times per `terragrunt plan`, for a body
-whose entire job is `execvp`; (b) it puts Terraform vocabulary (`init`,
-`-version`, `TF_VAR_`) inside the package this design is structured to keep
-Terraform-free; (c) it does not solve distribution today — PyPI is blocked by
-the direct-reference `asyncssh` fork (`pyproject.toml:10`), so consumers install
-via `uvx`, whose scripts land in an ephemeral `~/.cache/uv/archive-v0/...` path,
-while `terraform_binary` needs a **stable** path, so the consumer must
-materialize one regardless.
+> **Revised after this design landed.** The original recommendation was
+> "consumer keeps the shim in its own repo; the package ships none". The owner
+> has since reversed that: the proxy **also** ships in-package as a second
+> `[project.scripts]` entry, `tunstrap_tofu` (`tunstrap/tofu_proxy.py`), so
+> `uv tool install` yields both `tunstrap` and `tunstrap_tofu` and
+> `terraform_binary` points at a stable installed path with nothing copied into
+> the consumer's repo. The consumer-file shim remains available and is still
+> what the e2e tier drives; the two coexist.
 
-Revisit if the OCI-image release contract lands (superseded decision on
-packaging option (d)): an image can carry `/usr/local/bin/tunstrap-tofu` at a
-fixed path, which is exactly what `terraform_binary` wants.
+The original three reasons for keeping the proxy out of the package, and where
+each stands after the reversal:
+
+(a) **Interpreter startup on the fast paths** — real, and it kills the naive
+approach. Measured (see `docs/recipe_terragrunt.md` "Why a console script
+(now)"): `sh` shim ~2 ms; bare Python ~17 ms; Python plus `import
+tunstrap.cli` ~225 ms (the import alone ~184 ms). The shipped `tunstrap_tofu`
+does **not** import `cli` on the pass-through paths — it `execvp`s `tofu`
+first — so its measured fast path is **~59 ms** end-to-end (~17 ms interpreter
++ ~41 ms `importlib.metadata` in the package `__init__`, structural, + ~1 ms
+execvp; the `tofu_proxy` module itself adds nothing observable). At three
+fast-path invocations per `terragrunt plan` that is ~180 ms/plan, judged noise
+beside an 8 s `tofu init`. The discipline (no `cli`/`click`/`pydantic`/etc. on
+the pass-through paths) is guarded by a unit test; the consumer-file shim
+remains the ~2 ms option for cost-sensitive consumers.
+
+(b) **Terraform vocabulary inside the package** — this is the trade being
+**deliberately taken**. `init`, `-version`, and `TF_VAR_` now live in
+`tunstrap/tofu_proxy.py`. The Terraform-free principle this design is structured
+around (decision-log items 7 and 20) is therefore no longer absolute; the
+reversal is recorded there, not silently applied. `cli.py` itself stays generic
+— the only vocabulary added there is a `suppress_kubeconfig` parameter, not
+any Terraform name.
+
+(c) **No stable distribution path** — answered. `uv tool install` yields a
+stable `tunstrap_tofu` entry point identical across reinstalls; the ephemeral
+`~/.cache/uv/…` path was always a `uvx` artefact, not a `uv tool install` one.
+
+The shipped entry point also closes the consumer shim's documented
+`tofu -chdir=DIR init` gap (see the recipe): it parses argv past global flags
+rather than matching a literal first token.
 
 ### Measured Terragrunt facts
 
@@ -503,12 +527,18 @@ observations about that pair, not repo invariants.
 | `exceptions.py` | Add `MultiNodeEnvUnsupported(TunstrapError)` mapped to exit **1** in `_EXIT_CODES` (`:57-63`). No new exit code is needed; `5` stays unallocated. |
 | `README.md` | Document both flags and the mandatory `--` on `run`; link the new recipe; fix the three stale `token` references. |
 | `docs/recipe_terragrunt.md` | New. |
-| `pyproject.toml` (test config only) | Add the `e2e` marker; `addopts` → `-m 'not integration and not e2e'`. No dependency or script changes. |
+| `pyproject.toml` (test config + `tunstrap_tofu` entry) | Add the `e2e` marker; `addopts` → `-m 'not integration and not e2e'`. **Revised (see "Shipping the shim"):** add the second console script `tunstrap_tofu = "tunstrap.tofu_proxy:main"`. No dependency changes. |
+| `tunstrap/tofu_proxy.py` (revised) | New module: the in-package `tunstrap_tofu` entry point. Pass-through branches `execvp` `tofu` without importing `cli`; the tunnelled branch delegates to `run` in-process via `run_via_env_input` with `suppress_kubeconfig=True`. Parses argv past global flags so `-chdir=DIR init` bypasses correctly. See "Shipping the shim (revised)". |
 | `tests/e2e/` | New, self-contained tier: `conftest.py` (own keypair + kind + compose lifecycle), `docker-compose.yml` (one `sshd-kube` on the external `kind` network), committed `_sshd_conf/allow_tcpfwd.conf` and `shim/tofu-tunstrap`, `module/` (providers + local chart), `test_tofu_providers.py`, `test_shim.py`. Borrows nothing from `tests/integration/`. |
 | `.gitignore` | Add `tests/e2e/_keys/` and `tests/e2e/_kube/` (both fixture-generated). |
 | `.github/workflows/test.yml` | New `e2e` job installing kind + tofu; not added to the coverage combine. |
 
-`pyproject.toml` is unchanged — no new console script (see "Shipping the shim").
+`pyproject.toml` now adds the `tunstrap_tofu` console script (revised — see
+"Shipping the shim"). `cli.py` gains only a generic `suppress_kubeconfig`
+parameter on `_build_child_env`/`_run_child`/`_supervise_child`/`run_command`
+and a generic `run_via_env_input` programmatic entry; **no Terraform vocabulary
+is added to `cli.py`** — the proxy's `init`/`TF_VAR_tunstrap`/`tofu` names live
+entirely in `tunstrap/tofu_proxy.py`.
 `daemon.py`, `_worker.py`, `schemas.py`, `manager.py`, `kube.py`, `fetcher.py`
 are untouched, and `OutputSchema` gains no fields — no `owner`, no
 `placeholder`.
@@ -1245,9 +1275,17 @@ Carried forward from the superseded spec (still binding):
 5. **Named sessions per terragrunt command** — rejected; multiplies daemons.
 6. **`--owner-ancestor N` / negative pid as ancestor depth** — rejected; fragile
    to launcher depth, collides with `kill(2)` semantics.
-7. **A `--config` file with Terragrunt-output adapters inside tunstrap** —
-   rejected; layering violation. **Reaffirmed and strengthened here**: it is the
-   root principle behind putting the shim outside the package.
+ 7. **A `--config` file with Terragrunt-output adapters inside tunstrap** —
+    rejected; layering violation. **Reaffirmed and strengthened here**: it is the
+    root principle behind putting the shim outside the package.
+    **Revised (post-land):** the *direction* of this principle is reversed for
+    the proxy specifically — see "Shipping the shim (revised)" and new item 31.
+    The `--config` adapters themselves remain rejected; what changed is that the
+    *consumer shim's logic* (pass-through, `init`/`-version` bypass, the
+    `TF_VAR_tunstrap` + `tofu` invocation) now also ships in-package as
+    `tunstrap/tofu_proxy.py`, not that tunstrap grew generic Terragrunt
+    adapters. `cli.py` stays Terraform-vocabulary-free; only `tofu_proxy.py`
+    carries it.
 8. **Matching the joined `/proc/<pid>/cmdline`** — rejected; the owner pattern
    appears in its own cmdline [measured 2026-07-30]. Moot under (15).
 9. **`re.fullmatch` / anchoring over `argv[0]`** — rejected. Moot under (15).
@@ -1294,6 +1332,11 @@ New:
     Both are Terraform knowledge (`init` is a tofu subcommand; "no input means
     no tunnel" is a Terragrunt mock-state convention). They belong in a
     small consumer shim. Same principle as (7).
+    **Revised (post-land):** reversed by item 31. The `init`/`-version` bypass
+    and the `TF_VAR_tunstrap` pass-through now also live in
+    `tunstrap/tofu_proxy.py` (the shipped `tunstrap_tofu` entry point). The
+    consumer-file shim remains a supported option; the principle is no longer
+    absolute, by deliberate owner decision.
 21. **Reading connection data from Terragrunt-generated tfvars files** —
     rejected. Such files do not exist: inputs travel as `TF_VAR_*` JSON env vars
     [measured 2026-07-31, fact 2]. Even if they did, parsing them would couple
@@ -1379,6 +1422,27 @@ Added for the `e2e` tier:
     the coverage gate hostage to cluster flakiness, while adding almost no
     tunstrap lines that the integration suite does not already cover. The tier's
     value is behavioural proof, not line coverage.
+
+Added post-land (the `tunstrap_tofu` entry point):
+
+31. **Shipping the proxy in-package as `tunstrap_tofu`, alongside the consumer
+    shim** — chosen, reversing items (7) and (20) for the proxy specifically.
+    `uv tool install` yields a stable `tunstrap_tofu` entry point (item (c) of
+    "Shipping the shim" answered), so `terraform_binary` points at a stable
+    installed path with nothing copied into the consumer's repo. The fast-path
+    cost (item (a)) is managed by `execvp`-ing `tofu` before any `cli` import —
+    measured ~59 ms end-to-end vs ~225 ms naive (see the recipe). The
+    Terraform-vocabulary objection (item (b)) is the trade being deliberately
+    taken: `init`/`-version`/`TF_VAR_tunstrap`/`tofu` live in
+    `tunstrap/tofu_proxy.py`, while `cli.py` stays generic (it gains only a
+    `suppress_kubeconfig` parameter and a `run_via_env_input` entry, no
+    Terraform names). The consumer-file shim remains supported and is still
+    what the e2e tier drives. The `env -u KUBECONFIG` incantation becomes
+    `suppress_kubeconfig=True` inside the built child env — same property (a
+    broken `config_path` chain cannot fall back to KUBECONFIG), no child-side
+    wrapper; the property is pinned by a unit test proven red against the wrong
+    implementation. The `-chdir=DIR init` gap closes as a side-effect of
+    structural argv parsing.
 
 ## Out of scope
 

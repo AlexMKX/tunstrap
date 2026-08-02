@@ -344,6 +344,7 @@ def _build_child_env(
     output_var: str | None,
     inject_scalars: bool,
     input_env: str | None,
+    suppress_kubeconfig: bool = False,
 ) -> dict[str, str]:
     """Inherited env, scrubbed of the input payload, plus the exported channels.
 
@@ -359,12 +360,24 @@ def _build_child_env(
 
     ``output_var`` carries ``render_output_var``'s projection, not the whole
     envelope: its consumer persists the value into an OpenTofu plan file.
+
+    ``suppress_kubeconfig`` drops ``KUBECONFIG`` — both anything inherited and
+    anything ``render_env`` injects for a single-node kube payload. The proxy
+    uses this so a broken ``TF_VAR_tunstrap`` → ``config_path`` chain cannot
+    silently reach the cluster through a materialized-file ``KUBECONFIG`` (the
+    property the consumer shim used to buy with ``env -u KUBECONFIG``).
     """
     child_env = dict(os.environ)
+    if suppress_kubeconfig:
+        child_env.pop("KUBECONFIG", None)
     if input_env is not None:
         child_env.pop(input_env, None)
     if inject_scalars:
         child_env.update(render_env(output))
+        if suppress_kubeconfig:
+            # render_env places KUBECONFIG last, pointing at the same materialized
+            # file config_path uses; it IS the silent fallback suppression removes.
+            child_env.pop("KUBECONFIG", None)
     if output_var is not None:
         child_env[output_var] = render_output_var(output)
     return child_env
@@ -433,6 +446,7 @@ def _run_child(
     output_var: str | None,
     inject_scalars: bool,
     input_env: str | None,
+    suppress_kubeconfig: bool = False,
 ) -> int:
     """Validate the success payload, build the child env, run the child.
 
@@ -443,7 +457,11 @@ def _run_child(
     """
     out = OutputSchema.model_validate(payload)
     child_env = _build_child_env(
-        out, output_var=output_var, inject_scalars=inject_scalars, input_env=input_env
+        out,
+        output_var=output_var,
+        inject_scalars=inject_scalars,
+        input_env=input_env,
+        suppress_kubeconfig=suppress_kubeconfig,
     )
     # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
     # forwarded to the child while it runs in the foreground.
@@ -478,6 +496,7 @@ def _supervise_child(  # pylint: disable=too-many-arguments
     session_dir: str,
     grace_seconds: int,
     minted_root: str | None,
+    suppress_kubeconfig: bool = False,
 ) -> int:
     """Own the whole post-spawn window; the daemon is stopped on every path.
 
@@ -499,6 +518,7 @@ def _supervise_child(  # pylint: disable=too-many-arguments
             output_var=output_var,
             inject_scalars=inject_scalars,
             input_env=input_env,
+            suppress_kubeconfig=suppress_kubeconfig,
         )
     except OSError as exc:
         sys.stderr.write(f"run: failed to launch command: {exc}\n")
@@ -535,6 +555,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     session_dir: str | None,
     grace_seconds: int,
     args: tuple[str, ...],
+    suppress_kubeconfig: bool = False,
 ) -> None:
     """Open a tunnel, run CMD with TUNSTRAP_*/KUBECONFIG injected, then tear down.
 
@@ -652,6 +673,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             session_dir=session_path,
             grace_seconds=grace_seconds,
             minted_root=minted_root,
+            suppress_kubeconfig=suppress_kubeconfig,
         )
     except TunstrapError as exc:
         # An expected outcome keeps its own exit code. A lone required:false
@@ -666,6 +688,50 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
         _report_unexpected(exc)
         returncode = 4
     sys.exit(returncode)
+
+
+def run_via_env_input(  # pylint: disable=too-many-arguments
+    input_env: str,
+    output_var: str,
+    child_cmd: list[str],
+    *,
+    grace_seconds: int = 10,
+    suppress_kubeconfig: bool = False,
+) -> None:
+    """Invoke ``run``'s env-input mode programmatically, without re-parsing.
+
+    A programmatic caller (the ``tunstrap_tofu`` console entry) already knows
+    its input/output variable names and child command and does not need Click's
+    argv parser. This delegates to ``run_command``'s callback so every pre-spawn
+    check, the whole spawn window, and the teardown path are shared with the CLI
+    entry — not duplicated. ``run_command`` always exits; the trailing
+    ``sys.exit`` is the unreachable safety net for readers and type checkers.
+
+    Generic on purpose: this helper carries no Terraform vocabulary, only the
+    variables and flags a programmatic ``run`` caller supplies. The Terraform-
+    specific decisions (``TUNSTRAP_INPUT``, ``TF_VAR_tunstrap``, ``tofu``) live
+    in the proxy module.
+    """
+    run = run_command.callback
+    assert run is not None  # always set by the @main.command decorator
+    run(
+        ssh_key=None,
+        ssh_key_passphrase=None,
+        ssh_password_stdin=False,
+        targets=(),
+        kube=(),
+        fetch=(),
+        auto_stop_idle_seconds=None,
+        materialize=False,
+        log_file=None,
+        input_env=input_env,
+        output_var=output_var,
+        session_dir=None,
+        grace_seconds=grace_seconds,
+        args=tuple(child_cmd),
+        suppress_kubeconfig=suppress_kubeconfig,
+    )
+    sys.exit(0)  # pragma: no cover — run_command.callback always exits
 
 
 def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:

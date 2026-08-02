@@ -464,9 +464,14 @@ This matches only a **literal first token**. `tofu init` matches; `tofu
 first token is `-chdir=…`, not `init`. So a `-chdir` invocation misses the
 bypass and builds a tunnel it does not need.
 
-This is **untested and unfixed**. It is not dangerous — the tunnel is harmless,
-it just costs time — but it is wasteful, and the failure is silent (you will
-not see an error, only a slower `init`).
+This is **untested and unfixed for the shell shim**. It is not dangerous — the
+tunnel is harmless, it just costs time — but it is wasteful, and the failure is
+silent (you will not see an error, only a slower `init`).
+
+> **Fixed in the `tunstrap_tofu` entry point.** The in-package proxy parses
+> argv structurally past global flags (`-chdir DIR` and `-chdir=DIR`), so
+> `tunstrap_tofu -chdir=DIR init` correctly bypasses the tunnel. If you use the
+> shipped entry point rather than the consumer shim, this gap does not apply.
 
 Guidance, in order of preference:
 
@@ -522,26 +527,60 @@ exact. Cite it for what it proves; do not let prose drift past it.
   does **not** recommend tunnelling `output` — the recipe keeps `output` out of
   `commands` (it reads state, not the cluster).
 
-## Why not a console script
+## Why a console script (now) — and what the consumer-file shim was protecting
 
-The shim lives in **your** repo, not in tunstrap. There are three reasons, and
-they are worth knowing before you are tempted to package it differently:
+> **Decision reversed.** The proxy now also ships **in-package** as a second
+> console script, `tunstrap_tofu` (`tunstrap/tofu_proxy.py`), so
+> `uv tool install` produces both `tunstrap` and `tunstrap_tofu` and
+> `terraform_binary` can point at a stable installed path with nothing copied
+> into the consumer's repo. The consumer-file shim above remains available and
+> is still what the e2e tier drives; the two are behaviourally equivalent
+> except where this section says otherwise. The original three objections are
+> kept below, each with its resolution, because the trade is real and worth
+> knowing before you choose between them.
 
-1. **A Python console script pays interpreter startup on the fast paths.** The
-   `-version` and `init` branches run three times per `terragrunt plan`; a
-   shell `exec` is effectively free, a `python -m` entry point is not.
-2. **It keeps Terraform vocabulary out of tunstrap.** `init`, `-version`, and
-   `TF_VAR_` are Terraform concepts. tunstrap is deliberately Terraform-free;
-   the proxy knowledge belongs in a consumer shim, not in the package.
-3. **A committed file is the stable path `terraform_binary` wants.** This was
-   once argued as "tunstrap is installed via `uvx`, whose scripts land in an
-   ephemeral path" — that is **wrong as stated**: `uv tool install` (see
-   Installation) gives tunstrap a stable entry point, and the ephemeral
-   `~/.cache/uv/…` path is a `uvx` artefact only. The stable-path argument is
-   really about the *shim*, not the package: whatever provisions it,
-   `terraform_binary` resolves a path and probes it on every run, so a committed
-   `bin/tofu-tunstrap` is the simplest stable, reviewable home for it. (Reasons 1
-   and 2 are the load-bearing ones; this is belt-and-braces.)
+The three reasons the design originally argued for a consumer file, and where
+each stands now:
+
+1. **A Python console script pays interpreter startup on the fast paths.**
+   Real, and it kills the naive approach. Measured: the `sh` shim's fast path
+   costs ~2 ms; bare Python startup ~17 ms; Python plus `import tunstrap.cli`
+   ~225 ms (the import alone is ~184 ms by `-X importtime`). At 225 ms and
+   three fast-path invocations per `terragrunt plan`, a naive entry point that
+   imported `cli` on every call would add ~0.7 s per plan.
+   **The `tunstrap_tofu` entry point does not import `cli` (or anything heavy)
+   on the pass-through paths** — it `execvp`s `tofu` before any tunstrap import
+   beyond the package `__init__`. Measured fast path: **~59 ms end-to-end**
+   (≈17 ms interpreter + ≈41 ms `importlib.metadata` in `tunstrap/__init__`,
+   which is structural and unavoidable without changing that file, + ~1 ms
+   execvp handoff; the `tofu_proxy` module itself adds nothing observable).
+   That is ~28 ms over the bare-Python floor and ~166 ms under the naive 225
+   ms — roughly **~180 ms added per `terragrunt plan`**, noise beside an 8 s
+   `tofu init`. The cost discipline is guarded by a unit test that imports only
+   `tunstrap.tofu_proxy` in a fresh interpreter and asserts none of
+   `tunstrap.cli`/`click`/`pydantic`/`asyncssh`/`cryptography`/`ruamel` loaded.
+   The shell shim remains cheaper (≈2 ms); if a consumer's plan runs dozens of
+   fast-path invocations and every millisecond matters, the consumer file is
+   still the lower-overhead choice.
+2. **A committed file is the stable path `terraform_binary` wants.** Answered.
+   `uv tool install` yields a stable `tunstrap_tofu` entry point at
+   `~/.local/bin/tunstrap_tofu` (mirroring `tunstrap`), identical across
+   reinstalls; the ephemeral `~/.cache/uv/…` path is a `uvx` artefact only. So
+   the package entry point *is* a stable path, and `terraform_binary` can point
+   at it with no consumer-side file to copy, `chmod`, commit or drift.
+3. **It keeps Terraform vocabulary out of tunstrap.** This one is **being
+   consciously reversed by the owner.** `init`, `-version`, and `TF_VAR_` are
+   Terraform concepts, and the original design was structured to keep them in a
+   consumer shim, not in the package (see the spec's decision log, items 7 and
+   20). That principle is now deliberately traded for the ergonomics of a
+   shipped entry point: `tunstrap/tofu_proxy.py` owns exactly that vocabulary.
+   The trade is recorded in the spec where the Terraform-free principle is
+   stated, not silently abandoned. The consumer-file shim is the escape hatch
+   for anyone who prefers the package to stay Terraform-free.
+
+**Which to use.** Prefer `tunstrap_tofu` (nothing to copy, stable path, the
+`-chdir` gap below is fixed). Keep the consumer shim if you want the ~2 ms fast
+path or want no Terraform vocabulary in the package you depend on.
 
 ## Security
 
