@@ -89,7 +89,7 @@ ignore_missing_imports = true
 markers = [
     "integration: requires docker (sshd containers)",
     "unit: pure-Python unit tests",
-    "e2e: requires kind + tofu + kubectl (real Kubernetes cluster)",
+    "e2e: requires kind + tofu + kubectl + terragrunt (real Kubernetes cluster)",
 ]
 # Coverage is collected explicitly per job: unit job uses `pytest --cov`,
 # integration job uses `coverage run -m pytest`. The combine + gate step

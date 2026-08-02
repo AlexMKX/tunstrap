@@ -82,6 +82,13 @@ fixture internals, but the rest read from `rig`):
 - `tofu` (OpenTofu 1.12.x). Network access on first run: `tofu init` downloads
   the `kubernetes` and `helm` providers from `registry.opentofu.org` (~9s). That
   is the *runner's* network and has nothing to do with the tunnel.
+- `terragrunt` (1.1.x). Required only by `test_recipe_terragrunt.py`, which
+  drives real `terragrunt hcl validate` / `terragrunt render` against the HCL
+  fenced blocks extracted straight out of `docs/recipe_terragrunt.md` — so the
+  recipe's published configuration can no longer drift into something that does
+  not parse (it once shipped with `terraform_binary` misplaced inside the
+  `terraform {}` block). Required where it is used, not tier-wide, matching the
+  host-`kubectl` precedent in `tests/e2e/test_rig.py`.
 - No `helm` binary. The Terraform `helm` provider links the Helm v3 Go SDK.
 - Budget ~2.5-3 minutes for a full `pytest tests/e2e -m e2e` run once the
   `kindest/node` image is local, of which ~90s is cluster and container setup.

@@ -123,18 +123,19 @@ a silent wrong result that looks identical to success.
 `terraform_binary` takes a **path only** (see "Measured Terragrunt facts" below).
 Set it once in your root `terragrunt.hcl`:
 
-```hcl
+```hcl terragrunt-root
 # root.hcl (or the top of each unit's terragrunt.hcl)
-terraform {
-  terraform_binary = "${get_repo_root()}/bin/tofu-tunstrap"
-}
+# terraform_binary is a TOP-LEVEL attribute, not a member of the terraform {}
+# block: TG rejects it there with "An argument named terraform_binary is not
+# expected here." See "Measured Terragrunt facts" below.
+terraform_binary = "${get_repo_root()}/bin/tofu-tunstrap"
 ```
 
 Then, in the unit that needs the tunnel, declare `TUNSTRAP_INPUT` as an
 `extra_arguments` env var scoped to the commands that actually contact the
 cluster:
 
-```hcl
+```hcl terragrunt-unit
 # unit terragrunt.hcl
 terraform {
   source = "."

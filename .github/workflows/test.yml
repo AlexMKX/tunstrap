@@ -134,6 +134,17 @@ jobs:
           chmod +x ./kubectl
           sudo mv ./kubectl /usr/local/bin/kubectl
           kubectl version --client
+      - name: install terragrunt
+        # tests/e2e/test_recipe_terragrunt.py drives real `terragrunt hcl validate`
+        # and `terragrunt render` against the HCL pinned in docs/recipe_terragrunt.md.
+        # Pinned to 1.1.1 - the version the recipe's "Measured Terragrunt facts"
+        # section is measured against; the recipe's CLI vocabulary is
+        # version-specific (hcl validate / render / run --all).
+        run: |
+          curl -fsSL -o ./terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v1.1.1/terragrunt_linux_amd64
+          chmod +x ./terragrunt
+          sudo mv ./terragrunt /usr/local/bin/terragrunt
+          terragrunt --version
       - uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: 1.12.5
@@ -173,9 +184,9 @@ jobs:
           # count and the JUnit `tests` count in lockstep and the guard would
           # stay GREEN for exactly the deletion it exists to catch (proven
           # tautological). Only an independent literal anchors against deletion;
-          # at 24 == the current tier it catches the loss of any one test. Bump
+          # at 25 == the current tier it catches the loss of any one test. Bump
           # to the new total whenever the tier grows.
-          assert counts["tests"] >= 24, f"expected at least 24 e2e tests, ran {counts['tests']}"
+          assert counts["tests"] >= 25, f"expected at least 25 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 
