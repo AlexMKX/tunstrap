@@ -510,13 +510,17 @@ exact. Cite it for what it proves; do not let prose drift past it.
   exercised is *connection-refused against a dead endpoint*. Other provider
   failures may not render a port at all, and the "`config_path` is the route"
   proof does not generalise to them.
-- **No test exercises a real Terragrunt or OpenTofu consumer parsing the
-  labelled stream.** Every stdout-purity assertion in the tier uses a **fake
-  `tofu`**, not real `tofu`, and none of them runs under Terragrunt at all. The
-  claim that "Terragrunt parses this stream correctly" rests on the design and
-  the shim's `# Never write to stdout` comment, **not on a test**. Treat it as a
-  well-reasoned invariant, and verify it in your own environment if your
-  downstream depends on `terragrunt output -json`.
+- **`terragrunt output -json` parsing IS now tested end-to-end** (in
+  `tests/e2e/test_terragrunt_apply.py`), in two configurations: with `output`
+  absent from `commands` (the pass-through shim → `tofu`) and with `output`
+  added (the worst case: output routed through `tunstrap run`, proving tunstrap
+  run's own stdout survives a real Terragrunt consumer's parse — the property
+  the shim's `# Never write to stdout` comment guards). **Still not tested:**
+  stdout purity for `plan`/`apply` under real Terragrunt (their stdout is the
+  plan/apply diff, consumed differently) and any consumer other than
+  `terragrunt output -json`. The worst-case test proves the purity property; it
+  does **not** recommend tunnelling `output` — the recipe keeps `output` out of
+  `commands` (it reads state, not the cluster).
 
 ## Why not a console script
 

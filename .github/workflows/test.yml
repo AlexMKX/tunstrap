@@ -188,9 +188,9 @@ jobs:
           # count and the JUnit `tests` count in lockstep and the guard would
           # stay GREEN for exactly the deletion it exists to catch (proven
           # tautological). Only an independent literal anchors against deletion;
-          # at 31 == the current tier it catches the loss of any one test. Bump
+          # at 32 == the current tier it catches the loss of any one test. Bump
           # to the new total whenever the tier grows.
-          assert counts["tests"] >= 31, f"expected at least 31 e2e tests, ran {counts['tests']}"
+          assert counts["tests"] >= 32, f"expected at least 32 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 
