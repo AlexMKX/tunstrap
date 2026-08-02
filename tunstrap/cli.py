@@ -68,9 +68,9 @@ def _show_version(ctx: click.Context, _param: click.Parameter, value: bool) -> N
     """
     if not value or ctx.resilient_parsing:
         return
-    # pylint: disable=import-outside-toplevel,no-name-in-module
-    # __version__ is provided dynamically by tunstrap/__init__.py's PEP 562
+    # ``__version__`` is provided dynamically by tunstrap/__init__.py's PEP 562
     # __getattr__; pylint cannot see it statically (false-positive E0611).
+    # pylint: disable-next=import-outside-toplevel,no-name-in-module
     from tunstrap import __version__
 
     click.echo(f"tunstrap, version {__version__}")

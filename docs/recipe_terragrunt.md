@@ -1,9 +1,9 @@
 # Recipe: Terragrunt / OpenTofu through a tunstrap tunnel
 
 This recipe shows how to drive Terragrunt and OpenTofu (`tofu`) through a
-tunstrap tunnel using the **CLI-proxy model**: a small shell shim installed as
-Terragrunt's `terraform_binary`, which brings the tunnel up and `exec`s `tofu`
-with the connection details in the environment.
+tunstrap tunnel using the **CLI-proxy model**: the shipped `tunstrap_tofu`
+console entry point installed as Terragrunt's `terraform_binary`, which brings
+the tunnel up and runs `tofu` with the connection details in the environment.
 
 It is written for someone adopting this in their own repo. It carries the
 measured facts a future reader would otherwise have to re-derive, the failure
@@ -86,8 +86,10 @@ by recording `tofu`'s actual environment and asserting `KUBECONFIG` is absent.
 ### Wiring it into Terragrunt
 
 `terraform_binary` takes a **path only** (see "Measured Terragrunt facts"
-below), so point it at the absolute path of the installed entry point. Find it
-once with `command -v tunstrap_tofu` and paste the result:
+below). The **default** is a literal absolute path — nothing runs at config
+parse time and there is one less moving part. Find the path once with
+`command -v tunstrap_tofu` (`uv tool install` places it at
+`~/.local/bin/tunstrap_tofu`) and paste it:
 
 ```hcl terragrunt-root
 # root.hcl (or the top of each unit's terragrunt.hcl)
@@ -95,14 +97,37 @@ once with `command -v tunstrap_tofu` and paste the result:
 # block: TG rejects it there with "An argument named terraform_binary is not
 # expected here." See "Measured Terragrunt facts" below.
 #
-# The absolute path of the installed tunstrap_tofu entry point. Find it with
-# `command -v tunstrap_tofu` (uv tool install places it at
-# ~/.local/bin/tunstrap_tofu). A literal path, not run_cmd: Terragrunt's run_cmd
-# execs its first arg without a shell and lets the command's stdout leak into the
-# parent's, which corrupts `terragrunt output -json`; a literal path has neither
-# problem (measured against Terragrunt v1.1.1).
+# Default: the absolute path of the installed tunstrap_tofu entry point.
 terraform_binary = "/home/you/.local/bin/tunstrap_tofu"
 ```
+
+#### Localizing the bootstrap with `run_cmd` (optional)
+
+If you would rather the bootstrap lived entirely in `terragrunt.hcl` — no pasted
+path to update after a reinstall — `terraform_binary` also accepts `run_cmd`,
+which resolves the entry point at run time:
+
+```hcl terragrunt-root-runcmd
+# Optional: resolve the installed tunstrap_tofu at run time instead of pasting
+# the path. run_cmd execs its first arg directly (no shell), so go through
+# `sh -c` to use the POSIX `command -v` builtin.
+#
+# "--terragrunt-quiet" is LOAD-BEARING and it is the first argument to run_cmd
+# itself, not a terragrunt CLI flag. run_cmd consumes it to suppress logging the
+# command's output; without it, that output (the resolved path) is prepended to
+# every `terragrunt output -json`, corrupting the JSON. Measured against
+# Terragrunt v1.1.1:
+#   run_cmd("--terragrunt-quiet", "sh", "-c", "command -v tunstrap_tofu")  -> clean
+#   run_cmd("sh", "-c", "command -v tunstrap_tofu")                        -> path leaks
+# This is the same shape as `env -u KUBECONFIG` in the old shell shim: drop the
+# incantation and the failure surfaces somewhere that looks unrelated.
+terraform_binary = run_cmd("--terragrunt-quiet", "sh", "-c", "command -v tunstrap_tofu")
+```
+
+`run_cmd`'s real costs: it runs **before** Terragrunt's `-version` probe, is
+cached once per `plan`, and runs once **per unit** under `run --all` — and it
+needs the marker. The literal-path default has none of those moving parts, which
+is why it is the recommendation.
 
 A `before_hook` **cannot** install the proxy instead. Terragrunt probes
 `<terraform_binary> -version` roughly 50 ms *before* any hook runs, and with the
@@ -114,11 +139,22 @@ marker file never appears).
 For the unusual consumer for whom every millisecond of the fast path matters,
 `tunstrap_tofu` costs ~25 ms per pass-through invocation (vs ~2 ms for a shell
 `exec`) — about ~74 ms added per `terragrunt plan`, noise beside an 8 s
-`tofu init`. A 3-line `/bin/sh` shim (`[ -n "$TUNSTRAP_INPUT" ] || exec tofu
-"$@"; case "$1" in init|-version) exec tofu "$@" ;; esac; exec tunstrap run
---input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap -- env -u KUBECONFIG
-tofu "$@"`) recovers the ~2 ms fast path at the cost of copying, committing and
-keeping it in sync. For nearly everyone the entry point is the better trade.
+`tofu init`. A 3-line `/bin/sh` shim recovers the ~2 ms fast path at the cost of
+copying, committing and keeping it in sync (it is not driven by the e2e tier;
+`sh -n`-checked and smoke-tested as a labelled fence below —
+`tofu-shim-alt`). For nearly everyone the entry point is the better trade.
+
+```sh tofu-shim-alt
+#!/bin/sh
+# Lower-overhead alternative to tunstrap_tofu: a shell exec on the fast paths
+# (~2 ms vs ~25 ms). Copy into bin/tofu-tunstrap, chmod 0755, commit. Behaves
+# the same as the proxy EXCEPT it cannot parse past -chdir to a global flag, so
+# `tofu -chdir=DIR init` builds a needless tunnel (the fixed gap, unfixed here).
+[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"
+case "$1" in init|-version) exec tofu "$@" ;; esac
+exec tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
+  -- env -u KUBECONFIG tofu "$@"
+```
 
 Then, in the unit that needs the tunnel, declare `TUNSTRAP_INPUT` as an
 `extra_arguments` env var scoped to the commands that actually contact the

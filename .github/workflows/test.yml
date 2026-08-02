@@ -196,8 +196,11 @@ jobs:
           # fix replacements, net -1. test_terragrunt_apply's pollution sub-check
           # retired too - the proxy runs run in-process so the tunstrap-wrapper
           # negative control no longer reaches the stream; purity is now proven
-          # by the byte-equality test.)
-          assert counts["tests"] >= 31, f"expected at least 31 e2e tests, ran {counts['tests']}"
+          # by the byte-equality test. Raised back to 33 by the run_cmd follow-up:
+          # +1 test pinning the load-bearing `--terragrunt-quiet` run_cmd marker
+          # (proves the parse breaks with the marker removed) and +1 pinning the
+          # labelled shell-shim-alt alternative fence (sh -n + bypass smoke).)
+          assert counts["tests"] >= 33, f"expected at least 33 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 

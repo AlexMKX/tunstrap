@@ -106,10 +106,8 @@ def strip_comments(text: str) -> str:
     """The executable lines of ``text`` - comments and blanks removed.
 
     Comments and blank lines carry prose, not logic; stripping them lets a drift
-    guard compare what a snippet *does* across two sources whose prose differs
-    (the recipe's excerpt vs the driven file, whose comments were written
-    separately). Shared by the shim drift guards in test_shim and the module
-    drift guard in test_recipe_terragrunt.
+    guard compare what a snippet *does* across two sources whose prose differs.
+    Shared by the module drift guard in test_recipe_terragrunt.
     """
     return "\n".join(
         line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
@@ -211,7 +209,8 @@ def tofu_env(
     purpose: an ambient kubeconfig, or an operator's ~/.kube/config, would let a
     broken TF_VAR_tunstrap -> config_path chain still reach a cluster. That is
     the silent pass this whole tier exists to prevent. This scrubs the *parent*
-    environment; the shim's own `env -u KUBECONFIG` scrubs the one `run` injects.
+    environment; the proxy's own `suppress_kubeconfig` scrubs the one `run`
+    injects.
     """
     env = dict(os.environ)
     env.pop("KUBECONFIG", None)

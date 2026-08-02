@@ -256,7 +256,8 @@ def test_terragrunt_apply_destroy_through_the_proxy(
       was not pass-through and the row fails.
     - output value == envelope path: a STATE-integrity check (the path tofu
       recorded during apply == the envelope). It does NOT prove routing - that
-      exclusion comes from `env -u KUBECONFIG` plus `tofu_env`, not this compare.
+      exclusion comes from the proxy's `suppress_kubeconfig` plus `tofu_env`, not
+      this compare.
     """
     require_tools("terragrunt", "git")
     bin_rec = tmp_path / "bin_rec"
@@ -326,7 +327,7 @@ def test_terragrunt_apply_destroy_through_the_proxy(
     _assert_row("output", by_cmd.get("output", []), lacks=("TUNSTRAP_INPUT", "TF_VAR_tunstrap"))
 
     # state integrity: the path tofu recorded during apply == the envelope path.
-    # Not a routing proof (routing exclusion = env -u KUBECONFIG + tofu_env).
+    # Not a routing proof (routing exclusion = suppress_kubeconfig + tofu_env).
     parsed = json.loads(out.stdout)
     kubepath = parsed["kubepath_used"]["value"]
     envelope = json.loads(by_cmd["apply"][-1]["TF_VAR_tunstrap"])
@@ -343,34 +344,35 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
 ) -> None:
     """`terragrunt output -json` through `tunstrap run` parses cleanly (the claim).
 
-    This is the test the branch review named as missing. With `output` ADDED to
-    `commands`, env_vars delivers TUNSTRAP_INPUT for output, the proxy routes it
-    through `tunstrap run`, and `terragrunt output -json` parses tofu's stdout
-    that has traversed tunstrap run. That is the purity risk the proxy's "never
-    write to stdout" rule guards, and it was previously proven only with a
-    FAKE tofu under a pass-through proxy - the wrong path.
+    With `output` ADDED to `commands`, env_vars delivers TUNSTRAP_INPUT for
+    output, the proxy routes it through `tunstrap run` (in-process), and
+    `terragrunt output -json` parses tofu's stdout that has traversed the proxy.
+    This is the end-to-end purity claim at the Terragrunt layer: a real
+    consumer's JSON parse of tunnelled output succeeds.
 
     Framing: tunnelled `output` is the WORST CASE, not a recommendation. The
     recipe omits `output` from `commands` on purpose (output reads state, not the
     cluster; tunnelling it is wasteful). This test forces the worst case to prove
-    the purity property holds when tunstrap run IS in the pipeline; it does not
-    suggest adding `output` to `commands`.
+    the parse holds when tunstrap run IS in the pipeline; it does not suggest
+    adding `output` to `commands`.
 
-    Fails-when-broken:
-    - `json.loads(out.stdout)`: if `tunstrap run` wrote anything to stdout, the
-      JSON would not parse. Proven against a deliberate break below aimed AT this
-      claim - a `tunstrap` wrapper on PATH that writes to stdout before exec'ing
-      the real binary, so the emission originates at the tunstrap-run step (the
-      stream under test), not at the proxy. A proxy-branch echo would prove only
-      proxy-author discipline and reuses the old pass-through check's shape; this
-      proves the purity property the comment actually guards. Verbatim red in the
-      task report.
-    - output row carries TF_VAR_tunstrap: confirms the invocation actually went
-      through tunstrap run (not pass-through). If `output` were absent from
-      commands this would fail - pinning the test to the tunnelled path.
-    - the pollution sub-check is DISCRIMINATING: it asserts the marker IS in the
-      stream and IS what breaks the parse, so an unrelated failure (empty stdout)
-      cannot masquerade as the property under test.
+    What is and is not proven here:
+    - `json.loads(out.stdout)` succeeds AND the output row carried TF_VAR_tunstrap
+      (so the invocation provably traversed tunstrap run, not the pass-through
+      branch). That is the positive end-to-end claim.
+    - This ``json.loads`` is **unfalsified at this layer**: there is no
+      wrapper-based break that demonstrates a contamination would fail the parse.
+      Wrapping ``tunstrap`` does not work (the proxy runs run IN-PROCESS and never
+      invokes the ``tunstrap`` binary); wrapping ``tofu`` does not work either
+      (``terragrunt output -json`` mediates tofu's output and discards the stream
+      on its own parse failure, so the contamination never reaches the captured
+      stdout). Both were tried and rejected - see the retired-sub-check NOTE at
+      the body's end. The purity property the parse indirectly relies on (the
+      tunnelled path adds no bytes to fd 1 beyond tofu's output) is proven
+      FALSIFIABLE at the proxy layer by the byte-equality test
+      tests/e2e/test_shim.py::test_tunnelled_stdout_is_byte_identical_to_the_untunnelled_child.
+      Do not read this test's green parse as evidence the parse is fragile to
+      contamination - it is not shown here.
     """
     require_tools("terragrunt", "git")
     bin_rec = tmp_path / "bin_rec"

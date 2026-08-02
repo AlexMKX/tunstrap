@@ -8,13 +8,15 @@ Method: extract the labelled fenced blocks straight out of the document and
   unit's env_vars ternary;
 - check the module-side snippet against the driven module file.
 The document is the source of truth; the tests hold no retyped copy. Mirrors the
-AST guard in test_rig.py and the drift guards in test_shim.py.
+AST guard in test_rig.py.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -35,18 +37,17 @@ MODULE_MAIN_TF = HERE / "module" / "main.tf"
 
 
 def _consumer_repo(tmp_path: Path) -> Path:
-    """A faithful consumer working tree: git-init'd, so get_repo_root() resolves.
+    """A bare consumer working tree for one recipe-block check.
 
-    The recipe's terraform_binary uses ${get_repo_root()}, which shells out to
-    `git rev-parse --show-toplevel`; a plain tmp_path is not a git repo, so the
-    expression would error under `render` before the test learns anything. A real
-    consumer repo is a git repo, so this is the honest setup. `git init` alone is
-    enough - `--show-toplevel` resolves against the worktree, not HEAD, so no
-    commit is needed (verified: render resolves the path with zero commits).
+    `terragrunt hcl validate` and `render` evaluate static HCL and need no git
+    repo (verified). Earlier this helper was git-init'd to make
+    ``${get_repo_root()}`` resolve, but the recipe's root block no longer uses
+    that expression (it is a literal path or a run_cmd), so neither git nor a
+    commit is required. Kept as a helper for shape parity with a real consumer
+    directory.
     """
     repo = tmp_path / "consumer"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
     return repo
 
 
@@ -64,28 +65,30 @@ def _uncomment(block: str) -> str:
 
 
 def test_root_block_points_terraform_binary_at_the_proxy(tmp_path: Path) -> None:
-    """The recipe's root block is valid Terragrunt and points at tunstrap_tofu.
+    """Both root-block forms in the recipe are valid and reach tunstrap_tofu.
 
-    The recipe's ``terragrunt-root`` block is a literal-path
-    ``terraform_binary = "/home/you/.local/bin/tunstrap_tofu"`` (a placeholder a
-    consumer substitutes with ``command -v tunstrap_tofu``'s output). hcl validate
-    catches a misplaced terraform_binary (back inside terraform{}, which TG
-    rejects with "An argument named terraform_binary is not expected here") and
-    any syntax error; render confirms the attribute survives evaluation as a
-    string naming ``tunstrap_tofu``. The literal is a placeholder, so real-path
-    execution (apply through the installed proxy) is exercised separately by
-    test_terragrunt_apply_destroy_through_the_proxy. (The verbatim red for the
-    misplaced-terraform_binary case is in the SDD report for the original pin.)
+    The recipe carries TWO labelled root fences: ``terragrunt-root`` (the literal-
+    path default) and ``terragrunt-root-runcmd`` (the optional run_cmd form).
+    The literal fence is validated statically (it carries a consumer-specific
+    placeholder, so it cannot render to a real path); the run_cmd fence is
+    RENDERED and must resolve to the actual installed ``tunstrap_tofu`` on PATH,
+    executable - a strictly stronger pin than the literal allows, and the proof
+    that the recipe's run_cmd form works. hcl validate also catches a misplaced
+    terraform_binary (back inside terraform{}, which TG rejects with "An argument
+    named terraform_binary is not expected here"). (The verbatim red for the
+    misplaced case is in the SDD report for the original pin.)
     """
-    require_tools("terragrunt", "git")
+    require_tools("terragrunt")
+    installed = shutil.which("tunstrap_tofu")
+    path_msg = "tunstrap_tofu not on PATH; e2e_preflight should have failed the tier"
+    assert installed is not None, path_msg
     blocks = extract_labeled_blocks(RECIPE.read_text())
-    missing_root = (
-        "recipe is missing its ```hcl terragrunt-root``` block - the label that "
-        "pins the terraform_binary snippet is gone"
-    )
-    assert "terragrunt-root" in blocks, missing_root
+    for label in ("terragrunt-root", "terragrunt-root-runcmd"):
+        assert label in blocks, f"recipe is missing its ```hcl {label}``` block"
 
-    repo = _consumer_repo(tmp_path)
+    # Literal fence: static validation only (its path is a placeholder).
+    repo = tmp_path / "literal"
+    repo.mkdir()
     (repo / "terragrunt.hcl").write_text(blocks["terragrunt-root"])
     root_validate = subprocess.run(
         ["terragrunt", "hcl", "validate", "--working-dir", str(repo)],
@@ -93,22 +96,94 @@ def test_root_block_points_terraform_binary_at_the_proxy(tmp_path: Path) -> None
         text=True,
         check=False,
     )
-    root_detail = "root terragrunt.hcl failed schema validation:\n"
+    root_detail = "literal root terragrunt.hcl failed schema validation:\n"
     root_detail += f"{root_validate.stderr}{root_validate.stdout}"
     assert root_validate.returncode == 0, root_detail
 
+    # run_cmd fence: render must resolve to the real installed tunstrap_tofu.
+    repo2 = tmp_path / "runcmd"
+    repo2.mkdir()
+    (repo2 / "terragrunt.hcl").write_text(blocks["terragrunt-root-runcmd"])
     rendered = subprocess.run(
         ["terragrunt", "render", "--config", "terragrunt.hcl", "--format", "json"],
-        cwd=repo,
+        cwd=repo2,
         capture_output=True,
         text=True,
         check=False,
     )
-    render_detail = f"root terragrunt.hcl failed to render:\n{rendered.stderr}{rendered.stdout}"
+    render_detail = (
+        f"run_cmd root terragrunt.hcl failed to render:\n{rendered.stderr}{rendered.stdout}"
+    )
     assert rendered.returncode == 0, render_detail
     resolved = json.loads(rendered.stdout)["terraform_binary"]
-    name_msg = f"terraform_binary resolved to {resolved!r}, which does not name tunstrap_tofu"
-    assert "tunstrap_tofu" in resolved, name_msg
+    resolved_msg = (
+        f"terraform_binary resolved to {resolved!r}, expected the installed {installed!r}"
+    )
+    assert resolved == installed, resolved_msg
+    exec_msg = f"terraform_binary resolved to {resolved!r}, which is not an executable file"
+    assert Path(resolved).is_file() and os.access(resolved, os.X_OK), exec_msg
+
+
+def test_the_run_cmd_marker_is_load_bearing_for_terragrunt_output_json(
+    tmp_path: Path,
+) -> None:
+    """The recipe's ``--terragrunt-quiet`` first arg to run_cmd keeps output clean.
+
+    The recipe's run_cmd option documents ``--terragrunt-quiet`` as load-bearing:
+    it is the FIRST ARGUMENT TO run_cmd (which consumes it to suppress logging the
+    command's output), NOT a terragrunt CLI flag (which does not exist in v1.1.1 -
+    a round-trip was spent confusing the two). Without it, run_cmd prepends the
+    resolved path to every ``terragrunt output -json`` and the JSON no longer
+    parses - the same shape as ``env -u KUBECONFIG`` in the old shim (drop the
+    incantation, fail somewhere unrelated).
+
+    Uses ``command -v tofu`` (not the proxy) to isolate run_cmd's marker
+    behaviour from tunnelling; the marker is a run_cmd property independent of
+    which command it wraps. Needs no cluster - one trivial output + apply.
+    """
+    require_tools("terragrunt", "tofu")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mod = repo / "mod"
+    mod.mkdir()
+    (mod / "main.tf").write_text('output "x" { value = "hello" }\n')
+    env = dict(os.environ)
+    env.pop("TUNSTRAP_INPUT", None)
+
+    def write_root(*, with_marker: bool) -> None:
+        marker = '"--terragrunt-quiet", ' if with_marker else ""
+        (repo / "terragrunt.hcl").write_text(
+            'terraform { source = "./mod" }\n'
+            f'terraform_binary = run_cmd({marker}"sh", "-c", "command -v tofu")\n'
+        )
+
+    # Build state once (with the marker, so apply is clean).
+    write_root(with_marker=True)
+    applied = subprocess.run(
+        ["terragrunt", "apply", "-auto-approve"], cwd=repo, env=env, capture_output=True, text=True
+    )
+    assert applied.returncode == 0, f"apply failed:\n{applied.stdout}{applied.stderr}"
+
+    # WITH marker: output -json parses to the expected value.
+    write_root(with_marker=True)
+    with_marker = subprocess.run(
+        ["terragrunt", "output", "-json"], cwd=repo, env=env, capture_output=True, text=True
+    )
+    assert with_marker.returncode == 0, with_marker.stderr
+    assert json.loads(with_marker.stdout)["x"]["value"] == "hello"
+
+    # WITHOUT marker: the resolved path is prepended -> the JSON does not parse.
+    write_root(with_marker=False)
+    no_marker = subprocess.run(
+        ["terragrunt", "output", "-json"], cwd=repo, env=env, capture_output=True, text=True
+    )
+    leak_msg = (
+        f"expected the resolved tofu path prepended to stdout without the marker; "
+        f"got: {no_marker.stdout[:120]!r}"
+    )
+    assert no_marker.stdout.splitlines()[0].endswith("/tofu"), leak_msg
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(no_marker.stdout)
 
 
 def test_recipe_install_fence_tells_the_consumer_to_install(tmp_path: Path) -> None:
@@ -136,6 +211,44 @@ def test_recipe_install_fence_tells_the_consumer_to_install(tmp_path: Path) -> N
     assert "tunstrap" in install_cmd, pkg_msg
 
 
+def test_shell_shim_alt_fence_is_valid_and_bypasses(tmp_path: Path) -> None:
+    """The labelled alternative shell shim pastes, parses, and bypasses.
+
+    The recipe's ```sh tofu-shim-alt``` fence is the one artifact a consumer can
+    still paste verbatim (the lower-overhead alternative to ``tunstrap_tofu``),
+    so it is pinned rather than left unlabelled: ``sh -n`` proves it parses, and a
+    bypass smoke test (the shim, a fake ``tofu`` first on PATH, ``TUNSTRAP_INPUT``
+    unset) proves the fast-path pass-through actually reaches ``tofu``. Needs no
+    cluster - just ``sh`` (always present).
+    """
+    blocks = extract_labeled_blocks(RECIPE.read_text())
+    missing = (
+        "recipe is missing its ```sh tofu-shim-alt``` block - the labelled alternative shim is gone"
+    )
+    assert "tofu-shim-alt" in blocks, missing
+    snippet = blocks["tofu-shim-alt"]
+
+    shim = tmp_path / "tofu-tunstrap"
+    shim.write_text(snippet)
+    shim.chmod(0o755)
+    syntax = subprocess.run(["sh", "-n", str(shim)], capture_output=True, text=True)
+    assert syntax.returncode == 0, f"tofu-shim-alt fails sh -n: {syntax.stderr}"
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "tofu"
+    fake.write_text('#!/bin/sh\nprintf "FAKE:%s\\n" "$1"\nexit 0\n')
+    fake.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env.pop("TUNSTRAP_INPUT", None)
+
+    result = subprocess.run([str(shim), "plan"], env=env, capture_output=True, text=True)
+    detail = f"shim-alt bypass smoke failed: rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.returncode == 0, detail
+    assert result.stdout == "FAKE:plan\n", detail
+
+
 @pytest.mark.parametrize("empty_host", [False, True], ids=["host-set", "host-empty"])
 def test_unit_block_decodes_both_ternary_sides(empty_host: bool, tmp_path: Path) -> None:
     """The recipe's unit block decodes on BOTH sides of the env_vars ternary.
@@ -155,7 +268,7 @@ def test_unit_block_decodes_both_ternary_sides(empty_host: bool, tmp_path: Path)
     a projection field rename - fails hcl validate. (host-empty): a broken
     ternary or undefined local fails the same way.
     """
-    require_tools("terragrunt", "git")
+    require_tools("terragrunt")
     blocks = extract_labeled_blocks(RECIPE.read_text())
     missing_unit = (
         "recipe is missing its ```hcl terragrunt-unit``` block - the label that "

@@ -1,7 +1,8 @@
 """``tunstrap_tofu`` console entry: the OpenTofu proxy, in-process.
 
-This is the in-package replacement for the consumer-side shell shim
-(``tests/e2e/shim/tofu-tunstrap``). Shipping it as a second
+This is the in-package successor to the consumer-side shell shim (now retired
+from the recipe; see the "Alternative: a shell shim for the fast path" section
+of ``docs/recipe_terragrunt.md``). Shipping it as a second
 ``[project.scripts]`` entry point of this package means ``uv tool install``
 yields both ``tunstrap`` and ``tunstrap_tofu``, so Terragrunt's
 ``terraform_binary`` can point at a stable installed path with nothing copied
@@ -24,7 +25,7 @@ SSH handshake and the child, so the import is noise there.
 Terraform vocabulary lives here by deliberate owner decision; see the
 "Shipping the shim" history in
 ``docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md`` and the recipe's
-"Why not a console script" section for the trade.
+"Why a console script (now)" section for the trade.
 """
 
 from __future__ import annotations
