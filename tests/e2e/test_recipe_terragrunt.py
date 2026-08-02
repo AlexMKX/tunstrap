@@ -18,45 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e.rig import require_tools
+from tests.e2e.rig import RECIPE_MD, extract_labeled_hcl_blocks, require_tools
 
 pytestmark = [pytest.mark.e2e]
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RECIPE = REPO_ROOT / "docs" / "recipe_terragrunt.md"
-
-
-def _extract_labeled_hcl_blocks(markdown: str) -> dict[str, str]:
-    """Every ``hcl <tag>`` fenced block in ``markdown``, as {tag: body}.
-
-    The label is the second whitespace token of the fence's info string ("hcl"
-    is the first). GitHub renders the block as HCL and ignores the rest of the
-    info string, so the document stays readable; the label exists only so this
-    test can pull the exact snippet a reader sees. A snippet that loses its
-    label - or an editor who strips it - simply disappears from this map, and
-    the caller fails naming the missing tag rather than silently passing.
-    """
-    blocks: dict[str, str] = {}
-    lines = markdown.splitlines()
-    n = len(lines)
-    i = 0
-    while i < n:
-        stripped = lines[i].lstrip()
-        if stripped.startswith("```"):
-            info = stripped[3:].strip()
-            i += 1
-            body_start = i
-            while i < n and not lines[i].lstrip().startswith("```"):
-                i += 1
-            body = "\n".join(lines[body_start:i])
-            tokens = info.split()
-            if len(tokens) >= 2 and tokens[0] == "hcl":
-                tag = tokens[1]
-                if tag in blocks:
-                    pytest.fail(f"recipe has duplicate ```hcl {tag}``` fenced block")
-                blocks[tag] = body
-        i += 1
-    return blocks
+RECIPE = RECIPE_MD
 
 
 def _consumer_repo(tmp_path: Path) -> Path:
@@ -114,7 +80,7 @@ def test_recipe_terragrunt_config_parses_and_resolves_the_shim(tmp_path: Path) -
     """
     require_tools("terragrunt", "git")
 
-    blocks = _extract_labeled_hcl_blocks(RECIPE.read_text())
+    blocks = extract_labeled_hcl_blocks(RECIPE.read_text())
     missing_root = (
         "recipe is missing its ```hcl terragrunt-root``` block - the label that "
         "pins the terraform_binary snippet is gone"

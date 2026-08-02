@@ -27,6 +27,12 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 
+# tests/e2e -> tests -> <repo root>. Used to reach docs/recipe_terragrunt.md so
+# the e2e tier can guard the published recipe directly (see test_recipe_terragrunt
+# and test_terragrunt_apply).
+REPO_ROOT = HERE.parent.parent
+RECIPE_MD = REPO_ROOT / "docs" / "recipe_terragrunt.md"
+
 CLUSTER_NAME = "tunstrap-e2e"
 # kind derives the container name from the cluster name. That name is both the
 # SSH forward target and the expected tls_server_name, which is why the cluster
@@ -37,6 +43,43 @@ COMPOSE_FILE = HERE / "docker-compose.yml"
 IN_NODE_KUBECONFIG = "/etc/kube/admin.conf"
 SHIM = HERE / "shim" / "tofu-tunstrap"
 CONTROL_SHIM = HERE / "shim" / "tofu-tunstrap-novar"
+
+
+def extract_labeled_hcl_blocks(markdown: str) -> dict[str, str]:
+    """Every ``hcl <tag>`` fenced block in ``markdown``, as {tag: body}.
+
+    The label is the second whitespace token of the fence's info string ("hcl"
+    is the first). GitHub renders the block as HCL and ignores the rest of the
+    info string, so the document stays readable; the label exists only so a test
+    can pull the exact snippet a reader sees. A snippet that loses its label - or
+    an editor who strips it - simply disappears from this map, and the caller
+    fails naming the missing tag rather than silently passing.
+
+    Shared by test_recipe_terragrunt (parse/resolution pin) and
+    test_terragrunt_apply (real apply/destroy through the pinned config), so the
+    document is the single source of truth across both.
+    """
+    blocks: dict[str, str] = {}
+    lines = markdown.splitlines()
+    n = len(lines)
+    i = 0
+    while i < n:
+        stripped = lines[i].lstrip()
+        if stripped.startswith("```"):
+            info = stripped[3:].strip()
+            i += 1
+            body_start = i
+            while i < n and not lines[i].lstrip().startswith("```"):
+                i += 1
+            body = "\n".join(lines[body_start:i])
+            tokens = info.split()
+            if len(tokens) >= 2 and tokens[0] == "hcl":
+                tag = tokens[1]
+                if tag in blocks:
+                    pytest.fail(f"recipe has duplicate ```hcl {tag}``` fenced block")
+                blocks[tag] = body
+        i += 1
+    return blocks
 
 
 def skip_or_fail(reason: str) -> NoReturn:
