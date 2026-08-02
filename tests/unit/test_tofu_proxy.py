@@ -452,9 +452,19 @@ def test_importing_proxy_does_not_pull_in_cli_or_heavy_deps() -> None:
     Fresh interpreter, imports ONLY ``tunstrap.tofu_proxy``: none of the heavy
     modules the tunnelled branch uses may be loaded. This is the deterministic
     guard on the cost discipline; the measured per-invocation timing lives in
-    the task report.
+    the task report. ``importlib.metadata`` is included so a regression to an
+    eager ``__version__`` lookup in ``tunstrap/__init__.py`` (which costs ~41 ms)
+    fails here too.
     """
-    blocked = {"tunstrap.cli", "click", "pydantic", "asyncssh", "cryptography", "ruamel"}
+    blocked = {
+        "tunstrap.cli",
+        "click",
+        "pydantic",
+        "asyncssh",
+        "cryptography",
+        "ruamel",
+        "importlib.metadata",
+    }
     script = (
         "import sys, tunstrap.tofu_proxy as p; "
         f"loaded = sorted({blocked!r} & set(sys.modules)); "
@@ -464,8 +474,6 @@ def test_importing_proxy_does_not_pull_in_cli_or_heavy_deps() -> None:
         [sys.executable, "-c", script], capture_output=True, text=True, check=True
     )
     loaded = json.loads(result.stdout)
-    # Hoisted to a local: black and ruff format disagree on the parenthesised
-    # ``assert cond, (...)`` message form, but agree on a plain name.
     msg = f"proxy module import pulled in heavy deps: {result.stdout}\nstderr: {result.stderr}"
     assert loaded == [], msg
 

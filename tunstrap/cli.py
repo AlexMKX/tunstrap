@@ -15,7 +15,6 @@ from typing import Any, NoReturn, TypeVar
 import click
 from pydantic import ValidationError
 
-from tunstrap import __version__
 from tunstrap.cli_input import build_schema_from_env, build_single_node_schema
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
@@ -59,8 +58,32 @@ class _UsageExit64(click.Group):
             sys.exit(64)
 
 
+def _show_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """Lazy ``--version`` callback: resolve ``__version__`` only when invoked.
+
+    Replaces ``@click.version_option(__version__, ...)`` so importing ``cli``
+    does not trigger ``importlib.metadata`` (the package ``__init__`` resolves
+    ``__version__`` lazily too). Every ``tunstrap`` invocation that does not pass
+    ``--version`` skips the cost entirely.
+    """
+    if not value or ctx.resilient_parsing:
+        return
+    # pylint: disable=import-outside-toplevel
+    from tunstrap import __version__
+
+    click.echo(f"tunstrap, version {__version__}")
+    ctx.exit()
+
+
 @click.group(cls=_UsageExit64)
-@click.version_option(__version__, prog_name="tunstrap")
+@click.option(
+    "--version",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_show_version,
+    help="Show the version and exit.",
+)
 def main() -> None:
     """tunstrap: SSH tunnel manager for ephemeral environments."""
 
