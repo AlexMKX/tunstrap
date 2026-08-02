@@ -32,7 +32,7 @@ from tests.e2e.rig import (
     RECIPE_MD,
     SHIM,
     collect_tofu_invocations,
-    extract_labeled_hcl_blocks,
+    extract_labeled_blocks,
     kubectl_in_node,
     require_tools,
     tofu_env,
@@ -85,7 +85,7 @@ def _consumer_repo(tmp_path: Path, rig: dict[str, Any], module_src: Path, shim: 
         else:
             shutil.copy2(entry, dst)
 
-    root_block = extract_labeled_hcl_blocks(RECIPE_MD.read_text())["terragrunt-root"]
+    root_block = extract_labeled_blocks(RECIPE_MD.read_text())["terragrunt-root"]
     payload = tunstrap_input_json(rig)
     unit_block = (
         "locals {\n"

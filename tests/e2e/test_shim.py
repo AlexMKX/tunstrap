@@ -16,23 +16,16 @@ import pytest
 
 from tests.e2e.rig import (
     CONTROL_SHIM,
+    RECIPE_MD,
     SHIM,
+    extract_labeled_blocks,
     recorded_argvs,
+    strip_comments,
     tunstrap_input_json,
     write_fake_tofu,
 )
 
 pytestmark = [pytest.mark.e2e]
-
-
-def _shim_body(path: Path) -> str:
-    """The shim's executable lines, with comments and blank lines removed."""
-    lines = [
-        line
-        for line in path.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    return "\n".join(lines)
 
 
 def test_both_shims_are_executable_posix_sh() -> None:
@@ -45,19 +38,45 @@ def test_both_shims_are_executable_posix_sh() -> None:
 
 def test_control_shim_differs_only_in_output_var() -> None:
     """The negative control is the real shim minus --output-var, and nothing else."""
-    real = _shim_body(SHIM)
-    control = _shim_body(CONTROL_SHIM)
+    real = strip_comments(SHIM.read_text())
+    control = strip_comments(CONTROL_SHIM.read_text())
     assert real != control
     assert real.replace(" --output-var TF_VAR_tunstrap", "") == control
 
 
 def test_shim_uses_the_documented_invocation() -> None:
     """The shim runs the exact command the spec designs, including `env -u`."""
-    real = _shim_body(SHIM)
+    real = strip_comments(SHIM.read_text())
     assert "tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap" in real
     assert '-- env -u KUBECONFIG tofu "$@"' in real
     assert 'case "$1" in init|-version) exec tofu "$@" ;; esac' in real
     assert '[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"' in real
+
+
+def test_recipe_shim_snippet_is_identical_to_the_driven_file() -> None:
+    """The recipe's shim block is byte-identical to tests/e2e/shim/tofu-tunstrap.
+
+    The recipe tells the reader to copy this snippet verbatim and asserts it is
+    "identical to the one the e2e tier drives". Nothing enforced that - the exact
+    drift class this work exists to close. Extends the drift-guard idiom
+    (test_control_shim_differs_only_in_output_var) to a third source - the
+    published document - reusing the labelled-fence extractor rather than a new
+    mechanism.
+
+    Fails-when-broken: perturb either the snippet or the driven file - a
+    comment, a flag, a reordered line - and the byte comparison fails. Proven by
+    perturbation before commit (recorded in the SDD report). Comments are
+    included in the comparison: the recipe claims *identity*, not just
+    logic-equivalence, so a comment that drifted is a real divergence.
+    """
+    snippet = extract_labeled_blocks(RECIPE_MD.read_text())["tofu-shim"]
+    # A fenced block has no final newline; the file does. That is the only
+    # allowed difference - everything else is byte-identical.
+    mismatch = (
+        f"recipe ```sh tofu-shim``` snippet drifts from {SHIM}:\n"
+        f"--- snippet (no final newline) ---\n{snippet}\n--- file ---\n{SHIM.read_text()}"
+    )
+    assert snippet + "\n" == SHIM.read_text(), mismatch
 
 
 def _shim_env(bin_dir: Path) -> dict[str, str]:

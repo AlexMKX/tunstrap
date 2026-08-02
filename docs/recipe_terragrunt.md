@@ -28,14 +28,66 @@ child, so orphans become impossible by construction.
 
 ## Prerequisites
 
-- `tunstrap` on `PATH` (it `exec`s `tunstrap run`).
+- `tunstrap` on `PATH` (the shim `exec`s `tunstrap run` — see Installation below
+  for a one-line install).
 - `tofu` on `PATH` (the shim `exec`s it for the pass-through branches and as the
   tunnelled child).
-- The shim itself at a **stable absolute path** (Terragrunt's `terraform_binary`
-  needs a path; see "Why not a console script" below). `bin/tofu-tunstrap`
-  relative to your repo root is conventional.
+- The shim itself, committed at `bin/tofu-tunstrap` relative to your repo root.
+  Terragrunt's `terraform_binary` resolves a path and probes it every run, so it
+  wants a stable, reviewable home (see Installation).
 - An OpenTofu/Terraform module that reads the connection details from a
   `TF_VAR_*` variable. The shape is given below and is load-bearing.
+
+## Installation
+
+Two pieces, installed once: `tunstrap` on `PATH`, and the shim at a stable path.
+
+### tunstrap
+
+tunstrap is **not on PyPI** — a direct-reference dependency (the asyncssh fork
+the package is built on) blocks publishing — so install it from the git source
+or a local checkout:
+
+```sh
+uv tool install "git+https://github.com/AlexMKX/tunstrap.git"
+# or from a local checkout:
+uv tool install /path/to/tunstrap
+```
+
+Use `uv tool install`, not `uvx`. `uv tool install` yields a **stable** entry
+point at `~/.local/bin/tunstrap`
+(→ `~/.local/share/uv/tools/tunstrap/bin/tunstrap`), identical across reinstalls;
+`uvx` runs from an ephemeral `~/.cache/uv/archive-v0/…` path that changes per
+resolution. (This is the correction to reason 3 in "Why not a console script"
+below: that stable-path caveat held for `uvx`, not for `uv tool install`.)
+
+### The shim
+
+Copy the snippet in the next section into `bin/tofu-tunstrap`, `chmod 0755` it,
+and commit it. Committing it — rather than generating it at runtime — keeps it
+reviewable and pinned alongside the config, with no runtime moving parts.
+
+### Localizing install in `terragrunt.hcl` (`run_cmd`, optional)
+
+If you would rather the bootstrap lived entirely in `terragrunt.hcl`, the
+`terraform_binary` attribute also accepts `run_cmd(...)`. The command runs
+**before** the `-version` probe, is cached once per `plan`, and runs once **per
+unit** under `run --all`:
+
+```hcl
+# runs before the -version probe; its stdout becomes terraform_binary
+terraform_binary = run_cmd("${get_repo_root()}/bin/materialize-shim.sh")
+```
+
+where `materialize-shim.sh` idempotently writes the shim and `echo`s its path.
+The cost is one shell-script exec per unit per run (there is no cross-unit
+cache), and the script is a runtime moving part that can drift from the reviewed
+shim — which is why the committed file remains the default.
+
+A `before_hook` **cannot** install the shim instead. Terragrunt probes
+`<terraform_binary> -version` roughly 50 ms *before* any hook runs, and with the
+binary missing it fails outright before the hook executes (measured; the hook's
+marker file never appears). Hook-based install is a dead end.
 
 ## The shim
 
@@ -43,7 +95,7 @@ This is the shim verbatim — copy it into your repo (e.g. `bin/tofu-tunstrap`),
 `chmod 0755` it, and commit it. It is identical to the one the e2e tier drives
 (`tests/e2e/shim/tofu-tunstrap`).
 
-```sh
+```sh tofu-shim
 #!/bin/sh
 # Consumer-facing OpenTofu shim. Terraform-specific decisions live here, not in
 # tunstrap; see docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md,
@@ -174,10 +226,19 @@ terraform {
   }
 }
 
-# Build `local.cluster_host` / `local.ssh_private_key` from whatever your
-# source of truth is. dependency.* works inside extra_arguments.env_vars but
-# NOT in locals, so keep the dependency reference inside the env_vars block
-# above if you read connection data from another unit's outputs.
+```
+
+The unit references `local.cluster_host` / `local.ssh_private_key`, which it does
+not define, so a copy-paster gets `"local.cluster_host is not defined"` until they
+add a `locals` block. `dependency.*` does NOT resolve in `locals` (measured
+below), so build these from your source of truth and keep any `dependency.*`
+reference inline in `env_vars` above. Expected shape (uncomment and fill):
+
+```hcl terragrunt-locals
+# locals {
+#   cluster_host    = "k3s.example.internal"
+#   ssh_private_key = "ssh-ed25519 AAAA…"
+# }
 ```
 
 When `local.cluster_host == ""` (infra not applied, or a mock-state run), the
@@ -211,7 +272,7 @@ The shim hands the module the connection envelope as a JSON string in
 `TF_VAR_tunstrap`. The module decodes it and derives its provider `config_path`
 from it. This is the exact chain the e2e tier exists to prove:
 
-```hcl
+```hcl tf-module
 variable "tunstrap" {
   type      = string
   default   = ""
@@ -468,10 +529,15 @@ they are worth knowing before you are tempted to package it differently:
 2. **It keeps Terraform vocabulary out of tunstrap.** `init`, `-version`, and
    `TF_VAR_` are Terraform concepts. tunstrap is deliberately Terraform-free;
    the proxy knowledge belongs in a consumer shim, not in the package.
-3. **`terraform_binary` needs a stable path.** tunstrap is installed via `uvx`
-   (PyPI is blocked by a direct-reference dependency), whose scripts land in an
-   ephemeral `~/.cache/uv/archive-v0/…` path. You have to materialize a stable
-   path for the shim regardless, so it may as well be a committed file.
+3. **A committed file is the stable path `terraform_binary` wants.** This was
+   once argued as "tunstrap is installed via `uvx`, whose scripts land in an
+   ephemeral path" — that is **wrong as stated**: `uv tool install` (see
+   Installation) gives tunstrap a stable entry point, and the ephemeral
+   `~/.cache/uv/…` path is a `uvx` artefact only. The stable-path argument is
+   really about the *shim*, not the package: whatever provisions it,
+   `terraform_binary` resolves a path and probes it on every run, so a committed
+   `bin/tofu-tunstrap` is the simplest stable, reviewable home for it. (Reasons 1
+   and 2 are the load-bearing ones; this is belt-and-braces.)
 
 ## Security
 

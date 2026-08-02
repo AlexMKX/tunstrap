@@ -45,19 +45,24 @@ SHIM = HERE / "shim" / "tofu-tunstrap"
 CONTROL_SHIM = HERE / "shim" / "tofu-tunstrap-novar"
 
 
-def extract_labeled_hcl_blocks(markdown: str) -> dict[str, str]:
-    """Every ``hcl <tag>`` fenced block in ``markdown``, as {tag: body}.
+def extract_labeled_blocks(markdown: str) -> dict[str, str]:
+    """Every labelled fenced block in ``markdown``, as {tag: body}.
 
-    The label is the second whitespace token of the fence's info string ("hcl"
-    is the first). GitHub renders the block as HCL and ignores the rest of the
-    info string, so the document stays readable; the label exists only so a test
-    can pull the exact snippet a reader sees. A snippet that loses its label - or
-    an editor who strips it - simply disappears from this map, and the caller
-    fails naming the missing tag rather than silently passing.
+    A block is ```` ```<lang> <tag> ```` ... ```` ``` ```` - the label is the
+    second whitespace token of the fence's info string (the language is the
+    first, and is ignored: `hcl`, `sh`, `json` are all accepted). GitHub renders
+    the block by its language and ignores the rest of the info string, so the
+    document stays readable; the label exists only so a test can pull the exact
+    snippet a reader sees. A snippet that loses its label - or an editor who
+    strips it - simply disappears from this map, and the caller fails naming the
+    missing tag rather than silently passing.
 
-    Shared by test_recipe_terragrunt (parse/resolution pin) and
-    test_terragrunt_apply (real apply/destroy through the pinned config), so the
-    document is the single source of truth across both.
+    An opening fence with no closing fence is *not* captured: a stray unterminated
+    fence at end-of-document would otherwise swallow every line after it as a
+    "block", masking a real truncation. Tags must be unique.
+
+    Shared by test_recipe_terragrunt and test_terragrunt_apply, so the document
+    is the single source of truth across both.
     """
     blocks: dict[str, str] = {}
     lines = markdown.splitlines()
@@ -67,19 +72,36 @@ def extract_labeled_hcl_blocks(markdown: str) -> dict[str, str]:
         stripped = lines[i].lstrip()
         if stripped.startswith("```"):
             info = stripped[3:].strip()
+            tokens = info.split()
             i += 1
             body_start = i
-            while i < n and not lines[i].lstrip().startswith("```"):
+            closed = False
+            while i < n:
+                if lines[i].lstrip().startswith("```"):
+                    closed = True
+                    break
                 i += 1
-            body = "\n".join(lines[body_start:i])
-            tokens = info.split()
-            if len(tokens) >= 2 and tokens[0] == "hcl":
+            if closed and len(tokens) >= 2:
                 tag = tokens[1]
                 if tag in blocks:
-                    pytest.fail(f"recipe has duplicate ```hcl {tag}``` fenced block")
-                blocks[tag] = body
+                    pytest.fail(f"recipe has duplicate ```{tokens[0]} {tag}``` fenced block")
+                blocks[tag] = "\n".join(lines[body_start:i])
         i += 1
     return blocks
+
+
+def strip_comments(text: str) -> str:
+    """The executable lines of ``text`` - comments and blanks removed.
+
+    Comments and blank lines carry prose, not logic; stripping them lets a drift
+    guard compare what a snippet *does* across two sources whose prose differs
+    (the recipe's excerpt vs the driven file, whose comments were written
+    separately). Shared by the shim drift guards in test_shim and the module
+    drift guard in test_recipe_terragrunt.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
 
 
 def skip_or_fail(reason: str) -> NoReturn:
