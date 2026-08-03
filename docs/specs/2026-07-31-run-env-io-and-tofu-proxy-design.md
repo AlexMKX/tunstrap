@@ -534,7 +534,7 @@ observations about that pair, not repo invariants.
 | `docs/recipe_terragrunt.md` | New. |
 | `pyproject.toml` (test config + `tunstrap_tofu` entry) | Add the `e2e` marker; `addopts` → `-m 'not integration and not e2e'`. **Revised (see "Shipping the shim"):** add the second console script `tunstrap_tofu = "tunstrap.tofu_proxy:main"`. No dependency changes. |
 | `tunstrap/tofu_proxy.py` (revised) | New module: the in-package `tunstrap_tofu` entry point. Pass-through branches `execvp` `tofu` without importing `cli`; the tunnelled branch delegates to `run` in-process via `run_via_env_input` with `suppress_kubeconfig=True`. Parses argv past global flags so `-chdir=DIR init` bypasses correctly. See "Shipping the shim (revised)". |
-| `tests/e2e/` | New, self-contained tier: `conftest.py` (own keypair + kind + compose lifecycle), `docker-compose.yml` (one `sshd-kube` on the external `kind` network), committed `_sshd_conf/allow_tcpfwd.conf` and `shim/tofu-tunstrap`, `module/` (providers + local chart), `test_tofu_providers.py`, `test_shim.py`. Borrows nothing from `tests/integration/`. |
+| `tests/e2e/` | New, self-contained tier: `conftest.py` (own keypair + kind + compose lifecycle), `docker-compose.yml` (one `sshd-kube` on the external `kind` network), committed `_sshd_conf/allow_tcpfwd.conf`, `shim/tofu-tunstrap-novar` (the `--output-var` negative control; test-only), `module/` (providers + local chart), `test_tofu_providers.py`, `test_shim.py`, `test_terragrunt_apply.py`, `test_recipe_terragrunt.py`. **Revised:** the main consumer shim (`shim/tofu-tunstrap`) is retired; the tier drives the installed `tunstrap_tofu` entry point, not a copied shim. Borrows nothing from `tests/integration/`. |
 | `.gitignore` | Add `tests/e2e/_keys/` and `tests/e2e/_kube/` (both fixture-generated). |
 | `.github/workflows/test.yml` | New `e2e` job installing kind + tofu; not added to the coverage combine. |
 
@@ -766,7 +766,7 @@ tests/e2e/
   _keys/                       # GENERATED, gitignored: id_test, id_test.pub
   _sshd_conf/                  # TRACKED: allow_tcpfwd.conf ("AllowTcpForwarding yes")
   _kube/                       # GENERATED, gitignored: admin.conf
-  shim/tofu-tunstrap           # TRACKED: the shim under test
+  shim/tofu-tunstrap-novar     # TRACKED: --output-var negative control (test-only)
   module/
     versions.tf                # kubernetes + helm provider constraints
     main.tf                    # var.tunstrap -> try(jsondecode) -> config_path

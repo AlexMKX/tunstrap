@@ -72,40 +72,39 @@ def _consumer_repo(
     commands: list[str],
     terraform_binary: str,
     control_shim: Path | None = None,
+    include_root: bool = True,
 ) -> Path:
-    """A consumer working tree wired to the installed ``tunstrap_tofu`` (or the control).
+    """A real consumer hierarchy: ``root.hcl`` + ``unit/terragrunt.hcl``.
 
-    The positive path (``control_shim is None``) copies nothing into the repo:
-    ``terraform_binary`` is the absolute path of the installed entry point (the
-    caller passes ``shutil.which("tunstrap_tofu")``), exactly as a real consumer
-    would after finding it with ``command -v tunstrap_tofu``. The negative-control
-    path copies the control shim into ``bin/`` and points ``terraform_binary`` at
-    it - the control is a test tool, not a consumer artifact.
+    Exercises the recipe's two blocks the way a consumer assembles them, NOT
+    concatenated into one file (which hid the silent non-inheritance failure:
+    a unit without ``include "root"`` falls back to plain ``tofu`` and dies at
+    127.0.0.1:0 - see test_a_non_inherited_root_is_caught_...). ``root.hcl``
+    carries ``terraform_binary``; the unit inherits it via
+    ``include "root" { path = find_in_parent_folders("root.hcl") }`` (the form
+    the recipe documents - ``find_in_parent_folders`` defaults to ``terragrunt.hcl``
+    and must name ``root.hcl`` explicitly). The module is copied into ``unit/``
+    so ``source = "."`` resolves there. Returns the unit dir (terragrunt's cwd).
 
-    The unit block carries a copy of the recipe's extra_arguments *mechanism* -
-    the same `local.X != "" ? { ... } : {}` conditional - with a rig-built
-    payload and the supplied `commands` list.
+    ``include_root=False`` omits the include - the failure mode the recipe's
+    troubleshooting distinguishes from a forgotten ``commands`` entry.
 
-    Scaffolding the recipe does NOT carry, and why it does not need it:
-    - the `locals` block. The recipe defers locals to the consumer; this supplies
-      the rig's host and a pre-built payload.
-    - the payload as a heredoc string rather than the recipe's inline
-      `jsonencode({...})`. The recipe's map carries illustrative k3s values; the
-      rig is kind, so the payload is built by the rig's own `tunstrap_input_json`
-      (the same builder test_tofu_providers uses). The delivery mechanism
-      (extra_arguments.env_vars -> TUNSTRAP_INPUT) is the recipe's, unchanged.
-    - the module at the repo root (`source = "."`), copied from tests/e2e/module/.
+    ``control_shim`` (the ``--output-var`` negative control) overrides
+    ``terraform_binary`` to a copied shim in ``bin/``; it is a test tool, not a
+    consumer artifact, and still inherits via the include.
 
-    git-init'd so the recipe's ${get_repo_root()} resolves to this directory.
-    The recipe's literal-path root block is NOT extracted here (it carries a
-    consumer-specific placeholder); the recipe-pin test (test_recipe_terragrunt)
-    validates that block separately. This repo uses the resolved real path.
+    The unit block carries a copy of the recipe's extra_arguments *mechanism*
+    with a rig-built payload (the recipe's carries illustrative k3s values that
+    do not match the kind rig). No ``git init``: nothing in the config uses
+    ``get_repo_root()`` and ``find_in_parent_folders``/``source = "."`` need no
+    git repo (verified).
     """
     repo = tmp_path / "consumer"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+    unit = repo / "unit"
+    unit.mkdir()
     for entry in module_src.iterdir():
-        dst = repo / entry.name
+        dst = unit / entry.name
         if dst.exists():
             continue
         if entry.is_dir():
@@ -122,11 +121,17 @@ def _consumer_repo(
         binary_value = str(copied)
     else:
         binary_value = terraform_binary
-    root_block = f'terraform_binary = "{binary_value}"\n'
+    (repo / "root.hcl").write_text(f'terraform_binary = "{binary_value}"\n')
 
     payload = tunstrap_input_json(rig)
     commands_hcl = ", ".join(f'"{c}"' for c in commands)
+    include_block = (
+        'include "root" {\n  path = find_in_parent_folders("root.hcl")\n}\n\n'
+        if include_root
+        else ""
+    )
     unit_block = (
+        f"{include_block}"
         "locals {\n"
         f'  cluster_host        = "{rig["host"]}"\n'
         "  tunstrap_input_json = <<EOT\n"
@@ -144,8 +149,8 @@ def _consumer_repo(
         "  }\n"
         "}\n"
     )
-    (repo / "terragrunt.hcl").write_text(f"{root_block}\n\n{unit_block}")
-    return repo
+    (unit / "terragrunt.hcl").write_text(unit_block)
+    return unit
 
 
 def _terragrunt_env(module: Path, cache: Path, recorder_bin: Path | None = None) -> dict[str, str]:
@@ -259,7 +264,7 @@ def test_terragrunt_apply_destroy_through_the_proxy(
       exclusion comes from the proxy's `suppress_kubeconfig` plus `tofu_env`, not
       this compare.
     """
-    require_tools("terragrunt", "git")
+    require_tools("terragrunt")
     bin_rec = tmp_path / "bin_rec"
     dump_dir = tmp_path / "dumps"
     write_tofu_recorder(bin_rec, dump_dir)
@@ -360,21 +365,22 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     - `json.loads(out.stdout)` succeeds AND the output row carried TF_VAR_tunstrap
       (so the invocation provably traversed tunstrap run, not the pass-through
       branch). That is the positive end-to-end claim.
-    - This ``json.loads`` is **unfalsified at this layer**: there is no
-      wrapper-based break that demonstrates a contamination would fail the parse.
-      Wrapping ``tunstrap`` does not work (the proxy runs run IN-PROCESS and never
-      invokes the ``tunstrap`` binary); wrapping ``tofu`` does not work either
-      (``terragrunt output -json`` mediates tofu's output and discards the stream
-      on its own parse failure, so the contamination never reaches the captured
-      stdout). Both were tried and rejected - see the retired-sub-check NOTE at
-      the body's end. The purity property the parse indirectly relies on (the
-      tunnelled path adds no bytes to fd 1 beyond tofu's output) is proven
-      FALSIFIABLE at the proxy layer by the byte-equality test
+    - The ``json.loads`` itself is **unfalsified at this layer**: no
+      wrapper-based break makes a *contamination of the parsed stream* fail the
+      parse. Wrapping ``tunstrap`` does nothing (the proxy runs run IN-PROCESS and
+      never invokes the ``tunstrap`` binary); wrapping ``tofu`` to prepend bytes
+      makes ``terragrunt output -json`` exit 1 with EMPTY captured stdout
+      (Terragrunt mediates the output and discards it on its own parse failure),
+      which reddens this test's own ``assert out.returncode == 0`` and
+      ``json.loads`` (on empty input) - so a contamination IS caught here, just
+      via the return code / empty-stdout path rather than via a parse of a
+      contaminated stream. Neither shape isolates tunstrap-run's stdout purity,
+      which is proven FALSIFIABLE at the proxy layer by the byte-equality test
       tests/e2e/test_shim.py::test_tunnelled_stdout_is_byte_identical_to_the_untunnelled_child.
       Do not read this test's green parse as evidence the parse is fragile to
       contamination - it is not shown here.
     """
-    require_tools("terragrunt", "git")
+    require_tools("terragrunt")
     bin_rec = tmp_path / "bin_rec"
     dump_dir = tmp_path / "dumps"
     write_tofu_recorder(bin_rec, dump_dir)
@@ -459,13 +465,14 @@ def test_terragrunt_apply_without_output_var_fails_through_terragrunt(
     success meaningful.
 
     This targets the config_path/`--output-var` route. It is NOT the break for
-    the stdout-purity claim (that is the pollution sub-check in
-    test_tunnelled_output_through_tunstrap_run_parses_cleanly); it overlaps
+    the stdout-purity claim (that is the byte-equality test
+    tests/e2e/test_shim.py::test_tunnelled_stdout_is_byte_identical_to_the_untunnelled_child);
+    it overlaps
     test_tofu_providers::test_apply_without_output_var_fails_even_with_the_tunnel_up
     because the config_path route is worth guarding at both the direct-proxy and
     Terragrunt-env_vars layers. The cluster is confirmed healthy throughout.
     """
-    require_tools("terragrunt", "git")
+    require_tools("terragrunt")
     repo = _consumer_repo(
         tmp_path,
         kube_rig,
@@ -490,6 +497,78 @@ def test_terragrunt_apply_without_output_var_fails_through_terragrunt(
     assert namespace.returncode != 0
     assert "not found" in namespace.stderr.lower()
 
+    health = kubectl_in_node("get", "--raw", "/healthz")
+    assert health.returncode == 0, health.stderr
+    assert health.stdout.strip() == "ok"
+
+
+def test_a_non_inherited_root_is_caught_and_distinguishable_from_a_missing_commands_entry(
+    kube_rig: dict[str, Any],
+    tofu_module: Path,
+    tofu_plugin_cache: Path,
+    tmp_path: Path,
+) -> None:
+    """A unit without ``include "root"`` fails at 127.0.0.1:0 - but tellably.
+
+    The recipe's two HCL blocks are inherited, not concatenated: a unit that
+    omits ``include "root"`` does not inherit ``terraform_binary``, Terragrunt
+    silently falls back to plain ``tofu`` on PATH, and the apply dies at the inert
+    ``127.0.0.1:0`` endpoint. That symptom is IDENTICAL to a forgotten ``commands``
+    entry, so the recipe's troubleshooting must tell them apart - and so must this
+    test, which is the whole reason the rig stopped concatenating the two fences
+    into one file.
+
+    The distinguisher is what reached ``tofu``:
+    - non-inherited root: ``extra_arguments.env_vars`` still delivered
+      ``TUNSTRAP_INPUT`` (it does not depend on ``terraform_binary``), but nothing
+      set ``TF_VAR_tunstrap`` (the proxy never ran). Recording tofu shows
+      ``TUNSTRAP_INPUT`` PRESENT, ``TF_VAR_tunstrap`` ABSENT.
+    - forgotten ``commands`` entry: that command's env lacks ``TUNSTRAP_INPUT``
+      (the list controls delivery) AND ``TF_VAR_tunstrap``. Both ABSENT.
+
+    The test pins the non-inherited-root signature. The forgotten-commands
+    signature (``TUNSTRAP_INPUT`` absent) is exercised by the ``-version``/output
+    rows of ``test_terragrunt_apply_destroy_through_the_proxy``.
+    """
+    require_tools("terragrunt")
+    bin_rec = tmp_path / "bin_rec_noinh"
+    dump_dir = tmp_path / "dumps_noinh"
+    write_tofu_recorder(bin_rec, dump_dir)
+    # include_root=False: root.hcl carries terraform_binary but the unit never
+    # inherits it - the exact mis-assembly a newcomer makes.
+    unit = _consumer_repo(
+        tmp_path,
+        kube_rig,
+        tofu_module,
+        commands=RECIPE_COMMANDS,
+        terraform_binary=_installed_proxy(),
+        include_root=False,
+    )
+    env = _terragrunt_env(tofu_module, tofu_plugin_cache, bin_rec)
+
+    applied = _tg(unit, env, "apply", "-auto-approve")
+    combined = applied.stdout + applied.stderr
+    fail_msg = (
+        "apply SUCCEEDED with a non-inherited root (no include) - terraform_binary "
+        "was somehow inherited despite the missing include, which defeats this "
+        "test's premise.\n" + combined
+    )
+    assert applied.returncode != 0, fail_msg
+    assert "127.0.0.1:0" in combined, combined
+
+    # The distinguishing signature: TUNSTRAP_INPUT present (env_vars delivered
+    # it), TF_VAR_tunstrap absent (the proxy never ran). A forgotten-commands
+    # entry would leave TUNSTRAP_INPUT absent too - which is how the two are
+    # told apart (see the recipe's "Failure modes").
+    by_cmd = _invocations_by_command(dump_dir)
+    _assert_row(
+        "apply",
+        by_cmd.get("apply", []),
+        has_nonempty=("TUNSTRAP_INPUT",),
+        lacks=("TF_VAR_tunstrap",),
+    )
+    # Cluster health: the failure is attributable to the missing include, not a
+    # dead rig.
     health = kubectl_in_node("get", "--raw", "/healthz")
     assert health.returncode == 0, health.stderr
     assert health.stdout.strip() == "ok"

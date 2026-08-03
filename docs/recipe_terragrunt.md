@@ -92,10 +92,13 @@ parse time and there is one less moving part. Find the path once with
 `~/.local/bin/tunstrap_tofu`) and paste it:
 
 ```hcl terragrunt-root
-# root.hcl (or the top of each unit's terragrunt.hcl)
-# terraform_binary is a TOP-LEVEL attribute, not a member of the terraform {}
-# block: TG rejects it there with "An argument named terraform_binary is not
-# expected here." See "Measured Terragrunt facts" below.
+# root.hcl - shared across units; each unit inherits it with
+#   include "root" { path = find_in_parent_folders("root.hcl") }
+# (see the unit block below). terraform_binary is a TOP-LEVEL attribute, not a
+# member of the terraform {} block: TG rejects it there with "An argument named
+# terraform_binary is not expected here." See "Measured Terragrunt facts" below.
+# For a single-unit repo you may instead put this line at the top of the unit's
+# terragrunt.hcl and drop the include.
 #
 # Default: the absolute path of the installed tunstrap_tofu entry point.
 terraform_binary = "/home/you/.local/bin/tunstrap_tofu"
@@ -158,10 +161,23 @@ exec tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
 
 Then, in the unit that needs the tunnel, declare `TUNSTRAP_INPUT` as an
 `extra_arguments` env var scoped to the commands that actually contact the
-cluster:
+cluster. The unit **must** inherit the root for `terraform_binary` to take
+effect — without `include "root"`, Terragrunt silently falls back to plain `tofu`
+on `PATH` and the apply dies at the inert `https://127.0.0.1:0` endpoint (see
+"Failure modes" — this is indistinguishable from a forgotten `commands` entry by
+the exit code alone, and the recipe exists to keep them apart):
 
 ```hcl terragrunt-unit
 # unit terragrunt.hcl
+#
+# `terraform_binary` lives in root.hcl; inherit it. find_in_parent_folders
+# defaults to searching for "terragrunt.hcl", so name "root.hcl" explicitly -
+# the bare find_in_parent_folders() errors with ParentFileNotFoundError when the
+# parent is root.hcl (measured).
+include "root" {
+  path = find_in_parent_folders("root.hcl")
+}
+
 terraform {
   source = "."
 
@@ -286,7 +302,7 @@ provider "helm" {
 }
 ```
 
-Three things to get right, each of which the tier proved can pass for the wrong
+Four things to get right, each of which the tier proved can pass for the wrong
 reason if dropped:
 
 1. **`try()` around `jsondecode`.** `jsondecode("")` errors. Without `try`,
@@ -409,10 +425,28 @@ recipe rests on them.
 
 ## Failure modes you will hit
 
-- **A `commands` entry you forgot.** The command runs without `TUNSTRAP_INPUT`,
-  the module takes its inert branch, and the provider errors against
-  `https://127.0.0.1:0`. That is the *designed* loud failure — add the command
-  to the list. `import` is the classic omission.
+Both of the first two land at the same symptom — a provider error against
+`https://127.0.0.1:0`, the module's inert branch — so they are easy to confuse.
+They have different causes, and the recipe's job is to keep them straight:
+
+- **A unit that forgot `include "root"`.** The root's `terraform_binary` is not
+  inherited, so Terragrunt silently falls back to plain `tofu` on `PATH`. The
+  `extra_arguments.env_vars` still delivers `TUNSTRAP_INPUT` to that `tofu`, but
+  nothing sets `TF_VAR_tunstrap` (the proxy never runs), the module takes its
+  inert branch, and the provider dials `127.0.0.1:0`. Tell-tale: a recording
+  `tofu` shows `TUNSTRAP_INPUT` **present** but `TF_VAR_tunstrap` **absent**.
+  Fix: add the `include "root" { path = find_in_parent_folders("root.hcl") }`
+  block to the unit.
+- **A `commands` entry you forgot.** The command runs without `TUNSTRAP_INPUT`
+  (the list controls delivery), so `TF_VAR_tunstrap` is absent for the same
+  reason, the module takes its inert branch, and the provider errors against
+  `https://127.0.0.1:0`. Tell-tale: a recording `tofu` shows `TUNSTRAP_INPUT`
+  **absent** for that command. That is the *designed* loud failure — add the
+  command to the list. `import` is the classic omission.
+
+  The two are distinguished by whether `TUNSTRAP_INPUT` reached `tofu`: present
+  ⇒ missing include; absent ⇒ missing `commands` entry. Both are loud (non-zero
+  exit, a named endpoint); neither is a silent wrong result.
 - **A `--` you forgot inside `tunstrap run`.** This is a `run`-level rule. The
   proxy always passes `--` for the user, so a consumer driving `tunstrap_tofu`
   never hits it; it only surfaces if you hand-edit the `run` invocation (e.g. in
@@ -554,8 +588,8 @@ each stands now:
    for anyone who prefers the package to stay Terraform-free.
 
 **Which to use.** Prefer `tunstrap_tofu` (nothing to copy, stable path, the
-`-chdir` gap below is fixed). Keep the consumer shim if you want the ~2 ms fast
-path or want no Terraform vocabulary in the package you depend on.
+ `-chdir` gap above is fixed). Keep the consumer shim if you want the ~2 ms fast
+ path or want no Terraform vocabulary in the package you depend on.
 
 ## Security
 

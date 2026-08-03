@@ -200,7 +200,11 @@ jobs:
           # +1 test pinning the load-bearing `--terragrunt-quiet` run_cmd marker
           # (proves the parse breaks with the marker removed) and +1 pinning the
           # labelled shell-shim-alt alternative fence (sh -n + bypass smoke).)
-          assert counts["tests"] >= 33, f"expected at least 33 e2e tests, ran {counts['tests']}"
+          # Raised to 34 by the inheritance follow-up: +1 test proving a unit that
+          # forgets `include "root"` is caught (apply fails at 127.0.0.1:0) AND
+          # distinguished from a forgotten-commands entry (TUNSTRAP_INPUT present
+          # vs absent) - after the rig stopped concatenating root+unit into one file.
+          assert counts["tests"] >= 34, f"expected at least 34 e2e tests, ran {counts['tests']}"
           print("e2e tier ran in full")
           PY
 

@@ -177,11 +177,12 @@ def test_the_run_cmd_marker_is_load_bearing_for_terragrunt_output_json(
     no_marker = subprocess.run(
         ["terragrunt", "output", "-json"], cwd=repo, env=env, capture_output=True, text=True
     )
+    no_marker_lines = no_marker.stdout.splitlines()
     leak_msg = (
         f"expected the resolved tofu path prepended to stdout without the marker; "
-        f"got: {no_marker.stdout[:120]!r}"
+        f"got {len(no_marker_lines)} line(s): {no_marker.stdout[:120]!r}"
     )
-    assert no_marker.stdout.splitlines()[0].endswith("/tofu"), leak_msg
+    assert no_marker_lines and no_marker_lines[0].endswith("/tofu"), leak_msg
     with pytest.raises(json.JSONDecodeError):
         json.loads(no_marker.stdout)
 
@@ -285,10 +286,18 @@ def test_unit_block_decodes_both_ternary_sides(empty_host: bool, tmp_path: Path)
     if empty_host:
         locals_block = re.sub(r'(cluster_host\s*=\s*)"[^"]*"', r'\1""', locals_block)
 
+    # The unit block carries `include "root" { path = find_in_parent_folders(...) }`,
+    # so validate it as a real unit under a root.hcl parent (the recipe's shape),
+    # not a standalone file - otherwise the include has nothing to find.
     repo = _consumer_repo(tmp_path)
-    (repo / "terragrunt.hcl").write_text(f"{locals_block}\n\n{blocks['terragrunt-unit']}")
+    (repo / "root.hcl").write_text(
+        "# parent config; contents irrelevant to unit-block validation\n"
+    )
+    unit = repo / "unit"
+    unit.mkdir()
+    (unit / "terragrunt.hcl").write_text(f"{locals_block}\n\n{blocks['terragrunt-unit']}")
     validated = subprocess.run(
-        ["terragrunt", "hcl", "validate", "--working-dir", str(repo)],
+        ["terragrunt", "hcl", "validate", "--working-dir", str(unit)],
         capture_output=True,
         text=True,
         check=False,
