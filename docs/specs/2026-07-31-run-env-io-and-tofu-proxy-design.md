@@ -1102,17 +1102,22 @@ Added by this spec: a **separate `e2e` job** (ubuntu only) running
 cluster. It is **not** part of the coverage combine (see "Marker, CI job, and
 blast radius"), and it does not alter the unit or integration jobs.
 
-**Known pre-existing breakage — record, do not fix here.** `pyproject.toml:23`
-pins only `ruff>=0.8`, so a fresh `pip install -e ".[dev]"` resolves ruff
-**0.16.1**, against which [measured 2026-07-31] `ruff check .` reports **59
-errors** in `.py` sources and tests (19 `I001`, 8 `PLW1510`, 7 `UP037`, 6
-`RUF100`, 4 `UP035`, …) and `ruff format --check .` wants **6 files** — *all six
-Markdown* (`docs/specs/2026-05-16|20|21`, `docs/superpowers/plans/2026-05-30`,
-`2026-06-24`, `2026-06-25`), because ruff 0.16 formats Python code fences inside
-`.md`. `black --check .` is clean (66 files); ruff **0.15.18** is clean on both
-gates. So black and `ruff format` have **not** diverged on Python — zero `.py`
-files differ; the gate breaks on new 0.16 lint rules plus Markdown formatting.
-Fix = a version pin plus an exclude or a docs reformat; a separate change.
+**Pre-existing breakage found here, resolved during implementation.** When this
+spec was written `pyproject.toml` pinned only `ruff>=0.8`, so a fresh
+`pip install -e ".[dev]"` resolved ruff **0.16.1**, against which
+[measured 2026-07-31] `ruff check .` reported **59 errors** in `.py` sources and
+tests (19 `I001`, 8 `PLW1510`, 7 `UP037`, 6 `RUF100`, 4 `UP035`, …) and
+`ruff format --check .` wanted **6 files** — *all Markdown*, because ruff 0.16
+formats Python code fences inside `.md`. `black --check .` was clean; ruff
+**0.15.18** was clean on both gates. So black and `ruff format` had **not**
+diverged on Python — zero `.py` files differed; the gate broke on new 0.16 lint
+rules plus Markdown formatting.
+
+Fixed as the diagnosis predicted — a version pin plus an exclude: `pyproject.toml`
+now pins `ruff>=0.16,<0.17` (an upper bound, because the formatter's behaviour
+moves between minors and the file counts are gate values), and
+`[tool.ruff.format] exclude = ["docs/**/*.md"]` keeps ruff out of prose. All
+lint findings were fixed or explicitly suppressed. Both gates are green.
 
 ## HCL consumer impact
 
