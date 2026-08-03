@@ -7,7 +7,7 @@ Code: tunstrap/cli.py
 
 from __future__ import annotations
 
-import re
+from importlib.metadata import version
 
 import pytest
 from click.testing import CliRunner
@@ -25,21 +25,33 @@ def test_help_exits_zero() -> None:
 
 
 def test_version_flag() -> None:
-    """Print the resolved package version, not the not-installed fallback.
+    """Print the exact version the package metadata resolves, not the fallback.
 
-    The lazy ``--version`` callback resolves ``__version__`` via the package
-    ``__init__``'s PEP 562 ``__getattr__``. Under a real install that yields a
-    setuptools-scm version like ``0.0.5.dev72+…``; the not-installed fallback is
-    ``0.0.0+unknown``. Asserting only ``"tunstrap" in output`` passes either —
-    including the fallback, which would hide a regression to a broken
-    distribution lookup. Pin a real-version shape and reject the fallback.
+    Compares the flag's output against ``importlib.metadata.version("tunstrap")``
+    — the same source the lazy ``--version`` callback reads through the package
+    ``__init__``'s PEP 562 ``__getattr__``. This accepts ANY PEP 440 version
+    setuptools-scm/hatch-vcs derives: a 3-component release from a tagged clone
+    (``0.0.5.dev72+…``), a 2-component release from a tagless CI shallow clone
+    (``0.1.dev1+g6e691637c``), ``rcN``, ``+local`` — without a regex that guesses
+    at the release-segment width and breaks on the CI shape.
+
+    Rejects the not-installed fallback by construction: when the package is not
+    installed, ``version()`` raises ``PackageNotFoundError`` (which is exactly
+    when the flag would emit ``0.0.0+unknown``), failing this test rather than
+    passing on the placeholder. The ``"unknown"`` check makes that intent
+    legible at a glance.
     """
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0
-    shape_msg = f"--version output does not look like a resolved version: {result.output!r}"
-    assert re.match(r"tunstrap, version \d+\.\d+\.\d", result.output), shape_msg
-    fb_msg = f"--version fell back to the not-installed placeholder: {result.output!r}"
-    assert "unknown" not in result.output, fb_msg
+    expected = version("tunstrap")
+    # Local message vars: black and ruff format disagree on the multi-line
+    # ``assert cond, (msg)`` form, so hoist (established pattern in this file).
+    mismatch_msg = (
+        f"--version output does not match the resolved metadata version: {result.output!r}"
+    )
+    assert result.output.strip() == f"tunstrap, version {expected}", mismatch_msg
+    fallback_msg = f"--version fell back to the not-installed placeholder: {result.output!r}"
+    assert "unknown" not in result.output, fallback_msg
 
 
 def test_unknown_subcommand_exits_64() -> None:

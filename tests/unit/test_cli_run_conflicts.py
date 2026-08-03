@@ -155,6 +155,7 @@ def test_daemon_flags_still_work_in_flag_mode(
 )
 def test_connection_flags_still_work_in_flag_mode(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     extra: list[str],
     stdin: str | None,
     expected_passphrase: str | None,
@@ -168,9 +169,27 @@ def test_connection_flags_still_work_in_flag_mode(
         raise DaemonError("captured; stop here", {})
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    # The base command supplies auth via --ssh-key rather than relying on an
+    # ambient SSH_AUTH_SOCK (an ssh-agent runs on a dev workstation but not on
+    # a CI runner). Without explicit auth, InputSchema._validate_auth rejects a
+    # keyless/passwordless node and `run` exits before spawn — which is the
+    # product working as intended, not something this flag-mode test should
+    # depend on. Mirrors test_daemon_flags_still_work_in_flag_mode below.
+    key = tmp_path / "id"
+    key.write_text("K\n")
     CliRunner().invoke(
         main,
-        ["run", "user@host", "--target", "base=127.0.0.1:80", *extra, "--", "true"],
+        [
+            "run",
+            "user@host",
+            "--ssh-key",
+            str(key),
+            "--target",
+            "base=127.0.0.1:80",
+            *extra,
+            "--",
+            "true",
+        ],
         input=stdin,
     )
     assert len(seen) == 1
