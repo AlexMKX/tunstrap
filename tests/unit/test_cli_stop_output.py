@@ -22,7 +22,7 @@ from click.testing import CliRunner
 
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
-from tunstrap.session import StopOutcome
+from tunstrap.session import SessionError, SessionIdentityUnreadable, StopOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -116,19 +116,48 @@ def test_stop_warns_on_stderr_exactly_when_it_preserves(
         assert result.stderr == "", f"a resolved stop must stay silent: {result.stderr!r}"
 
 
-def test_stop_missing_identity_branch_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The unreadable-identity branch still prints its SessionError text and exits 0."""
+@pytest.mark.parametrize(
+    "raised",
+    [
+        SessionError("cannot read identity from /s/tunnel-data: nope"),
+        SessionIdentityUnreadable("cannot read identity from /s/tunnel-data: nope"),
+    ],
+    ids=["missing", "unreadable-or-malformed"],
+)
+def test_stop_identity_failure_envelope_is_byte_exact(
+    monkeypatch: pytest.MonkeyPatch, raised: SessionError
+) -> None:
+    """Every identity-read failure reports ``preserved``, byte for byte.
+
+    These paths return before cleanup, so they *do* keep ``tunnel-data`` — and
+    they used to render their own JSON literal inline, omitting ``preserved``
+    entirely. A caller parsing the envelope therefore read "no preserved key"
+    as "the directory was cleaned", which was false on exactly these outcomes.
+
+    Byte-exact rather than ``json.loads``: the point of the field is a stable
+    machine-readable envelope, so key order, spacing and the trailing newline
+    are the contract, not just the decoded mapping. The reason text is pinned
+    to a controlled message so the whole line can be asserted.
+
+    Both the base ``SessionError`` and the ``SessionIdentityUnreadable``
+    subclass are covered, and both render identically: in ``stop`` nothing is
+    deleted either way, so signalling a difference would describe one that does
+    not exist. ``run`` splits them because there the distinction decides
+    whether to delete.
+    """
 
     def _boom(_session_dir: str) -> int:
-        raise cli_mod.SessionError("cannot read identity from /s/tunnel-data: nope")
+        raise raised
 
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(_boom))
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
     result = CliRunner().invoke(main, ["stop", "--session-dir", "/s"])
     assert result.exit_code == 0
     assert result.stdout == (
-        '{"stopped": false, "reason": "cannot read identity from /s/tunnel-data: nope"}\n'
+        '{"stopped": false, "reason": "cannot read identity from /s/tunnel-data: nope",'
+        ' "preserved": true}\n'
     )
+    assert "session data preserved under /s" in result.stderr
 
 
 def _session_with_identity(root: Path, pid: str = "4242\n") -> tuple[Path, Path]:
@@ -217,3 +246,11 @@ def test_stop_deletes_nothing_when_it_cannot_read_the_identity(tmp_path: Path, s
     assert result.exit_code == 0
     assert json.loads(result.stdout)["stopped"] is False
     assert (data / "materialized.kubeconfig").exists(), "stop deleted state it could not assess"
+    # The envelope must carry the signal that matches what just happened on
+    # disk. Asserted against a real OSError/ValueError reason -- which no test
+    # can spell in advance -- so the ends of the line are pinned instead: key
+    # order, spacing, `preserved` last, trailing newline.
+    assert result.stdout.startswith('{"stopped": false, "reason": "')
+    unsignalled = f"a preserving outcome reported no preserved key: {result.stdout!r}"
+    assert result.stdout.endswith('", "preserved": true}\n'), unsignalled
+    assert f"session data preserved under {tmp_path}" in result.stderr

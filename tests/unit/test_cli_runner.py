@@ -163,14 +163,20 @@ def test_status_unknown_session_dir_reports_not_alive(tmp_path: Path) -> None:
 
 
 def test_stop_session_error_reports_and_exits_zero(tmp_path: Path) -> None:
-    """stop --session-dir <nonexistent> returns structured JSON + exit 0."""
+    """stop --session-dir <nonexistent> returns structured JSON + exit 0.
+
+    Reads ``result.stdout``, not ``result.output``: click 8.4's CliRunner
+    interleaves stderr into ``.output``, so once this outcome grew its
+    stderr preservation notice, decoding ``.output`` as JSON broke. The
+    envelope has always been a stdout-only contract.
+    """
     from tunstrap.cli import main as cli_main
 
     runner = CliRunner()
     missing = tmp_path / "no-such-session"
     result = runner.invoke(cli_main, ["stop", "--session-dir", str(missing)])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["stopped"] is False
     assert (
         "cannot read identity" in payload["reason"].lower()

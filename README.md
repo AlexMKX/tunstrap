@@ -188,7 +188,14 @@ is never changed by teardown:
 to repeat: it removes `tunnel-data` only after a confirmed stop (or a `not
 found`, which means no daemon is recorded), and otherwise leaves the session
 data in place, adds `"preserved": true` to its JSON line and explains itself on
-stderr. Two outcomes it cannot resolve on its own are `identity mismatch` and
+stderr. That includes the cases where it cannot read
+`tunnel-data/daemon.pid` at all — missing, unreadable or malformed: `stop`
+deletes nothing on any of them, so all three report `"preserved": true` too.
+`"preserved"` is therefore present on exactly the outcomes that kept data, and
+absent on exactly those that cleaned it; the three cleaning shapes
+(`{"stopped": true}`, `{"stopped": true, "forced": true}` and
+`{"stopped": false, "reason": "not found"}`) are unchanged to the byte, so a
+strict-schema consumer of those is unaffected. Two outcomes it cannot resolve on its own are `identity mismatch` and
 `identity check unavailable` — the recorded pid can no longer be verified as
 ours, so `stop` refuses to signal it rather than risk killing an unrelated
 process. Re-running will keep reporting the same thing; that is the case the

@@ -936,6 +936,25 @@ def _stop_outcome_json(outcome: StopOutcome) -> str:
     return json.dumps(body)
 
 
+def _emit_stop_outcome(outcome: StopOutcome, session_dir: str) -> None:
+    """Write ``stop``'s envelope on stdout, plus the stderr notice when data was kept.
+
+    Both of ``stop``'s exits report through here, so an outcome cannot be
+    reported without the signal that belongs to it. The identity-read failures
+    used to render their own JSON literal inline, which is precisely how they
+    ended up preserving ``tunnel-data`` while emitting no ``preserved`` key —
+    a caller reading the envelope concluded the directory had been cleaned.
+    """
+    sys.stdout.write(_stop_outcome_json(outcome))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    if not _stop_resolved(outcome):
+        _warn(
+            f"tunstrap stop: daemon not stopped: {outcome.reason}; "
+            f"session data preserved under {session_dir}\n"
+        )
+
+
 @main.command("stop")
 @click.option("--session-dir", "session_dir", required=True)
 @click.option("--grace-seconds", type=int, default=10, show_default=True)
@@ -944,26 +963,19 @@ def stop_command(session_dir: str, grace_seconds: int) -> None:
     try:
         pid = SessionDir.read_identity(session_dir)
     except SessionError as exc:
-        sys.stdout.write(json.dumps({"stopped": False, "reason": str(exc)}))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        # All three identity-read failures — missing, unreadable, malformed —
+        # return before cleanup, so all three preserve and all three must say
+        # so. Deliberately not the split ``run`` makes: there
+        # ``SessionIdentityUnreadable`` decides whether to delete, while here
+        # nothing is deleted either way.
+        _emit_stop_outcome(StopOutcome(False, str(exc)), session_dir)
         sys.exit(0)
     outcome = stop_session(session_dir, pid, grace_seconds, force=True)
-    sys.stdout.write(_stop_outcome_json(outcome))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-    if not _stop_resolved(outcome):
-        # Same rule as run's teardown, from the same predicate. stop is the
-        # command run tells the operator to reach for, so deleting here on an
-        # unresolved outcome would make the recovery path destroy the identity
-        # file it was invoked to recover. The notice goes to stderr because
-        # stdout is the machine-readable envelope above.
-        _warn(
-            f"tunstrap stop: daemon not stopped: {outcome.reason}; "
-            f"session data preserved under {session_dir}\n"
-        )
-        return
-    SessionDir.cleanup_path(session_dir)
+    _emit_stop_outcome(outcome, session_dir)
+    if _stop_resolved(outcome):
+        # Deleting on an unresolved outcome would make the recovery command
+        # ``run`` prints destroy the identity file it was invoked to recover.
+        SessionDir.cleanup_path(session_dir)
 
 
 @main.command("status")
