@@ -812,10 +812,10 @@ def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | No
     try:
         _teardown_run_inner(session_dir, grace_seconds, minted_root=minted_root)
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        _warn_preserved(session_dir, f"teardown failed: {type(exc).__name__}: {exc}")
+        _warn_preserved(session_dir, f"teardown failed: {type(exc).__name__}: {exc}", minted_root)
 
 
-def _warn_preserved(session_dir: str, cause: str) -> None:
+def _warn_preserved(session_dir: str, cause: str, minted_root: str | None) -> None:
     """Report an unresolved teardown and the command that finishes it by hand.
 
     One wording for both ways teardown can end without a confirmed stop — a
@@ -823,11 +823,26 @@ def _warn_preserved(session_dir: str, cause: str) -> None:
     consequence: a daemon that may still be running, whose identity file under
     ``session_dir`` is the only handle on it, so the data is kept rather than
     deleted.
+
+    The command is exactly what ``stop`` accepts: ``--session-dir`` and
+    ``--grace-seconds``, nothing else. ``stop`` already forces unconditionally
+    (``stop_command`` passes ``force=True``), so there is no ``--force`` to
+    offer — and a diagnostic naming a flag that does not exist is worse than
+    none, because the operator follows it and gets a usage error.
+
+    ``stop`` removes ``tunnel-data`` but never its own ``--session-dir``
+    argument, which is normally the operator's own directory; it cannot tell a
+    run-minted temp root from one somebody cares about. ``run`` can — it minted
+    it — so the disposal note is emitted here, and only for a minted root.
     """
-    _warn(
-        f"run: {cause}; preserving session data. Recover with: "
-        f"tunstrap stop --session-dir {session_dir} --force\n"
-    )
+    recovery = f"run: {cause}; preserving session data. Recover with: "
+    recovery += f"tunstrap stop --session-dir {session_dir}\n"
+    if minted_root is not None:
+        recovery += (
+            f"run: {minted_root} was created by run and is not removed by that "
+            f"command; delete it once the daemon is dealt with\n"
+        )
+    _warn(recovery)
 
 
 def _warn(message: str) -> None:
@@ -850,7 +865,9 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)
         if not outcome.stopped and outcome.reason != "not found":
-            _warn_preserved(session_dir, f"daemon not stopped cleanly: {outcome.reason}")
+            _warn_preserved(
+                session_dir, f"daemon not stopped cleanly: {outcome.reason}", minted_root
+            )
             return
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:

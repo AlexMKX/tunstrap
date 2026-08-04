@@ -14,6 +14,7 @@ daemon, no signals and no filesystem work — this passes unchanged on macOS.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import signal as signal_mod
 import tempfile
@@ -194,7 +195,7 @@ def test_raising_stop_preserves_the_minted_session_root(
     try:
         assert result.exit_code == 7
         assert Path(root).is_dir(), "a raising stop destroyed the only handle on the daemon"
-        assert f"tunstrap stop --session-dir {root} --force" in result.stderr
+        assert f"tunstrap stop --session-dir {root}" in result.stderr
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -453,7 +454,117 @@ def test_failed_teardown_keeps_identity_data_for_manual_recovery(
 
     assert result.exit_code == 7
     assert identity.read_text() == "4242\n"
-    assert f"tunstrap stop --session-dir {session_dir} --force" in result.stderr
+    assert f"tunstrap stop --session-dir {session_dir}" in result.stderr
+
+
+def _recovery_command(stderr: str) -> list[str]:
+    """Pull the printed recovery command out of run's teardown diagnostic."""
+    for line in stderr.splitlines():
+        _, sep, command = line.partition("Recover with: ")
+        if sep:
+            return shlex.split(command)
+    raise AssertionError(f"no recovery command in stderr: {stderr!r}")
+
+
+def test_the_printed_recovery_command_is_one_tunstrap_accepts(
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
+) -> None:
+    """The emitted command is parsed back out and actually run, not eyeballed.
+
+    A diagnostic naming a flag that does not exist is worse than none: the
+    operator holding preserved session data — the entire point of preserving
+    it — follows the instruction and gets a usage error. ``stop`` accepts only
+    ``--session-dir`` and ``--grace-seconds``; it already forces
+    unconditionally (``cli.py:894``), so there is no ``--force`` to pass.
+
+    The command is extracted from what ``run`` actually printed and fed to the
+    real CLI, so this cannot drift from the message: any flag ``stop`` does not
+    define makes Click exit 2 here.
+    """
+    monkeypatch.setattr(
+        cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
+    assert result.exit_code == 7
+
+    argv = _recovery_command(result.stderr)
+    assert argv[0] == "tunstrap", f"the recovery command must invoke tunstrap: {argv}"
+    recovery = CliRunner().invoke(main, argv[1:])
+
+    assert recovery.exit_code == 0, (
+        f"tunstrap cannot parse the command it told the operator to run: "
+        f"{argv} -> exit {recovery.exit_code}\n{recovery.output}"
+    )
+    # Anti-vacuity: prove the invocation really reached `stop` and produced its
+    # documented JSON, rather than exiting 0 from somewhere harmless.
+    assert json.loads(recovery.stdout)["stopped"] is False
+
+
+def test_a_minted_root_is_named_as_the_operators_to_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery is incomplete without it: ``stop`` never removes its own argument.
+
+    ``stop --session-dir`` is normally pointed at the operator's own directory,
+    so it removes ``tunnel-data`` and nothing else — deleting its argument
+    would be a destructive change to a public verb. ``run`` is the only
+    component that knows the root is disposable, because it minted it, so
+    ``run`` is where that gets said. Silent for a caller-supplied directory,
+    which tunstrap must never suggest deleting.
+    """
+    minted: list[str | None] = []
+
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        minted.append(session_dir)
+        return _success_payload()
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
+    monkeypatch.setattr(
+        cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+
+    root = minted[0]
+    assert root is not None
+    try:
+        assert root in result.stderr
+        assert "created by run" in result.stderr, (
+            f"a minted root was preserved without telling the operator to delete it: "
+            f"{result.stderr!r}"
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_supplied_session_dir_is_never_suggested_for_deletion(
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
+) -> None:
+    """The delete-it note is scoped to roots run minted, never a caller's directory."""
+    monkeypatch.setattr(
+        cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
+    assert result.exit_code == 7
+    assert "identity mismatch" in result.stderr
+    suggested_deletion = (
+        f"tunstrap told the operator to delete their own directory: {result.stderr!r}"
+    )
+    assert "created by run" not in result.stderr, suggested_deletion
 
 
 def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
