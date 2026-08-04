@@ -239,7 +239,7 @@ def write_tofu_recorder(bin_dir: Path, dump_dir: Path) -> Path:
     """
     real = shutil.which("tofu")
     if real is None:  # pragma: no cover - require_tools ran first
-        pytest.skip("e2e tier requires tofu on PATH")
+        skip_or_fail("e2e tier requires tofu on PATH")
     bin_dir.mkdir(parents=True, exist_ok=True)
     dump_dir.mkdir(parents=True, exist_ok=True)
     script = bin_dir / "tofu"
