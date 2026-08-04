@@ -349,6 +349,29 @@ def test_production_teardown_keeps_a_supplied_session_dir(
     assert sentinel.read_text() == "do not delete me", "teardown destroyed caller-owned content"
 
 
+def test_failed_teardown_keeps_identity_data_for_manual_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unverified live daemon retains the data needed to stop it safely."""
+    session_dir = tmp_path / "session"
+    tunnel_data = session_dir / "tunnel-data"
+    tunnel_data.mkdir(parents=True)
+    identity = tunnel_data / "daemon.pid"
+    identity.write_text("4242\n")
+    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
+    monkeypatch.setattr(
+        cli_mod, "stop_session", lambda _sd, _pid, _grace, force: StopOutcome(False, "identity mismatch")
+    )
+
+    result = CliRunner().invoke(main, [*_ARGS[:-2], "--session-dir", str(session_dir), "--", "true"], input="secret\n")
+
+    assert result.exit_code == 7
+    assert identity.read_text() == "4242\n"
+    assert f"tunstrap stop --session-dir {session_dir} --force" in result.stderr
+
+
 def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
     monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
 ) -> None:

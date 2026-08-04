@@ -823,7 +823,12 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)
         if not outcome.stopped and outcome.reason != "not found":
-            _warn(f"run: daemon not stopped cleanly: {outcome.reason}\n")
+            _warn(
+                "run: daemon not stopped cleanly: "
+                f"{outcome.reason}; preserving session data. Recover with: "
+                f"tunstrap stop --session-dir {session_dir} --force\n"
+            )
+            return
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
         _warn("run: could not remove: " + ", ".join(survivors) + "\n")
