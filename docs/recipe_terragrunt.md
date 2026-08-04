@@ -227,7 +227,10 @@ reference inline in `env_vars` above. Expected shape (uncomment and fill):
 ```hcl terragrunt-locals
 # locals {
 #   cluster_host    = "k3s.example.internal"
-#   ssh_private_key = "ssh-ed25519 AAAA…"
+#   # PEM-format PRIVATE key (fed to asyncssh.import_private_key) - NOT the
+#   # ssh-ed25519 AAAA... .pub line. Pull it from your secret store rather
+#   # than committing it inline.
+#   ssh_private_key = get_env("TUNSTRAP_SSH_PRIVATE_KEY", "")
 # }
 ```
 
