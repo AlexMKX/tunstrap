@@ -175,8 +175,14 @@ Variables emitted (no node segment; names upper-cased, non-alphanumerics → `_`
 ### `run` (foreground wrapper with guaranteed teardown)
 
 `run` opens the tunnel, injects the same `TUNSTRAP_*` / `KUBECONFIG`
-environment into a child command, waits for it, and then **always** tears the
-tunnel down (even if the child crashes or fails to launch):
+environment into a child command, waits for it, and then **always attempts
+teardown** (even if the child crashes or fails to launch). Teardown normally
+stops the daemon and removes the session data. When it cannot confirm the stop
+— the stop reports a failure, raises, or the recorded identity is unreadable —
+it **keeps** the session data instead and prints the `tunstrap stop
+--session-dir …` command that finishes the job, rather than destroying the only
+handle on a daemon that may still be running. Either way the child's exit code
+is never changed by teardown:
 
 ```bash
 tunstrap run root@edge1 \
@@ -214,6 +220,7 @@ there must be exactly one place to look:
 - any connection flag: `--ssh-key`, `--ssh-key-passphrase`,
   `--ssh-password-stdin`, `--target`, `--kube`, `--fetch`;
 - any daemon flag: `--auto-stop-idle-seconds` (use `daemon.auto_stop_idle_seconds`),
+  `--grace-seconds` (use `daemon.shutdown_grace_seconds`),
   `--log-file` (use `daemon.log_file`), `--materialize` (redundant, see below).
 
 Payload problems are exit `1` with a `SchemaValidationError` envelope on
