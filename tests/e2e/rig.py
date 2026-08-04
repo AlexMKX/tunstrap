@@ -236,18 +236,27 @@ def write_tofu_recorder(bin_dir: Path, dump_dir: Path) -> Path:
 
     `env -0` is used rather than `env` because NUL separation is unambiguous for
     values containing newlines; a line-oriented dump could be misread.
+
+    For `init` invocations the dumped environment carries `TUNSTRAP_INPUT`,
+    i.e. the generated (test-only) SSH private key, so `dump_dir` and the
+    dumps written into it are locked to owner-only - matching the 0700/0600
+    the production session paths already use (session.py:76,115) rather than
+    the default umask.
     """
     real = shutil.which("tofu")
     if real is None:  # pragma: no cover - require_tools ran first
         skip_or_fail("e2e tier requires tofu on PATH")
     bin_dir.mkdir(parents=True, exist_ok=True)
     dump_dir.mkdir(parents=True, exist_ok=True)
+    dump_dir.chmod(0o700)
     script = bin_dir / "tofu"
     script.write_text(
         "#!/bin/sh\n"
         f'dump="{dump_dir}/$$"\n'
         'printf "%s\\n" "$@" > "$dump.argv"\n'
+        'chmod 600 "$dump.argv"\n'
         'env -0 > "$dump.env0"\n'
+        'chmod 600 "$dump.env0"\n'
         f'exec "{real}" "$@"\n'
     )
     script.chmod(0o755)
