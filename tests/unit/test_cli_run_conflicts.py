@@ -92,6 +92,7 @@ def test_ssh_key_flag_rejected(tmp_path: Path, spawns: list[Any]) -> None:
     "extra, needle",
     [
         (["--auto-stop-idle-seconds", "30"], "daemon.auto_stop_idle_seconds"),
+        (["--grace-seconds", "30"], "daemon.shutdown_grace_seconds"),
         (["--log-file", "/tmp/t.log"], "daemon.log_file"),
         (["--materialize"], "always materializes"),
     ],

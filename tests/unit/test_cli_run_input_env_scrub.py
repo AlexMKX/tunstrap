@@ -153,3 +153,23 @@ def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
     assert VAR in env, "the output variable should have been written under the reused name"
     assert SSH_PKEY_PEM not in env[VAR], "the input secret survived under the reused name"
     assert json.loads(env[VAR])["pid"] == 99, "the value must be the output envelope"
+
+
+def test_input_payload_shutdown_grace_controls_teardown(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """The payload daemon block, not a hidden CLI default, sets run's grace."""
+    observed: list[int] = []
+
+    def _teardown(_path: str, grace: int, *, minted_root: str | None = None) -> None:
+        del minted_root
+        observed.append(grace)
+
+    monkeypatch.setattr(cli_mod, "_teardown_run", _teardown)
+    payload = json.loads(INPUT_PAYLOAD)
+    payload["daemon"] = {"shutdown_grace_seconds": 23}
+    spawn[0]({"kind": "success", "payload": SUCCESS_PAYLOAD})
+    monkeypatch.setenv(VAR, json.dumps(payload))
+    result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
+    assert result.exit_code == 0, result.stderr
+    assert observed == [23]
