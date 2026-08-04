@@ -758,7 +758,13 @@ def run_via_env_input(  # pylint: disable=too-many-arguments
     group's contract rather than surfacing as a raw traceback.
     """
     run = run_command.callback
-    assert run is not None  # always set by the @main.command decorator
+    if run is None:
+        # Unreachable in practice: Click always sets `.callback` on a
+        # decorated command. It must not be an `assert` though - that is an
+        # AssertionError, which is outside TunstrapError and so escapes the
+        # CLI's handler as a traceback, and `python -O` erases the check
+        # altogether, leaving a TypeError on the next line instead.
+        raise TunstrapError("run_command has no callback; Click wiring is broken", {})
     try:
         run(
             ssh_key=None,

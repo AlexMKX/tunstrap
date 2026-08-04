@@ -29,6 +29,7 @@ import pytest
 import tunstrap.tofu_proxy as proxy
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
+from tunstrap.exceptions import TunstrapError
 
 pytestmark = pytest.mark.unit
 
@@ -509,3 +510,26 @@ def test_exec_tofu_missing_binary_exits_127_without_stdout(
     assert excinfo.value.code == 127
     assert captured.out == ""
     assert captured.err == "tunstrap_tofu: cannot execute tofu: tofu not found\n"
+
+
+# --------------------------------------------------------------------------- #
+# run_via_env_input's own internal guard (cli.py) - reached through the
+# tunnelled branch above, but exercised directly here.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_via_env_input_missing_callback_is_a_tunstrap_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replaced ``assert``: a real TunstrapError, kept alive under -O.
+
+    ``assert run is not None`` was an AssertionError - outside the
+    TunstrapError hierarchy, so it would have escaped the CLI's handler as a
+    bare traceback - and ``python -O`` erases ``assert`` entirely, leaving a
+    ``TypeError: 'NoneType' object is not callable`` on the next line
+    instead. Click always sets ``.callback`` on a decorated command, so this
+    is only reachable by breaking that invariant directly.
+    """
+    monkeypatch.setattr(cli_mod.run_command, "callback", None)
+    with pytest.raises(TunstrapError, match="run_command has no callback"):
+        cli_mod.run_via_env_input("TUNSTRAP_INPUT", "TF_VAR_tunstrap", ["tofu", "plan"])
