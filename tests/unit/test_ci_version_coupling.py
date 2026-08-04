@@ -50,6 +50,16 @@ def test_kubectl_pin_matches_node_image_pin() -> None:
 
     Fails-when-broken verbatim red recorded in the task report: node held at
     1.34, kubectl pin temporarily raised to 1.35.
+
+    ``re.search`` binds to the *first* ``dl.k8s.io`` URL in the workflow. With
+    one kubectl-install step that is fine, but a second step (an arm64
+    runner, a macOS job, ...) would leave the guard checking only the first
+    match while the second drifts unwatched - silently green. ``findall`` plus
+    an exactly-one assertion turns that into a loud, named failure instead. A
+    full YAML parse is deliberately not used here: it would let the test
+    reason over `jobs`/`steps` structurally, but this guard only needs to
+    reject a *second matching URL string*, which a plain-text scan already
+    catches at a fraction of the cost.
     """
     rig = _RIG.read_text()
     node = _NODE_RE.search(rig)
@@ -59,14 +69,18 @@ def test_kubectl_pin_matches_node_image_pin() -> None:
     )
 
     workflow = _WORKFLOW.read_text()
-    kubectl = _KUBECTL_RE.search(workflow)
-    assert kubectl is not None, (
-        f"could not parse a kubectl vX.Y.Z pin from {_WORKFLOW}; the "
-        f"dl.k8s.io/release/vX.Y.Z/ URL pattern has changed or is gone"
+    kubectl_matches = _KUBECTL_RE.findall(workflow)
+    assert len(kubectl_matches) == 1, (
+        f"expected exactly one dl.k8s.io/release/vX.Y.Z/ URL in {_WORKFLOW}, "
+        f"found {len(kubectl_matches)}: {kubectl_matches}. A second kubectl "
+        f"install step means this guard is only watching one of them - name "
+        f"the new step explicitly or extend this test to cover it, rather "
+        f"than letting the second URL drift unchecked."
     )
+    kubectl_version = kubectl_matches[0]
 
-    assert kubectl.group(1) == node.group(1), (
-        f"kubectl pin v{kubectl.group(1)} does not match NODE_IMAGE "
+    assert kubectl_version == node.group(1), (
+        f"kubectl pin v{kubectl_version} does not match NODE_IMAGE "
         f"(kindest/node v{node.group(1)} in {_RIG}). These must move together: "
         f"bump both the dl.k8s.io/release/vX.Y.Z/ URL in {_WORKFLOW} and "
         f"NODE_IMAGE in tests/e2e/rig.py, or the e2e cluster and its kubectl "
