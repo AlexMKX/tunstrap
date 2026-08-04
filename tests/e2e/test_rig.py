@@ -29,6 +29,7 @@ from tests.e2e.rig import (
     require_tools,
     tunstrap_input_json,
     write_fake_tofu,
+    write_tofu_recorder,
 )
 
 pytestmark = [pytest.mark.e2e]
@@ -472,3 +473,42 @@ def test_write_fake_tofu_forwards_an_adversarial_stdout_line_byte_identical(
     assert result.stdout == (line + "\n").encode()
     # The fix touched the whole generated script; confirm argv recording survived.
     assert recorded_argvs(marker_dir) == [["ignored-argv"]]
+
+
+def test_write_tofu_recorder_locks_down_its_diagnostic_dumps(tmp_path: Path) -> None:
+    """The 0700/0600 modes the recorder sets are asserted, not merely written.
+
+    For `init` invocations the dumped environment carries `TUNSTRAP_INPUT`, i.e.
+    the generated SSH private key, so the recorder deliberately overrides the
+    default umask. Nothing checked it, so dropping either `chmod` — or the
+    `dump_dir.chmod(0o700)` — was a silent regression on a directory holding key
+    material.
+
+    Exact compares (`& 0o777 == …`), not `not ... & 0o077`: a mode that merely
+    happens to be private under this runner's umask must not pass for a mode the
+    rig actually set. The directory check is the load-bearing one, since it makes
+    the files unreachable by other users whatever their own mode; the per-file
+    checks are defence in depth for a directory mode that later regresses.
+
+    Needs `tofu` on PATH (the recorder execs it) but no cluster: `-version` is
+    served locally.
+    """
+    require_tools("tofu")
+    bin_dir = tmp_path / "bin"
+    dump_dir = tmp_path / "dumps"
+    script = write_tofu_recorder(bin_dir, dump_dir)
+
+    result = subprocess.run([str(script), "-version"], capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+    assert dump_dir.stat().st_mode & 0o777 == 0o700, "the dump directory is not owner-only"
+    argv_dumps = sorted(dump_dir.glob("*.argv"))
+    env_dumps = sorted(dump_dir.glob("*.env0"))
+    assert len(argv_dumps) == 1, f"expected exactly one argv dump, got {argv_dumps}"
+    assert len(env_dumps) == 1, f"expected exactly one env dump, got {env_dumps}"
+    for dump in (*argv_dumps, *env_dumps):
+        assert dump.stat().st_mode & 0o777 == 0o600, f"{dump.name} is not owner-only"
+    # Anti-vacuity: the dumps must be the real recording, not empty files that
+    # would satisfy a mode check while proving the recorder does nothing.
+    assert argv_dumps[0].read_text() == "-version\n"
+    assert b"PATH=" in env_dumps[0].read_bytes()
