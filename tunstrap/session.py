@@ -34,6 +34,23 @@ class SessionError(Exception):
     """The session dir or its tunnel-data subdir failed validation."""
 
 
+class SessionIdentityUnreadable(SessionError):
+    """``daemon.pid`` could not be turned into a pid, and it is not simply absent.
+
+    Split out because the three ways ``read_identity`` fails do not mean the
+    same thing to a caller deciding whether to delete state. A *missing* file
+    means nothing was ever recorded, so nothing is running. A file that cannot
+    be read (permissions, EIO, a directory in its place) or that holds
+    something that is not a pid (the shape a truncated write takes) means a
+    daemon got far enough to be there and we cannot address it — the daemon's
+    state is unknown, which is a reason to preserve, not to clean up.
+
+    A subclass rather than a sibling so that every existing ``except
+    SessionError`` handler keeps its current behaviour; only callers that care
+    about the distinction have to name it.
+    """
+
+
 class SessionDir:
     """Owns session.lock + the tunnel-data/ subdir for one daemon instance."""
 
@@ -129,12 +146,25 @@ class SessionDir:
 
     @staticmethod
     def read_identity(session_dir: str) -> int:
-        """Read the recorded pid from a session dir's tunnel-data/daemon.pid."""
+        """Read the recorded pid from a session dir's tunnel-data/daemon.pid.
+
+        Raises ``SessionIdentityUnreadable`` — a ``SessionError`` subclass —
+        for everything except a genuinely absent file, so a caller can tell
+        "nothing was ever recorded" from "there is something here I cannot
+        address". The message is identical in all three cases; only the type
+        differs.
+        """
         data = Path(session_dir).resolve() / _TUNNEL_DATA
         try:
-            return int((data / "daemon.pid").read_text().strip())
-        except (OSError, ValueError) as exc:
+            raw = (data / "daemon.pid").read_text()
+        except FileNotFoundError as exc:
             raise SessionError(f"cannot read identity from {data}: {exc}") from exc
+        except OSError as exc:
+            raise SessionIdentityUnreadable(f"cannot read identity from {data}: {exc}") from exc
+        try:
+            return int(raw.strip())
+        except ValueError as exc:
+            raise SessionIdentityUnreadable(f"cannot read identity from {data}: {exc}") from exc
 
     @classmethod
     def cleanup_path(cls, session_dir: str) -> list[str]:

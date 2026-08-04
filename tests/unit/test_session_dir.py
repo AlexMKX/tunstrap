@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tunstrap.session import SessionDir, SessionError
+from tunstrap.session import SessionDir, SessionError, SessionIdentityUnreadable
 
 pytestmark = pytest.mark.unit
 
@@ -199,3 +199,46 @@ def test_rmtree_reporting_reports_unstatable_survivor(tmp_path: Path) -> None:
         os.chmod(middle, 0o700)
     assert survivors == [str(leaf)]
     assert leaf.exists()
+
+
+def test_missing_identity_is_not_reported_as_unreadable(tmp_path: Path) -> None:
+    """A file that was never written means nothing was ever recorded.
+
+    This is the only one of the three ``read_identity`` failures that lets a
+    caller conclude no daemon is running, so it must stay distinguishable from
+    the other two.
+    """
+    (tmp_path / "tunnel-data").mkdir()
+
+    with pytest.raises(SessionError) as caught:
+        SessionDir.read_identity(str(tmp_path))
+
+    blocks_cleanup = "a missing identity was reported as unreadable, which blocks cleanup forever"
+    assert not isinstance(caught.value, SessionIdentityUnreadable), blocks_cleanup
+
+
+def test_unreadable_identity_is_distinguishable_from_a_missing_one(tmp_path: Path) -> None:
+    """An identity we cannot read at all leaves the daemon's state unknown.
+
+    Uses a directory where the file belongs, so the ``OSError`` is
+    ``IsADirectoryError`` — deterministic for any uid, unlike a chmod-based
+    setup which a root test runner would sail straight through.
+    """
+    (tmp_path / "tunnel-data").mkdir()
+    (tmp_path / "tunnel-data" / "daemon.pid").mkdir()
+
+    with pytest.raises(SessionIdentityUnreadable):
+        SessionDir.read_identity(str(tmp_path))
+
+
+def test_malformed_identity_is_distinguishable_from_a_missing_one(tmp_path: Path) -> None:
+    """A daemon recorded *something*; we just cannot turn it into a pid.
+
+    A truncated write is the realistic shape, and it says the opposite of
+    "nothing is running": a daemon got far enough to open the file.
+    """
+    (tmp_path / "tunnel-data").mkdir()
+    (tmp_path / "tunnel-data" / "daemon.pid").write_text("not-a-pid\n")
+
+    with pytest.raises(SessionIdentityUnreadable):
+        SessionDir.read_identity(str(tmp_path))

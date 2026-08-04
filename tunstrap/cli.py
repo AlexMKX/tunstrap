@@ -33,7 +33,13 @@ from tunstrap.exceptions import (
 )
 from tunstrap.identity import IdentityCheckResult, verify_session
 from tunstrap.schemas import DaemonOptions, InputSchema, OutputSchema
-from tunstrap.session import SessionDir, SessionError, StopOutcome, stop_session
+from tunstrap.session import (
+    SessionDir,
+    SessionError,
+    SessionIdentityUnreadable,
+    StopOutcome,
+    stop_session,
+)
 
 _FC = TypeVar("_FC", bound=Callable[..., object])
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -806,8 +812,9 @@ def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | No
     know nothing about its state. Removing the root would take the identity
     file with it and leave a possibly-live daemon nobody can find. Nothing
     else here can realistically raise: ``read_identity`` raises only
-    ``SessionError``, which the inner function handles, and ``cleanup_path``
-    and ``remove_root`` are non-raising by construction (``session.py:169``).
+    ``SessionError`` and its ``SessionIdentityUnreadable`` subclass, both of
+    which the inner function handles by name, and ``cleanup_path`` and
+    ``remove_root`` are non-raising by construction (``session.py:_rmtree_reporting``).
     """
     try:
         _teardown_run_inner(session_dir, grace_seconds, minted_root=minted_root)
@@ -857,10 +864,17 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
     """Stop the daemon, remove tunnel-data and any minted root; report on stderr."""
     try:
         pid = SessionDir.read_identity(session_dir)
+    except SessionIdentityUnreadable as exc:
+        # Something is recorded there and we cannot address it: no pid means no
+        # stop, and no way to prove nothing is running. Identical unknown state
+        # to a failed stop, so identical answer — preserve rather than delete.
+        # Must precede the SessionError arm; it is a subclass of it.
+        _warn_preserved(session_dir, f"cannot read the daemon identity: {exc}", minted_root)
+        return
     except SessionError:
-        # No identity file: nothing to stop. Not an error — with the session
-        # path minted before the spawn, a missing identity no longer means the
-        # path is unknown, it means the daemon never recorded one.
+        # No identity file at all: nothing to stop. Not an error — with the
+        # session path minted before the spawn, a missing identity no longer
+        # means the path is unknown, it means the daemon never recorded one.
         pass
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)

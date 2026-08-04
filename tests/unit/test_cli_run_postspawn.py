@@ -567,6 +567,70 @@ def test_a_supplied_session_dir_is_never_suggested_for_deletion(
     assert "created by run" not in result.stderr, suggested_deletion
 
 
+def _run_with_real_teardown(monkeypatch: pytest.MonkeyPatch, session_dir: Path) -> Any:
+    """Drive one `run` against a supplied session dir with production teardown.
+
+    No ``teardowns`` fixture and no ``read_identity`` stub, so
+    ``_teardown_run_inner`` does its own filesystem work and its own identity
+    read — which is the thing under test here.
+    """
+    monkeypatch.setattr(
+        cli_mod,
+        "spawn_daemon",
+        lambda _s, session_dir=None, *, input_env=None: _success_payload(),
+    )
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    return CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(session_dir), "--", "true"], input="secret\n"
+    )
+
+
+def test_an_unparseable_identity_preserves_instead_of_deleting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A daemon.pid we cannot parse means unknown state, not "nothing ran".
+
+    ``read_identity`` raises the same ``SessionError`` for a *missing*, an
+    *unreadable* and a *malformed* identity, and teardown used to read all
+    three as "the daemon never recorded one" and delete the session data. Only
+    the first says that. A file holding something that is not a pid — the shape
+    a truncated write takes — says a daemon got far enough to create it and we
+    cannot address it, which by the preservation contract is a reason to keep
+    the data, not to destroy it.
+    """
+    data = tmp_path / "tunnel-data"
+    data.mkdir()
+    identity = data / "daemon.pid"
+    identity.write_text("not-a-pid\n")
+
+    result = _run_with_real_teardown(monkeypatch, tmp_path)
+
+    assert result.exit_code == 7
+    assert identity.read_text() == "not-a-pid\n", "teardown destroyed an unparseable identity"
+    assert "cannot read the daemon identity" in result.stderr
+    assert f"tunstrap stop --session-dir {tmp_path}" in result.stderr
+
+
+def test_a_missing_identity_still_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The negative control: absence really does mean nothing was recorded.
+
+    Without this, widening the preservation rule to every ``SessionError``
+    would look correct — and would leave every ordinary run that never
+    published an identity undeleted forever.
+    """
+    data = tmp_path / "tunnel-data"
+    data.mkdir()
+    (data / "materialized.kubeconfig").write_text("credential-bearing")
+
+    result = _run_with_real_teardown(monkeypatch, tmp_path)
+
+    assert result.exit_code == 7
+    assert not data.exists(), "a missing identity must still clean up tunnel-data"
+    assert result.stderr == "", f"a missing identity is normal and must not warn: {result.stderr!r}"
+
+
 def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
     monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
 ) -> None:
