@@ -493,3 +493,19 @@ def test_exec_tofu_calls_os_execvp_with_tofu_argv(
     with pytest.raises(_ExecvpCalled):
         proxy._exec_tofu(["plan", "-out=x"])  # pylint: disable=protected-access
     assert seen == {"prog": "tofu", "argv": ["tofu", "plan", "-out=x"]}
+
+
+def test_exec_tofu_missing_binary_exits_127_without_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing tofu is a shell-style launch failure, not a traceback."""
+    def _missing(_prog: str, _argv: list[str]) -> None:
+        raise FileNotFoundError("tofu not found")
+
+    monkeypatch.setattr(proxy.os, "execvp", _missing)
+    with pytest.raises(SystemExit) as excinfo:
+        proxy._exec_tofu(["plan"])  # pylint: disable=protected-access
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 127
+    assert captured.out == ""
+    assert captured.err == "tunstrap_tofu: cannot execute tofu: tofu not found\n"

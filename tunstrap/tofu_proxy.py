@@ -95,9 +95,11 @@ def _should_bypass(argv: list[str]) -> bool:
 
 def _exec_tofu(argv: list[str]) -> None:
     """Replace this process with ``tofu``, argv untouched."""
-    os.execvp(_TOFU, [_TOFU, *argv])
-    # execvp does not return; this only runs if it failed to replace the image.
-    sys.exit(127)  # pragma: no cover
+    try:
+        os.execvp(_TOFU, [_TOFU, *argv])
+    except OSError as exc:
+        sys.stderr.write(f"tunstrap_tofu: cannot execute tofu: {exc}\n")
+        sys.exit(127)
 
 
 def _find_subcommand(argv: list[str]) -> str | None:
