@@ -41,6 +41,8 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
     and must be stopped rather than abandoned. Callers that treat any spawn
     failure as "no daemon exists" orphan the worker on exactly those paths.
     """
+    worker_env = dict(os.environ)
+    worker_env.pop("TUNSTRAP_INPUT", None)
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
     try:
@@ -58,6 +60,7 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
             pass_fds=[ipc_write_fd],
             start_new_session=True,
             close_fds=True,
+            env=worker_env,
         )
     finally:
         os.close(ipc_write_fd)
