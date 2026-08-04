@@ -78,7 +78,9 @@ def _captured(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Capture the schema handed to spawn_daemon; stub out child + teardown."""
     seen: list[Any] = []
 
-    def _spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(schema)
         return _success_payload()
 

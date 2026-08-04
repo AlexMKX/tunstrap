@@ -46,7 +46,9 @@ def _spawns(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     """Record every spawn_daemon call. The list must stay empty in this module."""
     calls: list[Any] = []
 
-    def _spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         calls.append(schema)
         raise AssertionError("spawn_daemon must not be reached by a usage error")
 
@@ -111,7 +113,9 @@ def test_daemon_flags_still_work_in_flag_mode(
     """The rejection is scoped to --input-env; flag mode still honours them."""
     seen: list[Any] = []
 
-    def _spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(schema)
         # A TunstrapError, not SystemExit: it takes run's own pre-spawn error
         # path, which from Task 4.1 on also discards the minted session root.
@@ -165,7 +169,9 @@ def test_connection_flags_still_work_in_flag_mode(
     """Each connection flag rejected for env input still reaches flag-mode spawn."""
     seen: list[Any] = []
 
-    def _spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(schema)
         raise DaemonError("captured; stop here", {})
 

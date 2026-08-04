@@ -24,7 +24,9 @@ pytestmark = pytest.mark.unit
 
 
 def _patch_spawn_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def fake_spawn_daemon(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         return {
             "kind": "success",
             "payload": {
@@ -62,7 +64,9 @@ def test_start_success_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_start_required_failure_returns_two(monkeypatch: pytest.MonkeyPatch) -> None:
     """RequiredTunnelFailure is surfaced via exit code 2."""
 
-    def fake_spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def fake_spawn_daemon(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         return {
             "kind": "required_failure",
             "payload": {
@@ -94,7 +98,9 @@ def test_start_required_failure_returns_two(monkeypatch: pytest.MonkeyPatch) -> 
 def test_start_daemon_error_returns_four(monkeypatch: pytest.MonkeyPatch) -> None:
     """daemon_error IPC kind surfaces via exit code 4."""
 
-    def fake_spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def fake_spawn_daemon(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         return {
             "kind": "daemon_error",
             "payload": {
@@ -247,7 +253,9 @@ def test_start_schema_violation_returns_one(monkeypatch: pytest.MonkeyPatch) -> 
 def test_start_unexpected_exception_returns_four(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unexpected exception in spawn_daemon is wrapped in DaemonError (exit 4)."""
 
-    def boom(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def boom(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", boom)
@@ -278,7 +286,9 @@ def test_start_flag_mode_builds_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """Flag mode: USER@HOST + --target builds the correct single-node InputSchema."""
     captured: dict[str, Any] = {}
 
-    def fake_spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         captured["schema"] = schema
         return {
             "kind": "success",
@@ -343,7 +353,9 @@ def test_start_conn_flag_without_connection_rejected() -> None:
 def test_start_output_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """--output env prints export lines including TUNSTRAP_DB_PORT."""
 
-    def fake_spawn(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         return {
             "kind": "success",
             "payload": {

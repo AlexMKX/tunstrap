@@ -110,7 +110,9 @@ def _spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     seen: list[Any] = []
 
     def _install(message: dict[str, Any]) -> None:
-        def _spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        def _spawn_daemon(
+            schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+        ) -> dict[str, Any]:
             seen.append(schema)
             return message
 
@@ -195,7 +197,9 @@ def test_multi_node_with_output_var_reaches_spawn(
     envelope post-spawn.
     """
 
-    def _spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn_daemon(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         spawn.append(schema)
         raise DaemonError("captured; stop before the child runs", {})
 

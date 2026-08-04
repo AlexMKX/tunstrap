@@ -65,7 +65,9 @@ class QuietPopen:
 @pytest.fixture(name="spawned")
 def _spawned(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda _schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda _schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
@@ -171,7 +173,9 @@ def test_raising_stop_preserves_the_minted_session_root(
     """
     minted: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         minted.append(session_dir)
         return _success_payload()
 
@@ -292,7 +296,9 @@ def test_run_mints_the_session_path_before_spawning(
     """With no --session-dir, run creates the directory itself and passes it on."""
     spawned: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         spawned.append(session_dir)
         assert session_dir is not None, "run must not let the worker generate the path"
         assert Path(session_dir).is_dir(), "the minted path must exist before spawning"
@@ -318,7 +324,9 @@ def test_teardown_uses_the_minted_path_not_the_payload(
     """
     spawned: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         spawned.append(session_dir)
         payload = _success_payload()
         payload["payload"]["session_dir"] = "/completely/bogus"
@@ -348,7 +356,9 @@ def test_supplied_session_dir_is_never_minted(
     """
     supplied = tmp_path / "work"
     supplied.mkdir()
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     result = CliRunner().invoke(
         main,
@@ -389,7 +399,9 @@ def test_production_teardown_keeps_a_supplied_session_dir(
     data.mkdir()
     (data / "daemon.pid").write_text("4242\n")
 
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _g, force: StopOutcome(True))
 
@@ -424,7 +436,9 @@ def test_failed_teardown_keeps_identity_data_for_manual_recovery(
     tunnel_data.mkdir(parents=True)
     identity = tunnel_data / "daemon.pid"
     identity.write_text("4242\n")
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
     monkeypatch.setattr(
@@ -457,7 +471,9 @@ def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
     """
     seen: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(session_dir)
         raise DaemonError("worker died", {})
 
@@ -485,7 +501,9 @@ def test_handshake_failure_stops_the_worker_instead_of_orphaning_it(
     """
     seen: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(session_dir)
         raise DaemonHandshakeError("worker IPC produced invalid JSON", {"position": 0})
 
@@ -504,7 +522,9 @@ def test_minted_root_is_removed_after_a_successful_run(monkeypatch: pytest.Monke
     """After a real teardown, the minted root itself is gone from disk."""
     seen: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         seen.append(session_dir)
         return _success_payload()
 
@@ -548,7 +568,9 @@ def test_malformed_success_payload_still_tears_down(
     """A success payload missing session_dir must not orphan the daemon."""
     spawned: list[str | None] = []
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         spawned.append(session_dir)
         payload = _success_payload()
         del payload["payload"]["session_dir"]
@@ -569,7 +591,9 @@ def test_non_string_session_dir_still_tears_down(
 ) -> None:
     """A non-string session_dir fails validation post-spawn but still tears down."""
 
-    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+    def _spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
         payload = _success_payload()
         payload["payload"]["session_dir"] = 17
         return payload
@@ -594,7 +618,9 @@ def test_unreadable_envelope_still_tears_down(
     """
     envelope = _success_payload()
     del envelope[missing]
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: envelope)
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: envelope
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     result = CliRunner().invoke(main, _ARGS, input="secret\n")
     assert result.exit_code == 4
@@ -612,7 +638,9 @@ def test_post_spawn_exception_tears_down_once(
     def _boom(*_a: Any, **_kw: Any) -> Any:
         raise RuntimeError(f"{target} exploded")
 
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod, target, _boom)
     result = CliRunner().invoke(main, _ARGS, input="secret\n")
@@ -630,7 +658,9 @@ def test_launch_failure_is_127_and_tears_down(
     def _boom(_cmd: list[str], env: dict[str, str] | None = None) -> Any:
         raise OSError("no such binary")
 
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", _boom)
     result = CliRunner().invoke(main, _ARGS, input="secret\n")
     assert result.exit_code == 127
@@ -654,7 +684,9 @@ def test_failing_signal_restoration_cannot_skip_teardown(
             raise RuntimeError("cannot restore handler")
         return real_signal(signum, handler)
 
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod.signal, "signal", _flaky)
     result = CliRunner().invoke(main, _ARGS, input="secret\n")
@@ -672,7 +704,9 @@ def test_signal_handlers_are_restored_on_the_happy_path(
         signal_mod.getsignal(signal_mod.SIGINT),
         signal_mod.getsignal(signal_mod.SIGTERM),
     )
-    monkeypatch.setattr(cli_mod, "spawn_daemon", lambda _s, session_dir=None: _success_payload())
+    monkeypatch.setattr(
+        cli_mod, "spawn_daemon", lambda _s, session_dir=None, *, input_env=None: _success_payload()
+    )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     result = CliRunner().invoke(main, _ARGS, input="secret\n")
     assert result.exit_code == 7
@@ -707,7 +741,7 @@ def test_lone_optional_node_failure_keeps_its_own_exit_code(
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda _s, session_dir=None: {"kind": "success", "payload": payload},
+        lambda _s, session_dir=None, *, input_env=None: {"kind": "success", "payload": payload},
     )
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setenv(

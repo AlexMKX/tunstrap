@@ -55,7 +55,9 @@ class FakePopen:
 
 def test_run_injects_env_and_propagates_exit(monkeypatch):
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     stops: list[tuple[str, int]] = []
 
@@ -114,7 +116,9 @@ def test_signalled_child_exits_with_the_shell_convention(monkeypatch):
     this pins is the value tunstrap chooses to exit with.
     """
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", SignalledPopen)
@@ -134,7 +138,9 @@ def test_normal_child_exit_code_is_untouched(monkeypatch):
     the test above while corrupting every ordinary exit code.
     """
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
@@ -154,7 +160,9 @@ def test_run_requires_command():
 
 def test_run_teardown_on_child_exception(monkeypatch):
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     stops: list[str] = []
 
@@ -183,7 +191,7 @@ def test_run_session_active_exit3(monkeypatch):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None: {
+        lambda schema, session_dir=None, *, input_env=None: {
             "kind": "session_active",
             "payload": {"error": "SessionActive"},
         },
@@ -211,7 +219,9 @@ def test_run_forwards_signals(monkeypatch):
     import signal as signal_mod
 
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
 
@@ -260,7 +270,9 @@ def test_run_rejects_output_option() -> None:
 def test_run_preserves_child_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tokens after `--` (including child's own flags) reach the child verbatim."""
     monkeypatch.setattr(
-        cli_mod, "spawn_daemon", lambda schema, session_dir=None: _success_payload()
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)

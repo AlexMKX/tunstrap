@@ -665,7 +665,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     # handlers -- `spawn_daemon` is the only source of either exception.
     session_path, minted_root = _mint_session_dir(session_dir)
     try:
-        message = spawn_daemon(schema, session_dir=session_path)
+        message = spawn_daemon(schema, session_dir=session_path, input_env=input_env)
     except DaemonHandshakeError as exc:
         # Parent-side, past the detach: `Popen` has already launched a worker,
         # so one may be running and holding the session lock. Taking the

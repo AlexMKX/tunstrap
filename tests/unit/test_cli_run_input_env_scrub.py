@@ -81,8 +81,10 @@ def _spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     seen: list[Any] = []
 
     def _install(message: dict[str, Any]) -> None:
-        def _spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
-            seen.append(schema)
+        def _spawn_daemon(
+            schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+        ) -> dict[str, Any]:
+            seen.append({"schema": schema, "session_dir": session_dir, "input_env": input_env})
             return message
 
         monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn_daemon)
@@ -111,6 +113,23 @@ def test_input_env_variable_is_scrubbed_from_the_child_environment(
     env = _run(monkeypatch, spawn)
 
     assert VAR not in env, f"{VAR} carries the SSH private key and was inherited by the child"
+
+
+def test_run_forwards_the_input_variable_name_to_the_spawn(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+) -> None:
+    """``spawn_daemon`` is told, by name, which variable is secret-bearing.
+
+    The worker's scrub cannot be keyed on a literal — ``--input-env`` takes an
+    arbitrary name — so the name has to be forwarded. This pins the forwarding
+    at unit level; that the detached worker's environment really loses it is
+    proven against a real process in
+    ``tests/integration/test_daemon_input_env.py``. Red if ``run`` stops
+    passing the argument: the parameter then keeps its ``None`` default.
+    """
+    _run(monkeypatch, spawn)
+
+    assert spawn[-1]["input_env"] == VAR, "run must tell spawn_daemon which variable to scrub"
 
 
 def test_ssh_private_key_reaches_no_child_variable(

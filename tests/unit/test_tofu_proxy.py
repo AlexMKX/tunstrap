@@ -113,7 +113,9 @@ def _spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     seen: list[Any] = []
 
     def _install(message: dict[str, Any]) -> None:
-        def _spawn_daemon(schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        def _spawn_daemon(
+            schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+        ) -> dict[str, Any]:
             seen.append(schema)
             return message
 

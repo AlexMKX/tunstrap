@@ -25,7 +25,38 @@ def _open_log_target(path: str | None) -> int | IO[bytes]:
     return open(path, "ab", buffering=0)  # closed by caller
 
 
-def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[str, Any]:
+def _worker_env(input_env: str | None) -> dict[str, str]:
+    """Copy the parent environment minus the one variable known to be secret-bearing.
+
+    ``input_env`` is the name ``--input-env`` was actually given, not a
+    literal: the option takes an arbitrary name, so a scrub keyed on
+    ``TUNSTRAP_INPUT`` would leave the SSH private key PEM in the environment
+    of a long-lived detached process for every other name. Mirrors
+    ``cli._build_child_env``, which scrubs the same name from ``tofu``'s
+    environment — one rule, both children.
+
+    **Deliberately a filtered copy, not a minimal environment.** The worker
+    receives its schema over stdin and needs nothing else *from tunstrap*, but
+    it is still an ordinary process in the operator's session: it resolves
+    imports through ``PYTHONPATH``, may authenticate through ``SSH_AUTH_SOCK``,
+    and reaches the network under the operator's proxy and CA-bundle settings.
+    Handing it a minimal environment would trade a bounded, demonstrated leak
+    for an unbounded set of setups that silently stop working. It would also
+    buy no privilege boundary: worker and parent run as the same uid, and
+    ``/proc/<pid>/environ`` is owner-readable, so anyone who can read the
+    worker's environment can already read the parent's. The named variable is
+    different in kind — it is tunstrap's own injected secret, and tunstrap is
+    the only component that knows it is secret-bearing.
+    """
+    env = dict(os.environ)
+    if input_env is not None:
+        env.pop(input_env, None)
+    return env
+
+
+def spawn_daemon(
+    schema: InputSchema, session_dir: str | None = None, *, input_env: str | None = None
+) -> dict[str, Any]:
     """Spawn the worker, send the schema, read the IPC response, return it.
 
     Returns the structured IPC message for any of the four worker outcomes:
@@ -41,8 +72,7 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
     and must be stopped rather than abandoned. Callers that treat any spawn
     failure as "no daemon exists" orphan the worker on exactly those paths.
     """
-    worker_env = dict(os.environ)
-    worker_env.pop("TUNSTRAP_INPUT", None)
+    worker_env = _worker_env(input_env)
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
     try:
