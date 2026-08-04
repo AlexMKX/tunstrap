@@ -6,9 +6,10 @@ comment at the kubectl step says so explicitly. Nothing enforced the coupling:
 the kubectl pin carries a ``# renovate:`` annotation but the node image does
 not, and even if it did, ``kubernetes/kubernetes`` and ``kindest/node`` are
 different Renovate datasources that bump independently, so annotations cannot
-make the two move together. The annotations are inert today anyway (org
-Renovate autodiscovery is scoped to ``garuda-tunnel/*-internal``; this repo is
-``AlexMKX/tunstrap`` - see the a410db3 CAVEAT).
+make the two move together. The annotations are inert today anyway: this repo
+is outside the organization's Renovate autodiscovery scope, so nothing acts on
+the ``# renovate:`` comments here regardless of how carefully they are kept
+in sync.
 
 A test is therefore the only enforcement that works regardless of enrolment.
 Lives in the unit tier (not e2e) on purpose: the e2e job ``needs: unit``, so a
