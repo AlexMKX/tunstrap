@@ -184,6 +184,17 @@ it **keeps** the session data instead and prints the `tunstrap stop
 handle on a daemon that may still be running. Either way the child's exit code
 is never changed by teardown:
 
+`stop` follows the same rule, so that recovery command is safe to run and safe
+to repeat: it removes `tunnel-data` only after a confirmed stop (or a `not
+found`, which means no daemon is recorded), and otherwise leaves the session
+data in place, adds `"preserved": true` to its JSON line and explains itself on
+stderr. Two outcomes it cannot resolve on its own are `identity mismatch` and
+`identity check unavailable` — the recorded pid can no longer be verified as
+ours, so `stop` refuses to signal it rather than risk killing an unrelated
+process. Re-running will keep reporting the same thing; that is the case the
+preserved `tunnel-data/daemon.pid` exists for, and it has to be resolved by
+hand:
+
 ```bash
 tunstrap run root@edge1 \
   --ssh-key ~/.ssh/id_ed25519 \
@@ -509,7 +520,9 @@ is preserved.
 
 When `materialize=true`: the patched kubeconfig (including embedded private keys)
 is written mode 0600 to `<session-dir>/tunnel-data/<node>-<kube_target_name>`.
-The daemon removes these files on `stop` or `atexit`. The `path` field in the
+The daemon removes these files on `stop` or `atexit` — except when `stop` cannot
+confirm the daemon died, in which case it deliberately keeps them (see the `run`
+teardown notes above) and says so with `"preserved": true`. The `path` field in the
 kube target output becomes non-null. Callers opting in accept that decoded files
 (including private keys) land on disk until `stop`/`atexit` runs. If the daemon
 is killed with `kill -9`, `tunnel-data/` is orphaned and must be cleaned up

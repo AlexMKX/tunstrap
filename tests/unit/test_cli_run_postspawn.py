@@ -504,6 +504,57 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     assert json.loads(recovery.stdout)["stopped"] is False
 
 
+def test_the_printed_recovery_command_does_not_eat_what_it_recovers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Running the command we print, against a stop that stays unresolved, keeps the identity.
+
+    The whole point of preserving session data is that the operator can find
+    and kill a daemon that outlived teardown. ``run`` points them at ``tunstrap
+    stop``; if ``stop`` deletes ``tunnel-data`` whether or not it managed to
+    stop anything, following our own instruction destroys the handle the
+    preservation existed to keep — and the second, manual attempt has nothing
+    left to work with.
+
+    End to end on purpose: the identity is a real file, ``read_identity`` and
+    ``cleanup_path`` are the real ones, and the command is the one ``run``
+    actually printed, extracted by the same helper as
+    ``test_the_printed_recovery_command_is_one_tunstrap_accepts`` so the two
+    cannot drift apart. Only ``stop_session`` is stubbed, to hold the outcome
+    unresolved across both invocations — which is the situation under test.
+    """
+    data = tmp_path / "tunnel-data"
+    data.mkdir()
+    identity = data / "daemon.pid"
+    identity.write_text("4242\n")
+
+    monkeypatch.setattr(
+        cli_mod,
+        "spawn_daemon",
+        lambda _s, session_dir=None, *, input_env=None: _success_payload(),
+    )
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(
+        cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
+    assert result.exit_code == 7
+    assert identity.read_text() == "4242\n", "run's own teardown destroyed the identity"
+
+    argv = _recovery_command(result.stderr)
+    recovery = CliRunner().invoke(main, argv[1:])
+
+    assert recovery.exit_code == 0
+    assert json.loads(recovery.stdout)["stopped"] is False, "the daemon was not stopped"
+    ate_the_handle = "the recovery command deleted the identity it was supposed to recover"
+    assert identity.read_text() == "4242\n", ate_the_handle
+
+
 def test_a_minted_root_is_named_as_the_operators_to_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

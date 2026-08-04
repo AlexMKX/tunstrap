@@ -27,10 +27,13 @@ daemon you normally start and stop by hand in this model; it owns the child and
 tears it down automatically. Whenever that teardown ends without a confirmed
 stop — it reports a failure, itself raises, or the recorded identity is
 unreadable — tunstrap keeps the session data instead of deleting it and prints
-the `tunstrap stop --session-dir …` command that finishes the job by hand. When
-the preserved directory is one tunstrap minted under `TMPDIR`, the diagnostic
-names it too: `stop` removes the tunnel data but never its own `--session-dir`
-argument, so that directory is yours to delete once the daemon is dealt with.
+the `tunstrap stop --session-dir …` command that finishes the job by hand. That
+command applies the same rule, so it is safe to repeat: it clears the tunnel
+data once the daemon is confirmed gone, and otherwise preserves it and reports
+`"preserved": true`. When the preserved directory is one tunstrap minted under
+`TMPDIR`, the diagnostic names it too — `stop` never removes its own
+`--session-dir` argument, so that directory is yours to delete once the daemon
+is dealt with.
 
 ## Prerequisites
 

@@ -878,7 +878,7 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
         pass
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)
-        if not outcome.stopped and outcome.reason != "not found":
+        if not _stop_resolved(outcome):
             _warn_preserved(
                 session_dir, f"daemon not stopped cleanly: {outcome.reason}", minted_root
             )
@@ -892,19 +892,47 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
             _warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
 
 
+def _stop_resolved(outcome: StopOutcome) -> bool:
+    """True when the daemon is known to be gone, so its session data is safe to delete.
+
+    The single expression of that rule. ``run``'s teardown and ``stop`` both
+    have to decide it, and stating it twice is how they drift — which is
+    exactly what happened: ``_teardown_run_inner`` preserved on an unresolved
+    outcome while ``stop`` deleted unconditionally, so following the recovery
+    command ``run`` prints destroyed the identity file the preservation existed
+    to keep.
+
+    ``"not found"`` is a *resolved* outcome, not a failure: it means no daemon
+    is recorded as running, which is the normal shape when auto-stop-idle
+    already fired. Everything else with ``stopped=False`` leaves the daemon's
+    state unknown.
+    """
+    return outcome.stopped or outcome.reason == "not found"
+
+
 def _stop_outcome_json(outcome: StopOutcome) -> str:
     """Render a StopOutcome as ``stop``'s documented stdout JSON, key for key.
 
     Key order and omission rules are a public contract, pinned byte for byte
     across all seven outcomes by ``tests/unit/test_cli_stop_output.py``:
     ``stopped`` first, then ``reason`` when there is one, then ``forced`` only
-    when True.
+    when True, then ``preserved`` only when the session data was kept.
+
+    ``preserved`` is additive and omitted when false, so every previously
+    emitted shape — including the most-parsed ``{"stopped": true}`` — is
+    byte-identical to before. It is here rather than left for the caller to
+    infer because the rule is not derivable without string-matching
+    ``reason`` against ``"not found"``, and a caller that has to replicate an
+    internal reason string to learn whether state is still on disk is a caller
+    we have set up to break.
     """
     body: dict[str, object] = {"stopped": outcome.stopped}
     if outcome.reason is not None:
         body["reason"] = outcome.reason
     if outcome.forced:
         body["forced"] = True
+    if not _stop_resolved(outcome):
+        body["preserved"] = True
     return json.dumps(body)
 
 
@@ -924,6 +952,17 @@ def stop_command(session_dir: str, grace_seconds: int) -> None:
     sys.stdout.write(_stop_outcome_json(outcome))
     sys.stdout.write("\n")
     sys.stdout.flush()
+    if not _stop_resolved(outcome):
+        # Same rule as run's teardown, from the same predicate. stop is the
+        # command run tells the operator to reach for, so deleting here on an
+        # unresolved outcome would make the recovery path destroy the identity
+        # file it was invoked to recover. The notice goes to stderr because
+        # stdout is the machine-readable envelope above.
+        _warn(
+            f"tunstrap stop: daemon not stopped: {outcome.reason}; "
+            f"session data preserved under {session_dir}\n"
+        )
+        return
     SessionDir.cleanup_path(session_dir)
 
 
