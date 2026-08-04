@@ -100,3 +100,32 @@ fixture internals, but the rest read from `rig`):
   never ran. Locally a missing `kind`/`tofu`/`kubectl` is therefore a *skip*,
   not a failure: a green local run with skips is not full coverage. To mirror
   CI, `export TUNSTRAP_E2E_REQUIRE_ALL=1` before running.
+
+## e2e is not parallel-safe (documented deviation)
+
+The e2e tier is a single, session-scoped fixture chain built on fixed,
+non-randomised names, and cannot have two independent runs on the same host
+at the same time:
+
+- one session-scoped kind cluster under a fixed name (`CLUSTER_NAME =
+  "tunstrap-e2e"` in `rig.py`) and a fixed control-plane container name
+  derived from it (`CONTROL_PLANE`, `conftest.py`);
+- a fixed, repo-relative `tests/e2e/_keys/` (SSH keypair) and
+  `tests/e2e/_kube/` (kubeconfig) directory, not per-run temp paths;
+- an **unconditional** `kind delete cluster --name tunstrap-e2e` at
+  `kind_cluster` fixture setup (`conftest.py`), which absorbs a leaked
+  cluster from a killed prior run but would just as happily delete a
+  concurrent run's live cluster out from under it.
+
+This is a deliberate trade-off, not an oversight: the cluster name is fixed
+because it doubles as the SSH forward target and the expected TLS
+`tls_server_name` (see the comment beside `CLUSTER_NAME` in `rig.py`), and
+per-run randomisation would ripple through every fixture that derives from
+it. Re-architecting the rig for concurrent runs is out of scope for the
+current tier.
+
+**Practical consequence:** run at most one `pytest tests/e2e` invocation per
+host at a time (this applies locally and in CI - the e2e job is not
+configured for matrix/parallel execution). Do not add `-n auto`/`pytest-xdist`
+or a parallel CI matrix leg for this suite without first giving `kind_cluster`,
+`_keys/`, and `_kube/` per-run identity.
