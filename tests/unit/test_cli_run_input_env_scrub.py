@@ -158,12 +158,18 @@ def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
 def test_input_payload_shutdown_grace_controls_teardown(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
 ) -> None:
-    """The payload daemon block, not a hidden CLI default, sets run's grace."""
+    """The payload daemon block, not a hidden CLI default, sets run's grace.
+
+    The recorder delegates to ``cleaning_teardown`` rather than swallowing the
+    call: ``run`` mints a real temp directory before spawning, so a stub that
+    only recorded would leave one ``/tmp/tunstrap-run-*`` root behind on every
+    run of this test.
+    """
     observed: list[int] = []
 
-    def _teardown(_path: str, grace: int, *, minted_root: str | None = None) -> None:
-        del minted_root
+    def _teardown(path: str, grace: int, *, minted_root: str | None = None) -> None:
         observed.append(grace)
+        cleaning_teardown(path, grace, minted_root=minted_root)
 
     monkeypatch.setattr(cli_mod, "_teardown_run", _teardown)
     payload = json.loads(INPUT_PAYLOAD)

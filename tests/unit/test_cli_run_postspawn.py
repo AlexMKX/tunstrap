@@ -14,6 +14,7 @@ daemon, no signals and no filesystem work — this passes unchanged on macOS.
 from __future__ import annotations
 
 import json
+import shutil
 import signal as signal_mod
 import tempfile
 from collections.abc import Iterator
@@ -91,7 +92,7 @@ def test_teardown_silent_on_success(monkeypatch: pytest.MonkeyPatch, spawned: No
 
 
 def test_teardown_stop_failure_goes_to_stderr(
-    monkeypatch: pytest.MonkeyPatch, spawned: None
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
 ) -> None:
     """A non-stopped outcome is reported on stderr and stdout stays clean."""
     monkeypatch.setattr(
@@ -100,7 +101,9 @@ def test_teardown_stop_failure_goes_to_stderr(
         lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
     )
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
-    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
     assert result.exit_code == 7
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "identity mismatch" in result.stderr
@@ -123,27 +126,83 @@ def test_teardown_unremovable_paths_go_to_stderr(
 
 
 def test_teardown_exception_does_not_change_exit_code(
-    monkeypatch: pytest.MonkeyPatch, spawned: None
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
 ) -> None:
-    """A raising stop primitive is reported on stderr; the child's 7 still wins."""
+    """A raising stop primitive is reported on stderr; the child's 7 still wins.
+
+    Supplies ``--session-dir`` so nothing is minted: what this test owns is the
+    exit code and stdout purity, and the fate of a minted root under a raising
+    stop belongs to
+    ``test_raising_stop_preserves_the_minted_session_root``.
+    """
 
     def _boom(_sd: str, _pid: int, _g: int, force: bool) -> StopOutcome:
         raise RuntimeError("stop exploded")
 
     monkeypatch.setattr(cli_mod, "stop_session", _boom)
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
-    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
     assert result.exit_code == 7, "teardown failure must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "stop exploded" in result.stderr
-    leaked = list(Path(tempfile.gettempdir()).glob("tunstrap-run-*"))
-    assert leaked == [], f"a raising stop primitive leaked the minted session root: {leaked}"
+
+
+def test_raising_stop_preserves_the_minted_session_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that *raises* preserves the session root, as a reported failure does.
+
+    ``StopOutcome(False, …)`` means we know the daemon survived; an exception
+    means we do not know its state at all, which is the stronger reason to keep
+    the identity file rather than destroy it. The root ``run`` minted is the
+    only place that file can be, so a raising teardown must not take it along —
+    otherwise a surviving daemon becomes exactly the orphan this window exists
+    to prevent.
+
+    A *minted* root is the only falsifiable shape for this claim: a
+    caller-supplied ``--session-dir`` is never removed on any path, so
+    asserting its survival could not fail.
+
+    Scoped to the path this test's own spawn stub observed, never a glob of the
+    shared temp directory — such a glob also sees roots minted by other tests
+    and is order-dependent by construction.
+    """
+    minted: list[str | None] = []
+
+    def _spawn(_schema: Any, session_dir: str | None = None) -> dict[str, Any]:
+        minted.append(session_dir)
+        return _success_payload()
+
+    def _boom(_sd: str, _pid: int, _g: int, force: bool) -> StopOutcome:
+        raise RuntimeError("stop exploded")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
+    monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
+    monkeypatch.setattr(cli_mod, "stop_session", _boom)
+
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+
+    root = minted[0]
+    assert root is not None
+    try:
+        assert result.exit_code == 7
+        assert Path(root).is_dir(), "a raising stop destroyed the only handle on the daemon"
+        assert f"tunstrap stop --session-dir {root} --force" in result.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_teardown_permission_error_does_not_change_exit_code(
-    monkeypatch: pytest.MonkeyPatch, spawned: None
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
 ) -> None:
-    """A recycled pid permission failure is reported; the child's 7 still wins."""
+    """A recycled pid permission failure is reported; the child's 7 still wins.
+
+    ``--session-dir`` for the same reason as the sibling above: a raising stop
+    now preserves a minted root by contract, so minting one here would leak it.
+    """
     monkeypatch.setattr(session_mod, "verify_session", lambda _sd, _pid: IdentityCheckResult.match)
 
     def _permission_denied(_pid: int, _sig: int) -> None:
@@ -151,23 +210,30 @@ def test_teardown_permission_error_does_not_change_exit_code(
 
     monkeypatch.setattr(session_mod.os, "kill", _permission_denied)
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
-    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
     assert result.exit_code == 7, "teardown failure must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "PermissionError: recycled pid" in result.stderr
 
 
 def test_teardown_keyboard_interrupt_does_not_change_exit_code(
-    monkeypatch: pytest.MonkeyPatch, spawned: None
+    monkeypatch: pytest.MonkeyPatch, spawned: None, tmp_path: Path
 ) -> None:
-    """A KeyboardInterrupt from teardown does not override the child's exit code."""
+    """A KeyboardInterrupt from teardown does not override the child's exit code.
+
+    ``--session-dir`` for the same reason as the two siblings above.
+    """
 
     def _interrupted(_sd: str, _pid: int, _g: int, *, force: bool) -> StopOutcome:
         raise KeyboardInterrupt("second Ctrl-C")
 
     monkeypatch.setattr(cli_mod, "stop_session", _interrupted)
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
-    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(tmp_path), "--", "true"], input="secret\n"
+    )
     assert result.exit_code == 7, "teardown interruption must never override the child code"
     assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
     assert "KeyboardInterrupt: second Ctrl-C" in result.stderr
@@ -362,10 +428,14 @@ def test_failed_teardown_keeps_identity_data_for_manual_recovery(
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(lambda _sd: 4242))
     monkeypatch.setattr(
-        cli_mod, "stop_session", lambda _sd, _pid, _grace, force: StopOutcome(False, "identity mismatch")
+        cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _grace, force: StopOutcome(False, "identity mismatch"),
     )
 
-    result = CliRunner().invoke(main, [*_ARGS[:-2], "--session-dir", str(session_dir), "--", "true"], input="secret\n")
+    result = CliRunner().invoke(
+        main, [*_ARGS[:-2], "--session-dir", str(session_dir), "--", "true"], input="secret\n"
+    )
 
     assert result.exit_code == 7
     assert identity.read_text() == "4242\n"

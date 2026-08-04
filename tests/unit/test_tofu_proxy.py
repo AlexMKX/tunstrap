@@ -500,6 +500,7 @@ def test_exec_tofu_missing_binary_exits_127_without_stdout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A missing tofu is a shell-style launch failure, not a traceback."""
+
     def _missing(_prog: str, _argv: list[str]) -> None:
         raise FileNotFoundError("tofu not found")
 

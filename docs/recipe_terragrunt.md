@@ -24,8 +24,10 @@ tunnel down in a `finally` — so the tunnel's lifetime is exactly the child's.
 For commands that do not need a tunnel (`init`, `-version`), and whenever no
 tunnel is wanted, the proxy `execvp`s `tofu` directly. tunstrap is never a
 daemon you normally start and stop by hand in this model; it owns the child and
-tears it down automatically. If that teardown cannot verify the daemon, tunstrap
-preserves its session data and prints the recovery command instead of deleting it.
+tears it down automatically. Whenever that teardown ends without a confirmed
+stop — whether it reports a failure or itself raises — tunstrap keeps the
+session data instead of deleting it and prints the `tunstrap stop --session-dir
+… --force` command that finishes the job by hand.
 
 ## Prerequisites
 

@@ -798,15 +798,36 @@ def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | No
     diagnostic is attempted on stderr and none of them changes the exit code:
     a child that ran and returned 7 still exits 7, even if teardown or its
     diagnostic is interrupted.
+
+    A raising teardown preserves the session data, exactly as a reported stop
+    failure does, and for a stronger reason: ``StopOutcome(False, …)`` means we
+    know the daemon survived, while an exception — ``stop_session`` failing on
+    a recycled pid, or a second Ctrl-C landing inside the grace poll — means we
+    know nothing about its state. Removing the root would take the identity
+    file with it and leave a possibly-live daemon nobody can find. Nothing
+    else here can realistically raise: ``read_identity`` raises only
+    ``SessionError``, which the inner function handles, and ``cleanup_path``
+    and ``remove_root`` are non-raising by construction (``session.py:169``).
     """
     try:
         _teardown_run_inner(session_dir, grace_seconds, minted_root=minted_root)
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        _warn(f"run: teardown failed: {type(exc).__name__}: {exc}\n")
-        # A raising stop primitive short-circuits _teardown_run_inner before it
-        # reaches the root removal, so retry it here: a temp directory run
-        # created must not outlive run even on the exceptional path.
-        _discard_minted_root(minted_root)
+        _warn_preserved(session_dir, f"teardown failed: {type(exc).__name__}: {exc}")
+
+
+def _warn_preserved(session_dir: str, cause: str) -> None:
+    """Report an unresolved teardown and the command that finishes it by hand.
+
+    One wording for both ways teardown can end without a confirmed stop — a
+    reported failure and a raised one — because they carry the same operator
+    consequence: a daemon that may still be running, whose identity file under
+    ``session_dir`` is the only handle on it, so the data is kept rather than
+    deleted.
+    """
+    _warn(
+        f"run: {cause}; preserving session data. Recover with: "
+        f"tunstrap stop --session-dir {session_dir} --force\n"
+    )
 
 
 def _warn(message: str) -> None:
@@ -829,11 +850,7 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
     else:
         outcome = stop_session(session_dir, pid, grace_seconds, force=True)
         if not outcome.stopped and outcome.reason != "not found":
-            _warn(
-                "run: daemon not stopped cleanly: "
-                f"{outcome.reason}; preserving session data. Recover with: "
-                f"tunstrap stop --session-dir {session_dir} --force\n"
-            )
+            _warn_preserved(session_dir, f"daemon not stopped cleanly: {outcome.reason}")
             return
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
