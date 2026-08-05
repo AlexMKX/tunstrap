@@ -76,52 +76,23 @@ def parse_kubeconfig(raw: bytes) -> KubeconfigView:
     Raises KubeParseError on malformed YAML, missing current-context, or an
     unresolvable cluster/user reference.
     """
-    try:
-        doc = _yaml().load(io.BytesIO(raw))
-    except YAMLError as exc:
-        raise KubeParseError(f"kubeconfig is not valid YAML: {exc}") from exc
-    if not isinstance(doc, dict):
-        raise KubeParseError("kubeconfig root is not a mapping")
+    doc = _load_root(raw)
 
     current = doc.get("current-context")
     if not current or not isinstance(current, str):
         raise KubeParseError("kubeconfig has no current-context")
 
-    contexts = doc.get("contexts") or []
-    ctx = _find_named(contexts, current)
-    if ctx is None:
-        raise KubeParseError(f"current-context {current!r} not found in contexts")
-    _ctx_body_raw = ctx.get("context")
-    ctx_body: dict[str, object] = _ctx_body_raw if isinstance(_ctx_body_raw, dict) else {}
-    _cluster_name_raw = ctx_body.get("cluster")
-    _user_name_raw = ctx_body.get("user")
-    if not _cluster_name_raw or not _user_name_raw:
-        raise KubeParseError(f"context {current!r} missing cluster or user")
-    if not isinstance(_cluster_name_raw, str) or not isinstance(_user_name_raw, str):
-        raise KubeParseError(f"context {current!r} cluster or user is not a string")
-    cluster_name: str = _cluster_name_raw
-    user_name: str = _user_name_raw
+    # Equivalent to the former `doc.get("contexts") or []`: a truthy non-list
+    # (mapping, string, ...) never survived anyway, because _find_named below
+    # returns None for it and that raises. Narrowing here instead lets
+    # _ignored_contexts take a real list without re-guarding the type.
+    _contexts_raw = doc.get("contexts")
+    contexts: list[object] = _contexts_raw if isinstance(_contexts_raw, list) else []
 
-    cluster = _find_named(doc.get("clusters") or [], cluster_name)
-    if cluster is None:
-        raise KubeParseError(f"cluster {cluster_name!r} not found")
-    _cluster_body_raw = cluster.get("cluster")
-    cluster_body: dict[str, object] = (
-        _cluster_body_raw if isinstance(_cluster_body_raw, dict) else {}
-    )
-    server = cluster_body.get("server")
-    if not server or not isinstance(server, str):
-        raise KubeParseError(f"cluster {cluster_name!r} has no server")
-
-    user = _find_named(doc.get("users") or [], user_name)
-    if user is None:
-        raise KubeParseError(f"user {user_name!r} not found")
-    _user_body_raw = user.get("user")
-    user_body: dict[str, object] = _user_body_raw if isinstance(_user_body_raw, dict) else {}
-
-    ignored = [
-        str(c.get("name")) for c in contexts if isinstance(c, dict) and c.get("name") != current
-    ]
+    cluster_name, user_name = _context_refs(contexts, current)
+    cluster_body, server = _cluster_section(doc, cluster_name)
+    user_body = _user_section(doc, user_name)
+    ignored = _ignored_contexts(contexts, current)
 
     return KubeconfigView(
         doc=doc,
@@ -136,6 +107,80 @@ def parse_kubeconfig(raw: bytes) -> KubeconfigView:
         client_key_data=_string_field(user_body, "client-key-data", user_name),
         ignored_contexts=ignored,
     )
+
+
+def _load_root(raw: bytes) -> dict[str, object]:
+    """Load raw kubeconfig bytes as a round-trip YAML mapping.
+
+    The returned document is the live ruamel object later patched in place, so
+    it must stay the round-trip type (comments, quoting and key order intact).
+    """
+    try:
+        doc = _yaml().load(io.BytesIO(raw))
+    except YAMLError as exc:
+        raise KubeParseError(f"kubeconfig is not valid YAML: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise KubeParseError("kubeconfig root is not a mapping")
+    return doc
+
+
+def _context_refs(contexts: list[object], current: str) -> tuple[str, str]:
+    """Resolve the current context to the (cluster, user) names it references.
+
+    A context body that is absent or not a mapping is treated as empty, which
+    then fails the missing-cluster-or-user check.
+    """
+    ctx = _find_named(contexts, current)
+    if ctx is None:
+        raise KubeParseError(f"current-context {current!r} not found in contexts")
+    _ctx_body_raw = ctx.get("context")
+    ctx_body: dict[str, object] = _ctx_body_raw if isinstance(_ctx_body_raw, dict) else {}
+    _cluster_name_raw = ctx_body.get("cluster")
+    _user_name_raw = ctx_body.get("user")
+    if not _cluster_name_raw or not _user_name_raw:
+        raise KubeParseError(f"context {current!r} missing cluster or user")
+    if not isinstance(_cluster_name_raw, str) or not isinstance(_user_name_raw, str):
+        raise KubeParseError(f"context {current!r} cluster or user is not a string")
+    return _cluster_name_raw, _user_name_raw
+
+
+def _cluster_section(doc: dict[str, object], cluster_name: str) -> tuple[dict[str, object], str]:
+    """Return the named cluster's body and its `server` URL.
+
+    A cluster body that is absent or not a mapping is treated as empty, which
+    then fails the missing-server check.
+    """
+    cluster = _find_named(doc.get("clusters") or [], cluster_name)
+    if cluster is None:
+        raise KubeParseError(f"cluster {cluster_name!r} not found")
+    _cluster_body_raw = cluster.get("cluster")
+    cluster_body: dict[str, object] = (
+        _cluster_body_raw if isinstance(_cluster_body_raw, dict) else {}
+    )
+    server = cluster_body.get("server")
+    if not server or not isinstance(server, str):
+        raise KubeParseError(f"cluster {cluster_name!r} has no server")
+    return cluster_body, server
+
+
+def _user_section(doc: dict[str, object], user_name: str) -> dict[str, object]:
+    """Return the named user's body, or an empty mapping if it is not one.
+
+    Unlike cluster/context, an empty user body is legitimate: every credential
+    field is optional (token/exec-plugin kubeconfigs carry none of them).
+    """
+    user = _find_named(doc.get("users") or [], user_name)
+    if user is None:
+        raise KubeParseError(f"user {user_name!r} not found")
+    _user_body_raw = user.get("user")
+    return _user_body_raw if isinstance(_user_body_raw, dict) else {}
+
+
+def _ignored_contexts(contexts: list[object], current: str) -> list[str]:
+    """Names of every context in the file other than the current one."""
+    return [
+        str(c.get("name")) for c in contexts if isinstance(c, dict) and c.get("name") != current
+    ]
 
 
 def _find_named(items: object, name: str) -> dict[str, object] | None:
@@ -249,7 +294,7 @@ def _string_field(body: dict[str, object], field_name: str, owner: str) -> str:
 ProbeFn = Callable[[str, int], Awaitable[bytes]]
 
 
-async def run_kube_targets(  # pylint: disable=too-many-locals,too-many-branches  # reason: per-target try/except/warning fan-out
+async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-target try/except/warning fan-out
     conn: asyncssh.SSHClientConnection,
     kube_targets: dict[str, KubeTarget],
     *,
