@@ -564,7 +564,7 @@ def _supervise_child(  # pylint: disable=too-many-arguments
 @click.option("--session-dir", "session_dir", default=None)
 @click.option("--grace-seconds", "grace_seconds", type=int, default=10, show_default=True)
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
+def run_command(  # pylint: disable=too-many-locals,too-many-statements
     ssh_key: str | None,
     ssh_key_passphrase: str | None,
     ssh_password_stdin: bool,
@@ -721,7 +721,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
     sys.exit(returncode)
 
 
-def run_via_env_input(  # pylint: disable=too-many-arguments
+def run_via_env_input(
     input_env: str,
     output_var: str,
     child_cmd: list[str],

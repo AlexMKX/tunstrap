@@ -32,7 +32,7 @@ jobs:
         run: pylint tunstrap/
       - name: vulture
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
-        run: vulture tunstrap/ vulture_whitelist.py
+        run: vulture tunstrap/
       - name: mypy --strict
         run: mypy --strict tunstrap
       - name: pytest (unit)

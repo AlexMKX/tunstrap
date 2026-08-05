@@ -31,7 +31,7 @@ jobs:
       - run: ruff format --check .
       - run: ruff check .
       - run: pylint tunstrap/
-      - run: vulture tunstrap/ vulture_whitelist.py
+      - run: vulture tunstrap/
       - run: mypy --strict tunstrap
       - name: combined unit + integration coverage gate
         run: |

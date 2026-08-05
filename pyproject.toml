@@ -171,7 +171,7 @@ disable = [
 max-line-length = 100
 
 [tool.vulture]
-paths = ["tunstrap", "vulture_whitelist.py"]
+paths = ["tunstrap"]
 min_confidence = 80
 ignore_decorators = ["@pytest.fixture", "@field_validator*", "@model_validator*", "@classmethod"]
 ignore_names = ["cls"]
