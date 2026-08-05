@@ -13,9 +13,12 @@ from collections.abc import Callable
 from typing import Any, NoReturn, TypeVar
 
 import click
-from pydantic import ValidationError
 
-from tunstrap.cli_input import build_schema_from_env, build_single_node_schema
+from tunstrap.cli_input import (
+    build_flag_schema,
+    build_schema_from_env,
+    build_schema_from_stdin,
+)
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
     format_exports,
@@ -27,12 +30,11 @@ from tunstrap.exceptions import (
     DaemonError,
     DaemonHandshakeError,
     MultiNodeEnvUnsupported,
-    SchemaValidationError,
     TunstrapError,
     exit_code_for,
 )
 from tunstrap.identity import IdentityCheckResult, verify_session
-from tunstrap.schemas import DaemonOptions, InputSchema, OutputSchema
+from tunstrap.schemas import InputSchema, OutputSchema
 from tunstrap.session import (
     SessionDir,
     SessionError,
@@ -134,8 +136,8 @@ def _conn_flags_present(
     return any([ssh_key, ssh_key_passphrase, ssh_password_stdin, targets, kube, fetch])
 
 
-def _schema_from_flags(
-    connection: str,
+def _start_schema(
+    connection: str | None,
     *,
     ssh_key: str | None,
     ssh_key_passphrase: str | None,
@@ -146,26 +148,68 @@ def _schema_from_flags(
     auto_stop_idle_seconds: int | None,
     materialize: bool,
     log_file: str | None,
-    force_materialize: bool = False,
+    output_fmt: str,
 ) -> InputSchema:
-    ssh_password: str | None = None
-    if ssh_password_stdin:
-        ssh_password = sys.stdin.readline().rstrip("\n")
-    daemon = DaemonOptions(
-        auto_stop_idle_seconds=auto_stop_idle_seconds,
-        materialize=materialize or force_materialize,
-        log_file=log_file,
-    )
-    return build_single_node_schema(
-        connection=connection,
+    """Pick ``start``'s input channel and assemble the schema from it.
+
+    The two channels are mutually exclusive and the guards that enforce that
+    belong here, with the assembly: a connection argument forbids JSON on
+    stdin, and connection flags require a connection argument. Stdin is not
+    consumed under ``--ssh-password-stdin`` — the password read owns it.
+
+    ``--output env`` forces materialization (``render_env`` needs a kubeconfig
+    on disk) in flag mode only; a stdin payload's ``daemon.materialize`` is the
+    caller's own statement and is left alone.
+    """
+    if connection is None:
+        if _conn_flags_present(
+            ssh_key=ssh_key,
+            ssh_key_passphrase=ssh_key_passphrase,
+            ssh_password_stdin=ssh_password_stdin,
+            targets=targets,
+            kube=kube,
+            fetch=fetch,
+        ):
+            raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
+        return build_schema_from_stdin(sys.stdin.read())
+
+    if not ssh_password_stdin and sys.stdin.read().strip():
+        raise click.UsageError(
+            "cannot combine a connection argument with JSON on stdin; use flags or stdin, not both"
+        )
+    return build_flag_schema(
+        connection,
         ssh_key=ssh_key,
         ssh_key_passphrase=ssh_key_passphrase,
-        ssh_password=ssh_password,
+        ssh_password_stdin=ssh_password_stdin,
         targets=targets,
         kube=kube,
         fetch=fetch,
-        daemon_opts=daemon,
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize,
+        log_file=log_file,
+        force_materialize=(output_fmt == "env"),
     )
+
+
+def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
+    """Write ``start``'s envelope to stdout, then exit with the mapped code.
+
+    Success under ``--output env`` is the only combination rendered as shell
+    exports; everything else is the raw JSON payload. A ``success`` kind (or an
+    unrecognised one) returns instead of exiting, leaving Click to exit 0 —
+    the same fall-through the original if-chain had.
+    """
+    kind = message["kind"]
+    if kind == "success" and output_fmt == "env":
+        out = OutputSchema.model_validate(message["payload"])
+        sys.stdout.write(format_exports(render_env(out)))
+    else:
+        sys.stdout.write(json.dumps(message["payload"]) + "\n")
+    sys.stdout.flush()
+    code = {"required_failure": 2, "daemon_error": 4, "session_active": 3}.get(kind)
+    if code is not None:
+        sys.exit(code)
 
 
 @main.command("start")
@@ -180,7 +224,7 @@ def _schema_from_flags(
     show_default=True,
 )
 @click.option("--session-dir", "session_dir", default=None)
-def start_command(  # pylint: disable=too-many-arguments,too-many-branches,too-many-statements
+def start_command(
     connection: str | None,
     extra: tuple[str, ...],
     ssh_key: str | None,
@@ -199,77 +243,20 @@ def start_command(  # pylint: disable=too-many-arguments,too-many-branches,too-m
     try:
         if extra:
             raise click.UsageError("`--` invokes a child command; use `tunstrap run ... -- CMD`")
-        conn_flags = _conn_flags_present(
+        schema = _start_schema(
+            connection,
             ssh_key=ssh_key,
             ssh_key_passphrase=ssh_key_passphrase,
             ssh_password_stdin=ssh_password_stdin,
             targets=targets,
             kube=kube,
             fetch=fetch,
+            auto_stop_idle_seconds=auto_stop_idle_seconds,
+            materialize=materialize,
+            log_file=log_file,
+            output_fmt=output_fmt,
         )
-        if connection is None and conn_flags:
-            raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
-
-        if connection is not None:
-            # Flag mode: check that stdin is empty (conflict guard)
-            stdin_peek = sys.stdin.read() if not ssh_password_stdin else ""
-            if stdin_peek.strip():
-                raise click.UsageError(
-                    "cannot combine a connection argument with JSON on stdin; "
-                    "use flags or stdin, not both"
-                )
-            schema = _schema_from_flags(
-                connection,
-                ssh_key=ssh_key,
-                ssh_key_passphrase=ssh_key_passphrase,
-                ssh_password_stdin=ssh_password_stdin,
-                targets=targets,
-                kube=kube,
-                fetch=fetch,
-                auto_stop_idle_seconds=auto_stop_idle_seconds,
-                materialize=materialize,
-                log_file=log_file,
-                force_materialize=(output_fmt == "env"),
-            )
-        else:
-            raw = sys.stdin.read()
-            if not raw.strip():
-                raise SchemaValidationError(
-                    "no input: provide USER@HOST[:PORT] or JSON on stdin", {}
-                )
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise SchemaValidationError(
-                    "stdin is not valid JSON", {"position": exc.pos}
-                ) from exc
-            try:
-                schema = InputSchema.model_validate(payload)
-            except ValidationError as exc:
-                raise SchemaValidationError(
-                    "input does not satisfy the InputSchema contract",
-                    {
-                        "errors": exc.errors(
-                            include_input=False, include_url=False, include_context=False
-                        )
-                    },
-                ) from exc
-
-        message = spawn_daemon(schema, session_dir=session_dir)
-        kind = message["kind"]
-        if kind == "success" and output_fmt == "env":
-            out = OutputSchema.model_validate(message["payload"])
-            sys.stdout.write(format_exports(render_env(out)))
-        else:
-            sys.stdout.write(json.dumps(message["payload"]) + "\n")
-        sys.stdout.flush()
-        if kind == "required_failure":
-            sys.exit(2)
-        if kind == "daemon_error":
-            sys.exit(4)
-        if kind == "session_active":
-            sys.exit(3)
-        # kind == "success" → exit 0 (default)
+        _emit_start_result(spawn_daemon(schema, session_dir=session_dir), output_fmt)
     except click.UsageError:
         raise
     except TunstrapError as exc:
@@ -633,7 +620,7 @@ def run_command(  # pylint: disable=too-many-arguments,too-many-locals,too-many-
             # config_path.
             schema.daemon.materialize = True
         elif connection is not None:
-            schema = _schema_from_flags(
+            schema = build_flag_schema(
                 connection,
                 ssh_key=ssh_key,
                 ssh_key_passphrase=ssh_key_passphrase,

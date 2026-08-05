@@ -1,9 +1,17 @@
-"""Build a single-node InputSchema from CLI flags (issue #6)."""
+"""Build an InputSchema from the CLI's input channels (issue #6).
+
+One module per input channel would be three modules for one concern. The
+three ``build_*`` entry points below are the channels a caller can supply an
+``InputSchema`` through — connection flags, stdin JSON, and an environment
+variable — and they share the parsing helpers and the single failure shape
+(``SchemaValidationError``, exit 1) that the CLI contract requires.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -121,6 +129,71 @@ def build_single_node_schema(
     except ValidationError as exc:
         raise SchemaValidationError(
             "CLI input does not satisfy the schema",
+            {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
+        ) from exc
+
+
+def build_flag_schema(
+    connection: str,
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+    force_materialize: bool = False,
+) -> InputSchema:
+    """Assemble the flag-mode ``InputSchema`` straight from Click's parameters.
+
+    ``--ssh-password-stdin`` is read here rather than by the caller because the
+    password is one of the assembled fields, and reading it anywhere else would
+    put a second consumer on the same stdin the conflict guard inspects.
+    ``force_materialize`` is the verb-level override (``run`` always, ``start
+    --output env``); it can only turn materialization on, never off.
+    """
+    ssh_password: str | None = None
+    if ssh_password_stdin:
+        ssh_password = sys.stdin.readline().rstrip("\n")
+    daemon = DaemonOptions(
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize or force_materialize,
+        log_file=log_file,
+    )
+    return build_single_node_schema(
+        connection=connection,
+        ssh_key=ssh_key,
+        ssh_key_passphrase=ssh_key_passphrase,
+        ssh_password=ssh_password,
+        targets=targets,
+        kube=kube,
+        fetch=fetch,
+        daemon_opts=daemon,
+    )
+
+
+def build_schema_from_stdin(raw: str) -> InputSchema:
+    """Decode and validate an ``InputSchema`` from ``start``'s stdin payload.
+
+    The stdin twin of :func:`build_schema_from_env`, with the same three
+    failure shapes (absent, undecodable, contract violation) and the same
+    mandatory ``include_input=False`` scrub — a malformed node's offending
+    ``input`` is the ``ssh_pkey`` PEM itself.
+    """
+    if not raw.strip():
+        raise SchemaValidationError("no input: provide USER@HOST[:PORT] or JSON on stdin", {})
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaValidationError("stdin is not valid JSON", {"position": exc.pos}) from exc
+    try:
+        return InputSchema.model_validate(payload)
+    except ValidationError as exc:
+        raise SchemaValidationError(
+            "input does not satisfy the InputSchema contract",
             {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
         ) from exc
 
