@@ -31,10 +31,9 @@ tunstrap = "tunstrap.cli:main"
 # Second console entry: the OpenTofu proxy. uv tool install yields both
 # tunstrap and tunstrap_tofu, so terraform_binary points at a stable installed
 # path with nothing copied into the consumer's repo. The pass-through branches
-# execvp tofu without importing tunstrap.cli, keeping their cost at interpreter
-# startup plus the package __init__ (~43 ms), well under the ~225 ms a naive
-# entry point that imported cli on every invocation would cost. See
-# tunstrap/tofu_proxy.py and docs/recipe_terragrunt.md.
+# execvp tofu without importing tunstrap.cli, keeping the fast path import-lean
+# by design. See tunstrap/tofu_proxy.py's module docstring ("Cost discipline")
+# for the measured numbers and docs/recipe_terragrunt.md for the trade.
 tunstrap_tofu = "tunstrap.tofu_proxy:main"
 
 [project.urls]
