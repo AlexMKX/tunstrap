@@ -93,7 +93,7 @@ async def open_local_forwards(
                     },
                 )
             ports[handle] = actual_port
-    except BaseException:  # pylint: disable=broad-exception-caught
+    except BaseException:
         # Caller never sees the listeners on failure; cleanup must cover
         # KeyboardInterrupt / CancelledError to avoid leaking SSH channels.
         # Re-raised immediately so the failure propagates intact.
