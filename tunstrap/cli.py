@@ -739,7 +739,6 @@ def run_via_env_input(  # pylint: disable=too-many-arguments
     output_var: str,
     child_cmd: list[str],
     *,
-    grace_seconds: int = 10,
     suppress_kubeconfig: bool = False,
 ) -> None:
     """Invoke ``run``'s env-input mode programmatically, without re-parsing.
@@ -750,6 +749,9 @@ def run_via_env_input(  # pylint: disable=too-many-arguments
     check, the whole spawn window, and the teardown path are shared with the CLI
     entry — not duplicated. ``run_command`` always exits; the trailing
     ``sys.exit`` is the unreachable safety net for readers and type checkers.
+
+    No ``grace_seconds`` parameter: ``run_command`` overwrites it from
+    ``schema.daemon.shutdown_grace_seconds`` before use, same as ``--input-env``.
 
     Generic on purpose: this helper carries no Terraform vocabulary, only the
     variables and flags a programmatic ``run`` caller supplies. The Terraform-
@@ -785,7 +787,8 @@ def run_via_env_input(  # pylint: disable=too-many-arguments
             input_env=input_env,
             output_var=output_var,
             session_dir=None,
-            grace_seconds=grace_seconds,
+            # run_command's own default (cli.py:578); overwritten before use.
+            grace_seconds=10,
             args=tuple(child_cmd),
             suppress_kubeconfig=suppress_kubeconfig,
         )
