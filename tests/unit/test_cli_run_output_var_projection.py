@@ -10,10 +10,14 @@ durable storage that is not treated as a secret.
 ``content_b64`` (the whole patched kubeconfig, which embeds that key) and
 ``client_certificate_data`` (no key, but it discloses the Kubernetes RBAC
 identity). None are needed here: ``run`` forces ``materialize=True``, so the
-consumer chain reads ``path`` off disk.
+consumer chain reads ``path`` off disk. The unified projection (``UnifiedKubeRef``)
+narrows further than credential removal alone -- it carries exactly
+``{path, context, endpoint}``, dropping every other field on
+``KubeTargetOutput`` (``cluster_name``, ``local_port``, ``tls_server_name``,
+``certificate_authority_data``) even though none of those four are credentials.
 
-Code: tunstrap/envrender.py (render_output_var), tunstrap/schemas.py
-(RunKubeTarget), tunstrap/cli.py (_build_child_env)
+Code: tunstrap/envrender.py (render_unified_output, render_output_var),
+tunstrap/schemas.py (UnifiedKubeRef), tunstrap/cli.py (_build_child_env)
 Assertion: the *literal bytes* of the fixture's key material must not appear
 anywhere in the child environment, paired with an exact-equality check on the
 surviving fields so a payload that stopped being produced cannot satisfy the
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -34,7 +39,6 @@ from click.testing import CliRunner
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
 from tunstrap.cli import main
-from tunstrap.schemas import RunKubeTarget
 
 pytestmark = pytest.mark.unit
 
@@ -92,18 +96,21 @@ SECRET_KUBE: dict[str, Any] = {
     "path": KUBE_PATH,
 }
 
-SECRET_PAYLOAD: dict[str, Any] = {
-    "connections": {
-        "node": {
-            "ports": {"db": 5432},
-            "fetch_files": {},
-            "kube_targets": {"k3s": SECRET_KUBE},
-        }
-    },
-    "pid": 99,
-    "session_dir": "/s",
-    "started_at": "2026-07-31T00:00:00Z",
-}
+
+def _secret_payload(session_dir: str) -> dict[str, Any]:
+    return {
+        "connections": {
+            "node": {
+                "ports": {"db": 5432},
+                "fetch_files": {},
+                "kube_targets": {"k3s": SECRET_KUBE},
+            }
+        },
+        "pid": 99,
+        "session_dir": session_dir,
+        "started_at": "2026-07-31T00:00:00Z",
+    }
+
 
 INPUT_PAYLOAD = json.dumps(
     {
@@ -153,9 +160,9 @@ def _spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return seen
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, spawn: list[Any]) -> dict[str, str]:
+def _run(monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path) -> dict[str, str]:
     """Drive one full `run --input-env VAR --output-var TF_VAR_tunstrap`."""
-    spawn[0]({"kind": "success", "payload": SECRET_PAYLOAD})
+    spawn[0]({"kind": "success", "payload": _secret_payload(str(tmp_path))})
     monkeypatch.setenv(VAR, INPUT_PAYLOAD)
     result = CliRunner().invoke(
         main,
@@ -167,7 +174,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, spawn: list[Any]) -> dict[str, str]:
 
 
 def test_output_var_never_carries_kube_private_key_material(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """No kube credential reaches TF_VAR_tunstrap, nor any other child variable.
 
@@ -175,7 +182,7 @@ def test_output_var_never_carries_kube_private_key_material(
     a change that moved the payload to a different name could not quietly
     reopen the hole.
     """
-    env = _run(monkeypatch, spawn)
+    env = _run(monkeypatch, spawn, tmp_path)
     blob = "\n".join(f"{k}={v}" for k, v in env.items())
 
     assert CLIENT_KEY_B64 not in blob, "kube client PRIVATE KEY reached the child environment"
@@ -184,67 +191,67 @@ def test_output_var_never_carries_kube_private_key_material(
     assert CLIENT_CERT_B64 not in blob, "kube client certificate (RBAC identity) reached the child"
 
     # Gone from the structure, not merely renamed.
-    target = json.loads(env["TF_VAR_tunstrap"])["connections"]["node"]["kube_targets"]["k3s"]
+    target = json.loads(env["TF_VAR_tunstrap"])["nodes"]["node"]["kube"]["k3s"]
     assert "client_key_data" not in target
     assert "client_certificate_data" not in target
     assert "content_b64" not in target
 
 
 def test_output_var_keeps_every_field_the_consumer_chain_reads(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """The projection is exact: these fields survive, and nothing else does.
 
     This is the anti-vacuity half of the pair above. If the payload stopped
     being produced, or the kube target collapsed to ``{}``, every absence
-    assertion would still pass while this one fails.
+    assertion would still pass while this one fails. The expected dict is
+    narrower than credential removal alone: ``UnifiedKubeRef`` carries exactly
+    ``{path, context, endpoint}`` -- ``cluster_name``, ``local_port``,
+    ``tls_server_name`` and ``certificate_authority_data`` are also gone,
+    because the design narrows to references only, not just to
+    non-credentials.
     """
-    env = _run(monkeypatch, spawn)
-    target = json.loads(env["TF_VAR_tunstrap"])["connections"]["node"]["kube_targets"]["k3s"]
+    env = _run(monkeypatch, spawn, tmp_path)
+    target = json.loads(env["TF_VAR_tunstrap"])["nodes"]["node"]["kube"]["k3s"]
 
     assert target == {
-        "cluster_name": "probe-cluster",
-        "context_name": "probe-context",
-        "local_port": 41111,
-        "endpoint": "https://127.0.0.1:41111",
-        "tls_server_name": "probe-control-plane",
-        "certificate_authority_data": CA_B64,
         "path": KUBE_PATH,
+        "context": "probe-context",
+        "endpoint": "https://127.0.0.1:41111",
     }
-    # The single field the whole e2e chain reads (tests/e2e/module/main.tf).
-    assert target["path"] == KUBE_PATH
 
 
 def test_output_var_projection_leaves_the_rest_of_the_envelope_intact(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
-    """Only kube credentials are dropped; the envelope is otherwise unchanged."""
-    env = _run(monkeypatch, spawn)
+    """Only kube credentials are dropped; the envelope is otherwise unchanged
+    in shape, up one level under the unified structure's session/nodes split."""
+    env = _run(monkeypatch, spawn, tmp_path)
     decoded = json.loads(env["TF_VAR_tunstrap"])
 
-    assert decoded["pid"] == 99
-    assert decoded["session_dir"] == "/s"
-    assert decoded["started_at"] == "2026-07-31T00:00:00Z"
-    assert decoded["connections"]["node"]["ports"] == {"db": 5432}
+    assert decoded["session"]["pid"] == 99
+    assert decoded["session"]["session_dir"] == str(tmp_path)
+    assert decoded["session"]["started_at"] == "2026-07-31T00:00:00Z"
+    assert decoded["nodes"]["node"]["ports"] == {"db": "127.0.0.1:5432"}
 
 
-def test_projection_is_an_allow_list_so_a_new_secret_field_cannot_leak() -> None:
-    """A field added to the source model is dropped until added here on purpose.
-
-    ``RunKubeTarget`` uses ``extra="ignore"``, which makes the projection fail
-    closed. A deny-list (``model_dump(exclude=...)``) would export each newly
-    added field by default, which is how this class of bug comes back.
-
-    Asserted on the model rather than through the CLI because
-    ``KubeTargetOutput`` is ``extra="forbid"``, so a hypothetical future field
-    cannot be pushed through the command without first being declared there.
+def test_render_unified_output_never_calls_model_validate_on_kube_data() -> None:
+    """The allow-list property now holds by construction, not by an
+    extra='ignore' projection model. render_unified_output builds
+    UnifiedKubeRef from three explicit keyword arguments (path, context,
+    endpoint) -- a hypothetical field added to KubeTargetOutput later cannot
+    leak through without someone editing that constructor call by hand.
+    test_output_var_keeps_every_field_the_consumer_chain_reads's exact-equality
+    assertion already proves this end-to-end; this test pins the mechanism
+    directly against the source so the property cannot silently regress to a
+    model_dump of untrusted kube data.
     """
-    projected = RunKubeTarget.model_validate(
-        {**SECRET_KUBE, "future_bearer_token": "TUNSTRAP-UNIT-A-FIELD-ADDED-LATER"}
-    ).model_dump(mode="json")
+    import inspect
 
-    assert "future_bearer_token" not in projected, "a newly added field leaked by default"
-    assert "client_key_data" not in projected
-    assert "client_certificate_data" not in projected
-    assert "content_b64" not in projected
-    assert projected["path"] == KUBE_PATH
+    from tunstrap import envrender
+
+    source = inspect.getsource(envrender.render_unified_output)
+    assert "UnifiedKubeRef(" in source
+    assert (
+        ".model_validate(" not in source
+    ), "kube data must never be validated from untrusted input"

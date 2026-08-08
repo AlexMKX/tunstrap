@@ -22,14 +22,15 @@ from tunstrap.cli_input import (
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
     format_exports,
+    materialized_output_path,
     predicted_env_keys,
-    render_env,
+    render_kube_env,
     render_output_var,
+    write_materialized_output,
 )
 from tunstrap.exceptions import (
     DaemonError,
     DaemonHandshakeError,
-    MultiNodeEnvUnsupported,
     TunstrapError,
     exit_code_for,
 )
@@ -157,9 +158,12 @@ def _start_schema(
     stdin, and connection flags require a connection argument. Stdin is not
     consumed under ``--ssh-password-stdin`` — the password read owns it.
 
-    ``--output env`` forces materialization (``render_env`` needs a kubeconfig
-    on disk) in flag mode only; a stdin payload's ``daemon.materialize`` is the
-    caller's own statement and is left alone.
+    ``--output env`` forces materialization (``render_kube_env`` needs a
+    kubeconfig on disk) in both channels: flag mode via ``force_materialize``,
+    and a stdin payload here, overriding its own ``daemon.materialize`` --
+    otherwise a stdin payload declaring ``kube_targets`` with
+    ``materialize: false`` would reach the unconditional ``render_kube_env``
+    call with an unmaterialized path and raise a bare ``ValueError``.
     """
     if connection is None:
         if _conn_flags_present(
@@ -171,7 +175,10 @@ def _start_schema(
             fetch=fetch,
         ):
             raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
-        return build_schema_from_stdin(sys.stdin.read())
+        schema = build_schema_from_stdin(sys.stdin.read())
+        if output_fmt == "env":
+            schema.daemon.materialize = True
+        return schema
 
     if not ssh_password_stdin and sys.stdin.read().strip():
         raise click.UsageError(
@@ -198,12 +205,21 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     Success under ``--output env`` is the only combination rendered as shell
     exports; everything else is the raw JSON payload. A ``success`` kind (or an
     unrecognised one) returns instead of exiting, leaving Click to exit 0 —
-    the same fall-through the original if-chain had.
+    the same fall-through the original if-chain had. ``--output env`` also
+    materializes ``output.json`` under the session dir, same as ``run``, so a
+    consumer reading ``TUNSTRAP_OUTPUT_FILE`` sees the same contract either way.
     """
     kind = message["kind"]
     if kind == "success" and output_fmt == "env":
         out = OutputSchema.model_validate(message["payload"])
-        sys.stdout.write(format_exports(render_env(out)))
+        write_materialized_output(out)
+        env = {
+            "TUNSTRAP_SESSION_DIR": out.session_dir,
+            "TUNSTRAP_PID": str(out.pid),
+            "TUNSTRAP_OUTPUT_FILE": materialized_output_path(out.session_dir),
+        }
+        env.update(render_kube_env(out))
+        sys.stdout.write(format_exports(env))
     else:
         sys.stdout.write(json.dumps(message["payload"]) + "\n")
     sys.stdout.flush()
@@ -366,13 +382,14 @@ def _build_child_env(
     output: OutputSchema,
     *,
     output_var: str | None,
-    inject_scalars: bool,
     input_env: str | None,
     suppress_kubeconfig: bool = False,
 ) -> dict[str, str]:
     """Inherited env, scrubbed of the input payload, plus the exported channels.
 
-    ``inject_scalars`` is decided pre-spawn from the input node count.
+    Unconditional on node count: the three session scalars
+    (``TUNSTRAP_SESSION_DIR``/``_PID``/``_OUTPUT_FILE``) and the kube channel
+    are injected regardless of how many nodes or kube targets exist.
 
     ``input_env`` names the variable holding the InputSchema, whose ``ssh_pkey``
     is an SSH private key. ``run`` is the one component that knows this variable
@@ -385,23 +402,23 @@ def _build_child_env(
     ``output_var`` carries ``render_output_var``'s projection, not the whole
     envelope: its consumer persists the value into an OpenTofu plan file.
 
-    ``suppress_kubeconfig`` drops ``KUBECONFIG`` — both anything inherited and
-    anything ``render_env`` injects for a single-node kube payload. The proxy
-    uses this so a broken ``TF_VAR_tunstrap`` → ``config_path`` chain cannot
-    silently reach the cluster through a materialized-file ``KUBECONFIG`` (the
-    property the consumer shim used to buy with ``env -u KUBECONFIG``).
+    ``suppress_kubeconfig`` drops ``KUBECONFIG``/``KUBE_CONFIG_PATH``/
+    ``KUBE_CONFIG_PATHS`` — both anything inherited and anything
+    ``render_kube_env`` injects. The proxy uses this so a broken
+    ``TF_VAR_tunstrap`` → ``config_path`` chain cannot silently reach the
+    cluster through a materialized-file ``KUBECONFIG`` (the property the
+    consumer shim used to buy with ``env -u KUBECONFIG``).
     """
     child_env = dict(os.environ)
-    if suppress_kubeconfig:
-        child_env.pop("KUBECONFIG", None)
     if input_env is not None:
         child_env.pop(input_env, None)
-    if inject_scalars:
-        child_env.update(render_env(output))
-        if suppress_kubeconfig:
-            # render_env places KUBECONFIG last, pointing at the same materialized
-            # file config_path uses; it IS the silent fallback suppression removes.
-            child_env.pop("KUBECONFIG", None)
+    child_env["TUNSTRAP_SESSION_DIR"] = output.session_dir
+    child_env["TUNSTRAP_PID"] = str(output.pid)
+    child_env["TUNSTRAP_OUTPUT_FILE"] = materialized_output_path(output.session_dir)
+    child_env.update(render_kube_env(output))
+    if suppress_kubeconfig:
+        for key in ("KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"):
+            child_env.pop(key, None)
     if output_var is not None:
         child_env[output_var] = render_output_var(output)
     return child_env
@@ -468,22 +485,23 @@ def _run_child(
     cmd: list[str],
     *,
     output_var: str | None,
-    inject_scalars: bool,
     input_env: str | None,
     suppress_kubeconfig: bool = False,
 ) -> int:
-    """Validate the success payload, build the child env, run the child.
+    """Validate the success payload, materialize output.json, run the child.
 
     Every statement here runs inside ``_supervise_child``'s teardown ``try``,
     including ``OutputSchema.model_validate`` — which is exactly the case an
     earlier design left unguarded: a malformed success payload orphaned the
     daemon, because the session path was recovered from that same payload.
+    Materialization runs unconditionally, before the child starts, so
+    ``TUNSTRAP_OUTPUT_FILE`` always names a file that already exists.
     """
     out = OutputSchema.model_validate(payload)
+    write_materialized_output(out)
     child_env = _build_child_env(
         out,
         output_var=output_var,
-        inject_scalars=inject_scalars,
         input_env=input_env,
         suppress_kubeconfig=suppress_kubeconfig,
     )
@@ -515,7 +533,6 @@ def _supervise_child(  # pylint: disable=too-many-arguments
     cmd: list[str],
     *,
     output_var: str | None,
-    inject_scalars: bool,
     input_env: str | None,
     session_dir: str,
     grace_seconds: int,
@@ -540,7 +557,6 @@ def _supervise_child(  # pylint: disable=too-many-arguments
             payload,
             cmd,
             output_var=output_var,
-            inject_scalars=inject_scalars,
             input_env=input_env,
             suppress_kubeconfig=suppress_kubeconfig,
         )
@@ -613,11 +629,11 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
             schema = build_schema_from_env(input_env)
             grace_seconds = schema.daemon.shutdown_grace_seconds
             # The one place `run` mutates the supplied schema. It is an
-            # invariant of the verb, not a flag precedence rule: render_env
-            # needs a materialized kubeconfig path (envrender.py:42-43), and
-            # an unmaterialized target would hand --output-var consumers
-            # `path: null` and the kubernetes/helm providers an empty
-            # config_path.
+            # invariant of the verb, not a flag precedence rule:
+            # render_kube_env needs a materialized kubeconfig path
+            # (envrender.py), and an unmaterialized target would hand
+            # --output-var consumers `path: null` and the kubernetes/helm
+            # providers an empty config_path.
             schema.daemon.materialize = True
         elif connection is not None:
             schema = build_flag_schema(
@@ -637,15 +653,6 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
             raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
         if output_var is not None:
             _validate_output_var(output_var, schema)
-        if output_var is None and len(schema.nodes) != 1:
-            # Decided from the *input* node count so it can never orphan a
-            # daemon: TUNSTRAP_<TARGET>_* has no node dimension, and
-            # --output-var is the node-keyed channel that does.
-            raise MultiNodeEnvUnsupported(
-                "multi-node input requires --output-var; TUNSTRAP_* scalars are single-node only",
-                {"nodes": sorted(schema.nodes)},
-            )
-        inject_scalars = len(schema.nodes) == 1
     except TunstrapError as exc:
         # The validation window: nothing has been minted and nothing spawned,
         # so there is nothing to clean up. A click.UsageError is unrelated to
@@ -699,7 +706,6 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
             payload,
             cmd,
             output_var=output_var,
-            inject_scalars=inject_scalars,
             input_env=input_env,
             session_dir=session_path,
             grace_seconds=grace_seconds,
@@ -707,11 +713,12 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
             suppress_kubeconfig=suppress_kubeconfig,
         )
     except TunstrapError as exc:
-        # An expected outcome keeps its own exit code. A lone required:false
-        # node that failed yields a success envelope with no connections
-        # (manager.py:99-107), and render_env raises MultiNodeEnvUnsupported
-        # here — exit 1, not "unexpected failure during run". Teardown has
-        # already run in _supervise_child's finally, as it has below.
+        # An expected outcome keeps its own exit code, mapped through
+        # exit_code_for rather than the generic "unexpected failure during
+        # run". Nothing in the current post-spawn window raises a
+        # TunstrapError, but a caller of _run_child's helpers doing so in the
+        # future gets its own exit code instead of a blanket exit 4. Teardown
+        # has already run in _supervise_child's finally, as it has below.
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
         returncode = exit_code_for(exc)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught

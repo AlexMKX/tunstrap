@@ -46,6 +46,15 @@ def test_fetched_file_rejects_both_branches() -> None:
         FetchedFile(content_b64="YQ==", size=1, sha256="x", error="x")
 
 
+def test_fetched_file_path_defaults_none_and_is_not_part_of_the_xor() -> None:
+    """path defaults to None and is set independently by materialization,
+    mirroring KubeTargetOutput.path -- it is not part of the success/error xor."""
+    ff = FetchedFile(content_b64="YQ==", size=1, sha256="ca978112...")
+    assert ff.path is None
+    materialized = ff.model_copy(update={"path": "/s/tunnel-data/a-kubeconfig"})
+    assert materialized.path == "/s/tunnel-data/a-kubeconfig"
+
+
 def test_node_output_default_fetch_files_empty() -> None:
     """NodeOutput.fetch_files defaults to an empty dict when omitted."""
     no = NodeOutput(ports={"p": 40000})

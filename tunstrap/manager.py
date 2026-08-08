@@ -159,6 +159,8 @@ class TunnelManager:
                 runtime.listeners = []
                 return runtime
             runtime.fetched_files = fetched
+            if self._session is not None:
+                self._materialize_fetch_files(name, runtime.fetched_files)
             if required_failures:
                 runtime.error = f"required fetch_files failed: {required_failures}"
                 await close_transport(runtime.conn, runtime.listeners)
@@ -184,11 +186,7 @@ class TunnelManager:
             runtime.kube_targets = kube_out
             runtime.kube_warnings = kube_warn
             if self._session is not None:
-                for kname, kout in kube_out.items():
-                    path = self._session.materialize(
-                        f"{name}-{kname}", base64.b64decode(kout.content_b64)
-                    )
-                    runtime.kube_targets[kname] = kout.model_copy(update={"path": path})
+                self._materialize_kube_targets(name, runtime.kube_targets)
             if kube_required:
                 runtime.error = f"required kube_targets failed: {kube_required}"
                 await close_transport(runtime.conn, runtime.listeners)
@@ -199,3 +197,31 @@ class TunnelManager:
         runtime.success = True
         self._runtimes.append(runtime)
         return runtime
+
+    def _materialize_kube_targets(
+        self, node_name: str, kube_out: dict[str, KubeTargetOutput]
+    ) -> None:
+        """Write each kube target's patched kubeconfig to tunnel-data/<node>-<name>, set .path."""
+        assert self._session is not None
+        for kname, kout in kube_out.items():
+            path = self._session.materialize(
+                f"{node_name}-{kname}", base64.b64decode(kout.content_b64)
+            )
+            kube_out[kname] = kout.model_copy(update={"path": path})
+
+    def _materialize_fetch_files(self, node_name: str, fetched: dict[str, FetchedFile]) -> None:
+        """Write each successfully fetched file to tunnel-data/<node>-<name>, set .path.
+
+        Mirrors the kube materialization step above, using the atomic-replace
+        primitive (not the mode-fixed-but-non-atomic ``materialize``) because
+        this write has no live SessionDir-owning caller to serialize behind.
+        A failed fetch (``.error`` set) materializes nothing.
+        """
+        assert self._session is not None
+        for fname, ff in fetched.items():
+            if ff.error is not None or ff.content_b64 is None:
+                continue
+            path = self._session.materialize_atomic(
+                f"{node_name}-{fname}", base64.b64decode(ff.content_b64)
+            )
+            fetched[fname] = ff.model_copy(update={"path": path})

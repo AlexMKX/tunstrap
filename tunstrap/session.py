@@ -30,6 +30,27 @@ from tunstrap.identity import (
 _TUNNEL_DATA = "tunnel-data"
 
 
+def atomic_write(path: Path, content: bytes) -> None:
+    """Write ``content`` to ``path`` (mode 0600) via temp file + ``os.replace``.
+
+    True atomic replace, not ``_write_file``'s ``O_TRUNC``: a truncated file at
+    the final path is indistinguishable from a valid short one to a naive
+    reader, while a temp file plus ``os.replace`` guarantees only a complete
+    old or complete new file is ever observable at ``path`` -- load-bearing
+    for a process killed mid-write. ``O_EXCL`` on the temp name guards against
+    a colliding concurrent writer; the mode is fixed at the temp file's
+    creation, so ``os.replace`` never exposes a wider-than-0600 window.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, content)
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, path)
+
+
 class SessionError(Exception):
     """The session dir or its tunnel-data subdir failed validation."""
 
@@ -121,7 +142,18 @@ class SessionDir:
         """Write `content` to tunnel-data/<name> (mode 0600); return the path."""
         return self._write_file(name, content)
 
-    def _write_file(self, name: str, content: bytes) -> str:
+    def materialize_atomic(self, name: str, content: bytes) -> str:
+        """Write `content` to tunnel-data/<name> via atomic replace; return the path.
+
+        Same name-safety rules as ``materialize``, but the true-atomic write
+        primitive (temp file + ``os.replace``) fetched-file materialization
+        needs -- see ``atomic_write``.
+        """
+        path = self._validated_path(name)
+        atomic_write(path, content)
+        return str(path)
+
+    def _validated_path(self, name: str) -> Path:
         if "/" in name or "\\" in name:
             raise SessionError(f"unsafe materialized file name: {name!r}")
         if name in (".", ".."):
@@ -129,6 +161,10 @@ class SessionDir:
         path = self._data / name
         if path.resolve().parent != self._data.resolve():
             raise SessionError(f"unsafe materialized file name: {name!r}")
+        return path
+
+    def _write_file(self, name: str, content: bytes) -> str:
+        path = self._validated_path(name)
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
             os.write(fd, content)

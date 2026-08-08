@@ -43,13 +43,14 @@ def _payload(**daemon: Any) -> str:
     return json.dumps(body)
 
 
-def _success_payload() -> dict[str, Any]:
+def _success_payload(session_dir: str | None) -> dict[str, Any]:
+    assert session_dir is not None
     return {
         "kind": "success",
         "payload": {
             "connections": {"node": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}}},
             "pid": 99,
-            "session_dir": "/s",
+            "session_dir": session_dir,
             "started_at": "now",
         },
     }
@@ -82,7 +83,7 @@ def _captured(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         schema: Any, session_dir: str | None = None, *, input_env: str | None = None
     ) -> dict[str, Any]:
         seen.append(schema)
-        return _success_payload()
+        return _success_payload(session_dir)
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -356,8 +357,10 @@ def test_start_conn_flag_without_connection_rejected() -> None:
     assert res.exit_code == 64
 
 
-def test_start_output_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--output env prints export lines including TUNSTRAP_DB_PORT."""
+def test_start_output_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """--output env prints the three survivors plus the kube channel, materializing output.json."""
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
 
     def fake_spawn(
         schema: Any, session_dir: str | None = None, *, input_env: str | None = None
@@ -369,7 +372,7 @@ def test_start_output_env(monkeypatch: pytest.MonkeyPatch) -> None:
                     "h": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}}
                 },
                 "pid": 7,
-                "session_dir": "/s",
+                "session_dir": str(payload_session_dir),
                 "started_at": "now",
             },
         }
@@ -389,4 +392,78 @@ def test_start_output_env(monkeypatch: pytest.MonkeyPatch) -> None:
         input="secret\n",
     )
     assert res.exit_code == 0, res.output
-    assert "export TUNSTRAP_DB_PORT='5432'" in res.output
+    assert f"export TUNSTRAP_SESSION_DIR='{payload_session_dir}'" in res.output
+    assert "export TUNSTRAP_PID='7'" in res.output
+    materialized = payload_session_dir / "tunnel-data" / "output.json"
+    assert f"export TUNSTRAP_OUTPUT_FILE='{materialized}'" in res.output
+    assert "TUNSTRAP_DB_PORT" not in res.output
+    assert "KUBECONFIG" not in res.output, "no kube_targets in this payload"
+    assert materialized.exists()
+    assert stat.S_IMODE(materialized.stat().st_mode) == 0o600
+
+
+def test_stdin_payload_output_env_forces_materialize_for_kube_targets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stdin payload declaring materialize: false and kube_targets under
+    --output env must not reach render_kube_env with an unmaterialized path
+    (a bare ValueError, not a typed error) -- option (a): --output env forces
+    daemon.materialize = True for the stdin channel too, matching flag mode's
+    own force_materialize precedent."""
+    captured: dict[str, Any] = {}
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
+
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        captured["schema"] = schema
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "h": {
+                        "ports": {},
+                        "fetch_files": {},
+                        "kube_targets": {
+                            "k3s": {
+                                "cluster_name": "c",
+                                "context_name": "ctx",
+                                "local_port": 7000,
+                                "endpoint": "https://127.0.0.1:7000",
+                                "tls_server_name": "c",
+                                "certificate_authority_data": "Y2E=",
+                                "client_certificate_data": "Y2VydA==",
+                                "client_key_data": "a2V5",
+                                "content_b64": "a3ViZWNvbmZpZw==",
+                                "path": str(payload_session_dir / "tunnel-data" / "k3s"),
+                            }
+                        },
+                    }
+                },
+                "pid": 7,
+                "session_dir": str(payload_session_dir),
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    stdin_payload = json.dumps(
+        {
+            "nodes": {
+                "h": {
+                    "host": "h",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "kube_targets": {"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}},
+                }
+            },
+            "daemon": {"materialize": False},
+        }
+    )
+    res = CliRunner().invoke(main, ["start", "--output", "env"], input=stdin_payload)
+    assert res.exit_code == 0, res.output
+    assert (
+        captured["schema"].daemon.materialize is True
+    ), "--output env must force materialize=True for a stdin payload too"
+    assert f"export KUBECONFIG='{payload_session_dir / 'tunnel-data' / 'k3s'}'" in res.output

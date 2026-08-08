@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -59,13 +60,13 @@ def _conn(**ports: int) -> dict[str, Any]:
     return {"ports": dict(ports), "fetch_files": {}, "kube_targets": {}}
 
 
-def _success(connections: dict[str, Any]) -> dict[str, Any]:
+def _success(connections: dict[str, Any], *, session_dir: str) -> dict[str, Any]:
     return {
         "kind": "success",
         "payload": {
             "connections": connections,
             "pid": 99,
-            "session_dir": "/s",
+            "session_dir": session_dir,
             "started_at": "2026-07-31T00:00:00Z",
         },
     }
@@ -269,6 +270,7 @@ def test_tunnel_decision_runs_tofu_in_process(
     capturing_execvp: list[list[str]],
     spawn: list[Any],
     cmd: str,
+    tmp_path: Path,
 ) -> None:
     """Everything outside the bypass set tunnels — honouring the consumer opt-in.
 
@@ -277,7 +279,7 @@ def test_tunnel_decision_runs_tofu_in_process(
     cluster-only commands would have bypassed.
     """
     monkeypatch.setenv(VAR, _payload())
-    spawn[0](_success({"node": _conn(db=5432)}))
+    spawn[0](_success({"node": _conn(db=5432)}, session_dir=str(tmp_path)))
     with pytest.raises(SystemExit) as excinfo:  # run_command exits with child code
         _run_main(cmd.split())
     assert excinfo.value.code == 0
@@ -290,7 +292,7 @@ def test_tunnel_decision_runs_tofu_in_process(
 
 
 def test_tunnelled_invokes_run_with_input_env_and_output_var(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """The tunnelled branch calls run with the proxy's fixed variable names."""
     seen_kwargs: dict[str, Any] = {}
@@ -302,7 +304,7 @@ def test_tunnelled_invokes_run_with_input_env_and_output_var(
 
     monkeypatch.setattr(cli_mod.run_command, "callback", _capture)
     monkeypatch.setenv(VAR, _payload())
-    spawn[0](_success({"node": _conn(db=5432)}))
+    spawn[0](_success({"node": _conn(db=5432)}, session_dir=str(tmp_path)))
     with pytest.raises(SystemExit):
         _run_main(["plan"])
     assert seen_kwargs["input_env"] == "TUNSTRAP_INPUT"
@@ -312,24 +314,23 @@ def test_tunnelled_invokes_run_with_input_env_and_output_var(
 
 
 def test_tunnelled_suppresses_kubeconfig_in_child_env(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """A single-node kube payload must NOT leave KUBECONFIG in tofu's env.
 
     This is the property the shell shim preserved with ``env -u KUBECONFIG``:
     a broken ``TF_VAR_tunstrap`` → ``config_path`` chain must fail rather than
-    silently reach the cluster through KUBECONFIG. ``render_env`` sets
-    KUBECONFIG last (to the same materialized file ``config_path`` uses), so
-    without suppression the injected value IS the silent fallback. The proxy
-    controls the child env in-process and drops KUBECONFIG — the property
-    without the ``env -u`` incantation.
+    silently reach the cluster through KUBECONFIG. ``_build_child_env``'s
+    unconditional ``suppress_kubeconfig`` pop covers both anything inherited
+    and anything ``render_kube_env`` injects, so the proxy buys the
+    ``env -u KUBECONFIG`` property without the incantation.
 
     This is the one place the assertion can fire: the input has one node with
-    a kube target, so render_env WOULD inject KUBECONFIG; only suppression
-    removes it.
+    a kube target, so ``render_kube_env`` WOULD inject KUBECONFIG; only
+    suppression removes it.
     """
     # An operator-inherited KUBECONFIG would mask a missing suppression only
-    # if render_env did not inject; here render_env does inject (kube target
+    # if render_kube_env did not inject; here it does inject (kube target
     # present), so the assertion catches both an inherited and an injected
     # KUBECONFIG. Clear the inherited one to isolate the injected path.
     monkeypatch.delenv("KUBECONFIG", raising=False)
@@ -351,7 +352,13 @@ def test_tunnelled_suppresses_kubeconfig_in_child_env(
         "content_b64": "a3ViZWNvbmZpZw==",
         "path": "/s/tunnel-data/node-k3s",
     }
-    spawn[0](_success({"node": {"ports": {}, "fetch_files": {}, "kube_targets": {"k3s": kube}}}))
+    session_dir = str(tmp_path)
+    spawn[0](
+        _success(
+            {"node": {"ports": {}, "fetch_files": {}, "kube_targets": {"k3s": kube}}},
+            session_dir=session_dir,
+        )
+    )
     with pytest.raises(SystemExit) as excinfo:
         _run_main(["plan"])
     assert excinfo.value.code == 0
@@ -363,29 +370,26 @@ def test_tunnelled_suppresses_kubeconfig_in_child_env(
     # The structured channel the module decodes config_path from is still present.
     assert "TF_VAR_tunstrap" in FakePopen.last_env
     # The non-KUBECONFIG scalars are untouched (suppression is targeted).
-    assert FakePopen.last_env.get("TUNSTRAP_SESSION_DIR") == "/s"
+    assert FakePopen.last_env.get("TUNSTRAP_SESSION_DIR") == session_dir
 
 
 def test_tunnelled_drops_an_inherited_kubeconfig_in_the_multi_node_case(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
-    """An operator-inherited KUBECONFIG is dropped in the multi-node case.
+    """An operator-inherited KUBECONFIG is dropped in the multi-node case too.
 
-    The pre-injection pop in ``_build_child_env`` is load-bearing ONLY when
-    ``inject_scalars`` is False — i.e. a multi-node payload, where ``render_env``
-    is not called and so the post-injection pop never runs. (For single-node the
-    post-injection pop already removes KUBECONFIG regardless of source, so a
-    single-node "inherited KUBECONFIG" test would not isolate it — verified by
-    mutation.) The proxy supports multi-node via its hardcoded ``--output-var``,
-    so this case is reachable and must stay guarded.
+    ``_build_child_env``'s ``suppress_kubeconfig`` pop is unconditional on node
+    count, so a multi-node payload -- which has no per-target kube channel of
+    its own to override the inherited value -- still loses it. The proxy
+    supports multi-node via its hardcoded ``--output-var``, so this case is
+    reachable and must stay guarded.
 
-    Without this test the pre-injection pop is deletable with the suite green.
+    Without this test the pop is deletable with the suite green.
     """
     # Inherited operator KUBECONFIG present.
     monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config-some-other-cluster")
-    # Multi-node payload → inject_scalars=False → no render_env, no post-injection pop.
     monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node()}))
-    spawn[0](_success({"a": _conn(db=5432), "b": _conn(db=5433)}))
+    spawn[0](_success({"a": _conn(db=5432), "b": _conn(db=5433)}, session_dir=str(tmp_path)))
     with pytest.raises(SystemExit) as excinfo:
         _run_main(["plan"])
     assert excinfo.value.code == 0
@@ -394,18 +398,23 @@ def test_tunnelled_drops_an_inherited_kubeconfig_in_the_multi_node_case(
         "inherited operator KUBECONFIG survived the multi-node path: a broken "
         "chain could reach the operator's own cluster via this fallback"
     )
-    # Multi-node still gets the structured channel (and no TUNSTRAP_* scalars).
+    # Multi-node still gets the structured channel and the three session
+    # survivors, but no target-scoped scalar (there is no node dimension for
+    # TUNSTRAP_<TARGET>_* to disambiguate, so none must ever reappear).
     assert "TF_VAR_tunstrap" in FakePopen.last_env
-    leaked_scalars = [k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k != VAR]
+    survivors = {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE", VAR}
+    leaked_scalars = [
+        k for k in FakePopen.last_env if k.startswith("TUNSTRAP_") and k not in survivors
+    ]
     assert leaked_scalars == []
 
 
 def test_tunnelled_propagates_child_exit_code(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """The child's exit code reaches the caller verbatim (outside reserved set)."""
     monkeypatch.setenv(VAR, _payload())
-    spawn[0](_success({"node": _conn(db=5432)}))
+    spawn[0](_success({"node": _conn(db=5432)}, session_dir=str(tmp_path)))
     FakePopen.last_env = None
 
     class _Exit42(FakePopen):

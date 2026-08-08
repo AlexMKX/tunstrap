@@ -9,6 +9,7 @@ relies on: ``.wait()``, ``.send_signal()`` and ``.returncode``.
 from __future__ import annotations
 
 import signal as signal_mod
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,13 +22,14 @@ from tunstrap.cli import main
 pytestmark = pytest.mark.unit
 
 
-def _success_payload() -> dict[str, Any]:
+def _success_payload(session_dir: str | None) -> dict[str, Any]:
+    assert session_dir is not None
     return {
         "kind": "success",
         "payload": {
             "connections": {"h": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}}},
             "pid": 99,
-            "session_dir": "/s",
+            "session_dir": session_dir,
             "started_at": "now",
         },
     }
@@ -53,11 +55,11 @@ class FakePopen:
         FakePopen.signals.append(signum)
 
 
-def test_run_injects_env_and_propagates_exit(monkeypatch):
+def test_run_injects_env_and_propagates_exit(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     stops: list[tuple[str, int]] = []
 
@@ -68,6 +70,7 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
     monkeypatch.setattr(cli_mod, "_teardown_run", _record)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
 
+    session_dir = str(tmp_path / "x")
     res = CliRunner().invoke(
         main,
         [
@@ -77,7 +80,7 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
             "db=127.0.0.1:5432",
             "--ssh-password-stdin",
             "--session-dir",
-            "/x",
+            session_dir,
             "--",
             "echo",
             "hi",
@@ -88,10 +91,15 @@ def test_run_injects_env_and_propagates_exit(monkeypatch):
     assert res.exit_code == 7
     assert FakePopen.last_cmd == ["echo", "hi"]
     assert FakePopen.last_env is not None
-    assert FakePopen.last_env["TUNSTRAP_DB_PORT"] == "5432"
-    # Child env is os.environ + render_env(output), not a bare dict.
+    assert FakePopen.last_env["TUNSTRAP_SESSION_DIR"] == session_dir
+    assert FakePopen.last_env["TUNSTRAP_PID"] == "99"
+    assert FakePopen.last_env["TUNSTRAP_OUTPUT_FILE"] == str(
+        Path(session_dir) / "tunnel-data" / "output.json"
+    )
+    assert "TUNSTRAP_DB_PORT" not in FakePopen.last_env
+    # Child env is os.environ + the session/kube channel, not a bare dict.
     assert "PATH" in FakePopen.last_env
-    assert stops == [("/x", 10)], "teardown must run with the session dir run owns"
+    assert stops == [(session_dir, 10)], "teardown must run with the session dir run owns"
 
 
 class SignalledPopen(FakePopen):
@@ -118,7 +126,7 @@ def test_signalled_child_exits_with_the_shell_convention(monkeypatch):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", SignalledPopen)
@@ -140,7 +148,7 @@ def test_normal_child_exit_code_is_untouched(monkeypatch):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)
@@ -162,7 +170,7 @@ def test_run_teardown_on_child_exception(monkeypatch):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     stops: list[str] = []
 
@@ -221,7 +229,7 @@ def test_run_forwards_signals(monkeypatch):
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
 
@@ -272,7 +280,7 @@ def test_run_preserves_child_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli_mod,
         "spawn_daemon",
-        lambda schema, session_dir=None, *, input_env=None: _success_payload(),
+        lambda schema, session_dir=None, *, input_env=None: _success_payload(session_dir),
     )
     monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
     monkeypatch.setattr(cli_mod.subprocess, "Popen", FakePopen)

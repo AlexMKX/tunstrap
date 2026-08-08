@@ -1,17 +1,21 @@
-"""Render an OutputSchema into the two channels ``run`` exports (#6/#5).
+"""Render an OutputSchema for ``run``'s env-native session and structured channels.
 
-The scalar channel (``render_env``) exports only hosts, ports and paths. The
-structured channel (``render_output_var``) exports a projection of the whole
-envelope with the kube credentials removed, because its consumer persists it.
+``render_kube_env`` builds the node-count-agnostic kube channel
+(``KUBECONFIG``/``KUBE_CONFIG_PATH(S)``), unconditional on node count.
+``render_unified_output``/``render_output_var`` build the node-qualified
+structure -- keyed by node, with kube credentials removed -- that ``run``
+materializes to ``tunnel-data/output.json`` and optionally also exports under
+``--output-var``. ``predicted_env_keys`` conservatively predicts, from the
+*input* schema alone, every key ``run`` might inject, for the pre-spawn
+``--output-var`` collision check.
 """
 
 from __future__ import annotations
 
 import json
-import re
+from pathlib import Path
 from typing import Any
 
-from tunstrap.exceptions import MultiNodeEnvUnsupported
 from tunstrap.schemas import (
     InputSchema,
     OutputSchema,
@@ -20,13 +24,7 @@ from tunstrap.schemas import (
     UnifiedNode,
     UnifiedSession,
 )
-
-_NON_ALNUM = re.compile(r"[^A-Z0-9]")
-
-
-def _key(name: str) -> str:
-    """Sanitise a target/kube name into an env-var segment (upper, _-joined)."""
-    return _NON_ALNUM.sub("_", name.upper())
+from tunstrap.session import atomic_write
 
 
 def _kube_channel_keys(count: int) -> set[str]:
@@ -63,43 +61,6 @@ def render_kube_env(output: OutputSchema) -> dict[str, str]:
         return {}
     joined = ":".join(kube_paths)
     return {key: joined for key in _kube_channel_keys(len(kube_paths))}
-
-
-def render_env(output: OutputSchema) -> dict[str, str]:
-    """Build the TUNSTRAP_* env mapping for a single-node OutputSchema."""
-    if len(output.connections) != 1:
-        raise MultiNodeEnvUnsupported(
-            "render_env requires exactly one node",
-            {"nodes": sorted(output.connections)},
-        )
-    (node,) = output.connections.values()
-
-    env: dict[str, str] = {
-        "TUNSTRAP_SESSION_DIR": output.session_dir,
-        "TUNSTRAP_PID": str(output.pid),
-    }
-
-    def put(key: str, value: str) -> None:
-        if key in env:
-            raise ValueError(f"env key collision: {key}")
-        env[key] = value
-
-    for tname, port in node.ports.items():
-        base = _key(tname)
-        put(f"TUNSTRAP_{base}_HOST", "127.0.0.1")
-        put(f"TUNSTRAP_{base}_PORT", str(port))
-        put(f"TUNSTRAP_{base}_ENDPOINT", f"127.0.0.1:{port}")
-
-    for kname, target in node.kube_targets.items():
-        base = _key(kname)
-        if target.path is None:
-            raise ValueError(f"kube target {kname!r} not materialized; cannot set KUBECONFIG")
-        put(f"TUNSTRAP_{base}_KUBECONFIG", target.path)
-        put(f"TUNSTRAP_{base}_ENDPOINT", target.endpoint)
-
-    for key, value in render_kube_env(output).items():
-        put(key, value)
-    return env
 
 
 def render_output_var(output: OutputSchema) -> str:
@@ -142,35 +103,34 @@ def render_unified_output(output: OutputSchema) -> dict[str, Any]:
     return {"session": session, "nodes": nodes}
 
 
-def predicted_env_keys(schema: InputSchema) -> set[str]:
-    """Conservatively predict env keys that may be produced for this schema.
-
-    Used pre-spawn to reject an ``--output-var`` NAME that would collide with
-    an injected key, before a daemon exists to orphan. Multi-node input injects
-    no ``TUNSTRAP_*`` scalars, but kube-channel keys remain possible.
-
-    The result is a superset of the eventual actual key set when an optional
-    target fails and is absent from the output. A superset only rejects more
-    names, never fewer, so it cannot let a real collision through.
+def materialized_output_path(session_dir: str) -> str:
+    """The deterministic path the materialization writer writes to; shared so
+    _build_child_env's TUNSTRAP_OUTPUT_FILE and the actual writer never
+    independently compute a different path for the same file.
     """
-    keys: set[str] = set()
-    if len(schema.nodes) == 1:
-        (node,) = schema.nodes.values()
-        keys.update({"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID"})
-        for tname in node.remote_targets:
-            base = _key(tname)
-            keys.update(
-                {
-                    f"TUNSTRAP_{base}_HOST",
-                    f"TUNSTRAP_{base}_PORT",
-                    f"TUNSTRAP_{base}_ENDPOINT",
-                }
-            )
-        for kname in node.kube_targets or {}:
-            base = _key(kname)
-            keys.update({f"TUNSTRAP_{base}_KUBECONFIG", f"TUNSTRAP_{base}_ENDPOINT"})
+    return str(Path(session_dir) / "tunnel-data" / "output.json")
+
+
+def write_materialized_output(output: OutputSchema) -> None:
+    """Atomically write the unified output structure to its deterministic path."""
+    atomic_write(
+        Path(materialized_output_path(output.session_dir)), render_output_var(output).encode()
+    )
+
+
+def predicted_env_keys(schema: InputSchema) -> set[str]:
+    """Env keys ``run`` will inject for this *input* schema, unconditional on
+    node count: the three session scalars, plus -- conservatively, not per the
+    exact _kube_channel_keys(count) branch -- all three kube names whenever
+    any node declares kube_targets at all. Input cardinality can shrink by
+    output time (an optional node/target can fail without failing the run), so
+    predicting the exact branch would under-reserve; see the "Anti-drift
+    guard" section for the cardinality-shrink case this guards against. Used
+    pre-spawn to reject a colliding --output-var NAME before a daemon exists.
+    """
+    keys = {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE"}
     if any(node.kube_targets for node in schema.nodes.values()):
-        keys.update({"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"})
+        keys |= {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"}
     return keys
 
 

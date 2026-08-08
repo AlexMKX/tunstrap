@@ -18,6 +18,7 @@ monkeypatched; the child env is captured off the fake Popen.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -52,14 +53,16 @@ INPUT_PAYLOAD = json.dumps(
     }
 )
 
-SUCCESS_PAYLOAD: dict[str, Any] = {
-    "connections": {
-        "node": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}},
-    },
-    "pid": 99,
-    "session_dir": "/s",
-    "started_at": "2026-07-31T00:00:00Z",
-}
+
+def _success_payload(session_dir: str) -> dict[str, Any]:
+    return {
+        "connections": {
+            "node": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}},
+        },
+        "pid": 99,
+        "session_dir": session_dir,
+        "started_at": "2026-07-31T00:00:00Z",
+    }
 
 
 class FakePopen:
@@ -96,9 +99,11 @@ def _spawn(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return seen
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, spawn: list[Any], *args: str) -> dict[str, str]:
+def _run(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path, *args: str
+) -> dict[str, str]:
     """Drive one full `run --input-env VAR [args] -- true`."""
-    spawn[0]({"kind": "success", "payload": SUCCESS_PAYLOAD})
+    spawn[0]({"kind": "success", "payload": _success_payload(str(tmp_path))})
     monkeypatch.setenv(VAR, INPUT_PAYLOAD)
     result = CliRunner().invoke(main, ["run", "--input-env", VAR, *args, "--", "true"])
     assert result.exit_code == 0, result.stderr
@@ -107,16 +112,16 @@ def _run(monkeypatch: pytest.MonkeyPatch, spawn: list[Any], *args: str) -> dict[
 
 
 def test_input_env_variable_is_scrubbed_from_the_child_environment(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """The variable holding the InputSchema is not inherited by the child."""
-    env = _run(monkeypatch, spawn)
+    env = _run(monkeypatch, spawn, tmp_path)
 
     assert VAR not in env, f"{VAR} carries the SSH private key and was inherited by the child"
 
 
 def test_run_forwards_the_input_variable_name_to_the_spawn(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """``spawn_daemon`` is told, by name, which variable is secret-bearing.
 
@@ -127,16 +132,16 @@ def test_run_forwards_the_input_variable_name_to_the_spawn(
     ``tests/integration/test_daemon_input_env.py``. Red if ``run`` stops
     passing the argument: the parameter then keeps its ``None`` default.
     """
-    _run(monkeypatch, spawn)
+    _run(monkeypatch, spawn, tmp_path)
 
     assert spawn[-1]["input_env"] == VAR, "run must tell spawn_daemon which variable to scrub"
 
 
 def test_ssh_private_key_reaches_no_child_variable(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """Asserted on the key bytes, so a copy under any other name is caught too."""
-    env = _run(monkeypatch, spawn)
+    env = _run(monkeypatch, spawn, tmp_path)
     blob = "\n".join(f"{k}={v}" for k, v in env.items())
 
     assert SSH_PKEY_PEM not in blob, "the SSH private key reached the child environment"
@@ -146,18 +151,20 @@ def test_ssh_private_key_reaches_no_child_variable(
 
 
 def test_scrub_is_narrow_and_leaves_the_rest_of_the_environment_alone(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """Only the named variable is removed, not the environment at large."""
     monkeypatch.setenv("TUNSTRAP_UNRELATED_KEEP_ME", "keep")
-    env = _run(monkeypatch, spawn)
+    env = _run(monkeypatch, spawn, tmp_path)
 
     assert env["TUNSTRAP_UNRELATED_KEEP_ME"] == "keep"
-    assert env["TUNSTRAP_DB_PORT"] == "5432", "the injected scalars must survive the scrub"
+    assert env["TUNSTRAP_SESSION_DIR"] == str(
+        tmp_path
+    ), "the session scalars must survive the scrub"
 
 
 def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """`--input-env X --output-var X` yields the output, never the input secret.
 
@@ -167,15 +174,15 @@ def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
     the projected output is written. The reverse order would delete the output
     and leave the child with neither — or, worse, leave the secret in place.
     """
-    env = _run(monkeypatch, spawn, "--output-var", VAR)
+    env = _run(monkeypatch, spawn, tmp_path, "--output-var", VAR)
 
     assert VAR in env, "the output variable should have been written under the reused name"
     assert SSH_PKEY_PEM not in env[VAR], "the input secret survived under the reused name"
-    assert json.loads(env[VAR])["pid"] == 99, "the value must be the output envelope"
+    assert json.loads(env[VAR])["session"]["pid"] == 99, "the value must be the output envelope"
 
 
 def test_input_payload_shutdown_grace_controls_teardown(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any]
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
     """The payload daemon block, not a hidden CLI default, sets run's grace.
 
@@ -193,7 +200,7 @@ def test_input_payload_shutdown_grace_controls_teardown(
     monkeypatch.setattr(cli_mod, "_teardown_run", _teardown)
     payload = json.loads(INPUT_PAYLOAD)
     payload["daemon"] = {"shutdown_grace_seconds": 23}
-    spawn[0]({"kind": "success", "payload": SUCCESS_PAYLOAD})
+    spawn[0]({"kind": "success", "payload": _success_payload(str(tmp_path))})
     monkeypatch.setenv(VAR, json.dumps(payload))
     result = CliRunner().invoke(main, ["run", "--input-env", VAR, "--", "true"])
     assert result.exit_code == 0, result.stderr
