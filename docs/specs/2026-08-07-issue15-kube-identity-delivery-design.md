@@ -1042,14 +1042,37 @@ or the `helm` CLI directly — both of which *do* honour plain `KUBECONFIG`.
 Suppressing it was never protecting a nonexistent fallback in general; it was
 (and is) protecting exactly those two provider-native config chains, while
 already correctly protecting kubectl/Helm-CLI-invoking children the whole
-time. **Once this design ships `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` — the
-vars the providers' own Go chains actually do read — the guard becomes
-load-bearing for that provider-native audience too, for the first time**,
-and `_build_child_env`'s `suppress_kubeconfig` handling (`cli.py:394-404`)
-must drop **all three** exported names, not just `KUBECONFIG`, or the exact
-silent-fallback failure mode the proxy was written to prevent becomes real
-for the provider-native chain specifically. See the plan for the concrete
-change.
+time.
+
+**[Issue #14 fix, iteration 9 — the paragraph below is falsified; kept for
+the historical record of what iteration 6 actually shipped, not restated as
+current.]** Iteration 6 went on to conclude: "Once this design ships
+`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` — the vars the providers' own Go
+chains actually do read — the guard becomes load-bearing for that
+provider-native audience too, for the first time, and `_build_child_env`'s
+`suppress_kubeconfig` handling must drop **all three** exported names, not
+just `KUBECONFIG`." That is backwards: this same subsection already
+established that providers never read plain `KUBECONFIG` — they read
+`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` directly, which is exactly Mode A's
+delivery channel through the proxy, not a fallback for it. Dropping those
+two through `suppress_kubeconfig` does not close a silent-fallback gap; it
+deletes Mode A's only channel through `tunstrap_tofu`, the documented
+`terraform_binary` entry point — measured against a real tunnel by the
+issue #14 report: through `tunstrap_tofu` all three names came back unset,
+and a provider block following Mode A's own item 1 (only `config_context`
+set) failed against the inert `localhost:80` loopback.
+
+**Corrected contract.** `suppress_kubeconfig` drops only the *injected*
+`KUBECONFIG` — never `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS`, so Mode A keeps
+working through `tunstrap_tofu` exactly as documented. Two further
+guarantees hold unconditionally, on both the plain and the proxied path,
+independent of `suppress_kubeconfig`: an *inherited*
+`KUBECONFIG`/`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` from the parent
+environment is always dropped before `render_kube_env` injects, so a stray
+operator environment can never contribute to the child's kube channel
+either. See `docs/specs/2026-08-07-issue15-kube-identity-decisions.md`
+entry 20 for the full record, including the alternative considered and
+rejected (pop-before-inject ordering) and why.
 
 ## Compatibility
 

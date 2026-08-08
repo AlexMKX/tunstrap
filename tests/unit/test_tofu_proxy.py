@@ -316,14 +316,16 @@ def test_tunnelled_invokes_run_with_input_env_and_output_var(
 def test_tunnelled_suppresses_kubeconfig_in_child_env(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
-    """A single-node kube payload must NOT leave KUBECONFIG in tofu's env.
+    """A single-node kube payload must NOT leave KUBECONFIG in tofu's env, but
+    MUST still carry KUBE_CONFIG_PATH -- Mode A's provider channel.
 
-    This is the property the shell shim preserved with ``env -u KUBECONFIG``:
-    a broken ``TF_VAR_tunstrap`` → ``config_path`` chain must fail rather than
-    silently reach the cluster through KUBECONFIG. ``_build_child_env``'s
-    unconditional ``suppress_kubeconfig`` pop covers both anything inherited
-    and anything ``render_kube_env`` injects, so the proxy buys the
-    ``env -u KUBECONFIG`` property without the incantation.
+    ``suppress_kubeconfig`` drops only the injected KUBECONFIG (issue #14):
+    dropping KUBE_CONFIG_PATH/_PATHS too would make Mode A -- the plan-safe,
+    env-native kube delivery the recipe tells consumers to use through this
+    exact entry point -- unusable through the proxy. ``_build_child_env``
+    always drops any inherited KUBECONFIG/KUBE_CONFIG_PATH/_PATHS before
+    injection, on both paths, so a stray operator environment can never
+    contribute to the child's kube channel either.
 
     This is the one place the assertion can fire: the input has one node with
     a kube target, so ``render_kube_env`` WOULD inject KUBECONFIG; only
@@ -366,6 +368,10 @@ def test_tunnelled_suppresses_kubeconfig_in_child_env(
     assert "KUBECONFIG" not in FakePopen.last_env, (
         "KUBECONFIG leaked into tofu's env: a broken config_path chain would "
         "silently reach the cluster via this fallback"
+    )
+    assert FakePopen.last_env["KUBE_CONFIG_PATH"] == kube["path"], (
+        "KUBE_CONFIG_PATH must survive suppression: it is Mode A's provider "
+        "channel through tunstrap_tofu (issue #14)"
     )
     # The structured channel the module decodes config_path from is still present.
     assert "TF_VAR_tunstrap" in FakePopen.last_env

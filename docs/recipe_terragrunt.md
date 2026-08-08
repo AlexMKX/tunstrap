@@ -79,18 +79,25 @@ from `argv` and `TUNSTRAP_INPUT`:
 default, and `terragrunt output -json` consumers parse it. Diagnostics go to
 stderr or a file. `tunstrap run` is silent on stdout after the child starts.
 
-**`KUBECONFIG` is suppressed in the child environment, not on the command line.**
-For a single-node payload `run` injects `KUBECONFIG` (pointing at the same
-materialized file `config_path` would use); left in place it is a **silent
-fallback** — if the `TF_VAR_tunstrap` → `config_path` wiring were broken, the
-providers would still find a working cluster via `KUBECONFIG` and everything
-would appear fine. The proxy sets `suppress_kubeconfig`, so `run` builds the
-child environment with `KUBECONFIG` removed (both anything inherited and what it
-would inject), making the decoded `config_path` the **only** route to the
-cluster. This is the property the earlier shell shim bought with
-`env -u KUBECONFIG` on the child command line; in-process it is a direct removal
-inside the built environment — same property, no wrapper. The e2e tier proves it
-by recording `tofu`'s actual environment and asserting `KUBECONFIG` is absent.
+**`KUBECONFIG` is suppressed in the child environment, not on the command line —
+and only `KUBECONFIG`.** For a single-node payload `run` injects `KUBECONFIG`
+(pointing at the same materialized file `config_path` would use); left in place
+it is a **silent fallback for `var.tunstrap`-driven configs (Mode B, below)** —
+if the `TF_VAR_tunstrap` → `config_path` wiring were broken, providers would
+still find a working cluster via `KUBECONFIG` and everything would appear fine.
+The proxy sets `suppress_kubeconfig`, so `run` builds the child environment with
+the *injected* `KUBECONFIG` removed, making the decoded `config_path` the
+**only** route to the cluster for a Mode B config. `KUBE_CONFIG_PATH`/
+`KUBE_CONFIG_PATHS` — the provider-facing names Mode A (below) relies on — are
+**not** touched by this guard: providers never read plain `KUBECONFIG` at all,
+so suppressing it protects a different, real audience instead —
+`kubectl`/`helm` CLI invocations inside `local-exec` provisioners, which do
+honour it. **Mode A works through `tunstrap_tofu` as documented**: any
+inherited `KUBECONFIG`/`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` from the operator's
+own shell is also always dropped before `run` injects the real channel, on both
+the plain and the proxied path, so a stray operator environment can never leak
+into or override it either. The e2e tier proves the suppression by recording
+`tofu`'s actual environment and asserting `KUBECONFIG` is absent.
 
 ### Wiring it into Terragrunt
 
@@ -409,6 +416,13 @@ The module above reads its kube identity from `var.tunstrap`, which is
 connection data travelling through a Terraform input variable — exactly what
 ticket #15 asked to stop. Mode A is the alternative that actually satisfies
 that contract: no `var.`-bound value, no file read in HCL at all, for kube.
+
+**Mode A works through `tunstrap_tofu`**, the proxy this recipe recommends as
+`terraform_binary` — that is the point of it. The proxy's
+`suppress_kubeconfig` guard only removes the injected `KUBECONFIG`; it never
+touches `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS`, so item 1 below reaches a
+provider block unfiltered whether you invoke `tofu` directly or through the
+proxy (see "How the proxy works," above, for why).
 
 1. `run` exports `KUBE_CONFIG_PATH` (one kube target) or `KUBE_CONFIG_PATHS`
    (two or more) from its own process environment, unconditionally — see "The

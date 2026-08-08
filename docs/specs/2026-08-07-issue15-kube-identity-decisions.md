@@ -268,6 +268,19 @@ implementation plan for the concrete change and its test.
 
 ## 7. `suppress_kubeconfig` extends to all three exported kube env vars
 
+> **[Issue #14 fix, iteration 9 — correction annotation, this entry's decision
+> is superseded, not rewritten in place.]** The "Decision" below shipped and
+> was falsified: it suppressed `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` through
+> `tunstrap_tofu`, which is Mode A's only delivery channel through that exact,
+> documented entry point — not a fallback path for it. Measured by the
+> reporter against a real tunnel: through `tunstrap_tofu` all three names came
+> back unset, and a provider block following Mode A's own item 1 (only
+> `config_context` set) failed against the inert `localhost:80` loopback. This
+> entry's "Context"/"Alternatives considered"/"Decision"/"Consequences" below
+> are kept verbatim as the historical record of what iteration 6 actually
+> shipped (the same annotate-don't-rewrite discipline entry 14 applied to
+> entry 11); see entry 20 for the current, narrowed, superseding decision.
+
 **Context.** Not raised by the ticket or by any ruling — found while
 specifying the env-export contract (decision 3). `tunstrap_tofu` sets
 `suppress_kubeconfig=True` so a broken `TF_VAR_tunstrap` → `config_path` chain
@@ -1082,3 +1095,98 @@ a `path` field instead — the plan's Task 5 blast-radius table carries the
 full enumeration. Entries 14 and 18 are annotated above, not rewritten, per
 this document's own established discipline (entry 14's own annotation of
 entry 11).
+
+## 20. `suppress_kubeconfig` narrowed: drop only the injected `KUBECONFIG`, never `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` — corrects entry 7
+
+**Context.** Issue #14 (a comment on the closed #15 handoff) reported that
+Mode A — the plan-safe, env-native kube delivery this design shipped, and the
+recipe's own documented pattern for it — cannot work through `tunstrap_tofu`,
+which the same recipe tells consumers to use as `terraform_binary`. Measured
+by the reporter: two nodes, one k3s target each, a real tunnel, `tofu`
+replaced by a stub printing its own environment. Through `tunstrap_tofu`
+(`suppress_kubeconfig=True`) all three of `KUBECONFIG`, `KUBE_CONFIG_PATH`,
+`KUBE_CONFIG_PATHS` came back unset; through plain `tunstrap run` the channel
+was correct (colon-joined paths, `KUBE_CONFIG_PATHS` plural for two files,
+contexts renamed to `tunstrap-<node>-<target>`). A provider block following
+Mode A's own worked example (only `config_context` set, per the design doc's
+"Mode A" section item 1) therefore resolves no kubeconfig through the proxy
+and fails against the inert `localhost:80` loopback. Fails loudly, not
+silently — but Mode A is unusable through the one documented entry point for
+it.
+
+The root cause is entry 7's own reasoning, not an accident: entry 7
+deliberately widened `suppress_kubeconfig` from "drop `KUBECONFIG`" to "drop
+all three," reasoning that once this design started exporting
+`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` — the names the providers' own Go
+config chains actually read — the guard would become "load-bearing for that
+provider-native audience too, for the first time," and would be hollow if it
+kept exempting them. That reasoning inverts what the guard is for. Entry 7's
+own evidence (the provider findings) already established that providers never
+read plain `KUBECONFIG` at all; they read `KUBE_CONFIG_PATH`/
+`KUBE_CONFIG_PATHS` directly. Those two are not a *fallback* channel a broken
+`config_path` chain could silently reach through — for Mode A they are *the*
+channel, by design, reached deliberately and unconditionally by `run`,
+proxied or not. Suppressing them does not stop a silent wrong answer; it
+removes the only right answer Mode A has through `tunstrap_tofu`.
+
+**Alternatives considered.**
+
+- **Keep entry 7's decision as shipped (drop all three)**: rejected — directly
+  falsified by the measurement above; this is the defect being fixed, not a
+  live option.
+- **Pop-before-inject ordering** — drop the three names from the copied
+  parent environment, then call `render_kube_env`, and drop nothing
+  afterward: rejected. This produces the same broken result by a different
+  route: with `suppress_kubeconfig=True` and no post-injection pop, the
+  `render_kube_env` call happening *after* the pre-injection pop would still
+  place a fresh `KUBECONFIG` into the child env (single-file cardinality) —
+  restoring exactly the injected `KUBECONFIG` this guard exists to remove.
+  Ordering by itself does not narrow *which* names are protected; it only
+  changes *when* the removal happens, and the removal still has to be
+  keyed by name, not by inherited-vs-injected origin alone, to keep the
+  provider channel while dropping the `KUBECONFIG` fallback.
+- **[Adopted.]** Narrow the suppression by key, and split inherited vs
+  injected handling, as two independent rules:
+  1. Always, on both the plain and the proxied path: drop *inherited*
+     `KUBECONFIG`/`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` from the copied
+     parent environment **before** `render_kube_env` injects — a stray
+     operator environment must never contribute to the child's kube channel,
+     regardless of `suppress_kubeconfig`.
+  2. Only when `suppress_kubeconfig` is set: drop the *injected* `KUBECONFIG`
+     afterward, keeping `KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` intact.
+     `render_kube_env`'s own conditional-cardinality contract (entry 3) is
+     unchanged — one file exports `KUBECONFIG`+`KUBE_CONFIG_PATH`; two or
+     more export `KUBECONFIG`+`KUBE_CONFIG_PATHS`, never both PATH forms at
+     once.
+
+**Decision.** `suppress_kubeconfig` drops only the injected `KUBECONFIG`.
+Inherited `KUBECONFIG`/`KUBE_CONFIG_PATH`/`KUBE_CONFIG_PATHS` are always
+dropped before injection, unconditionally on both paths — this part of entry
+7's original intent (never let an operator's ambient kubeconfig leak through)
+is preserved and, if anything, made more precise: it now also covers the
+plain `run` path, which entry 7 did not distinguish. The anti-fallback
+property this guard exists for — a broken `TF_VAR_tunstrap` → `config_path`
+chain (Mode B) must not silently reach the cluster through `KUBECONFIG` — is
+still exactly satisfied, since providers never read `KUBECONFIG` and the
+audience that does (`kubectl`/`helm` CLI invocations and `local-exec`
+provisioners inside `tofu`) is unaffected by keeping `KUBE_CONFIG_PATH`/
+`KUBE_CONFIG_PATHS` present.
+
+**Consequences.** `tunstrap/cli.py`'s `_build_child_env` gains an
+unconditional inherited-name scrub ahead of `render_kube_env`, and its
+`suppress_kubeconfig` block narrows from a three-name loop to a single
+`KUBECONFIG` pop; its docstring is rewritten to state this contract exactly,
+replacing the "drops all three, inherited and injected" claim entry 7
+introduced. `docs/specs/2026-08-07-issue15-kube-identity-delivery-design.md`'s
+"Interaction with the tofu proxy's `suppress_kubeconfig`" subsection carries
+the same correction, in place, with its own falsified conclusion marked and
+kept for the historical record rather than deleted.
+`docs/recipe_terragrunt.md` is corrected in both directions: the "How the
+proxy works" section states plainly that only `KUBECONFIG` is suppressed, and
+the Mode A section states plainly that Mode A works through `tunstrap_tofu`.
+Four properties are pinned by new or retargeted unit tests in
+`tests/unit/test_cli_run_output_var.py` and `tests/unit/test_tofu_proxy.py`:
+the proxy path keeps the provider channel; the proxy path drops the injected
+`KUBECONFIG`; the plain path keeps the full, unfiltered channel; and an
+inherited value of all three is dropped on both paths, including when there
+are no kube targets at all to inject a replacement over it.

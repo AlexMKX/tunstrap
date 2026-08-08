@@ -405,21 +405,21 @@ def _build_child_env(
     ``output_var`` carries ``render_output_var``'s projection, not the whole
     envelope: its consumer persists the value into an OpenTofu plan file.
 
-    ``suppress_kubeconfig`` drops ``KUBECONFIG``/``KUBE_CONFIG_PATH``/
-    ``KUBE_CONFIG_PATHS`` — both anything inherited and anything
-    ``render_kube_env`` injects. The proxy uses this so a broken
-    ``TF_VAR_tunstrap`` → ``config_path`` chain cannot silently reach the
-    cluster through a materialized-file ``KUBECONFIG`` (the property the
-    consumer shim used to buy with ``env -u KUBECONFIG``).
+    ``suppress_kubeconfig`` drops only the *injected* ``KUBECONFIG``, keeping
+    ``KUBE_CONFIG_PATH``/``KUBE_CONFIG_PATHS`` -- Mode A provider access through the proxy.
+    Providers never read plain ``KUBECONFIG`` (measured in #15); the guard instead protects
+    ``kubectl``/``helm`` CLI children and ``local-exec`` provisioners. Inherited names of all three
+    are always dropped before injection, on both paths.
     """
     child_env = dict(os.environ)
     if input_env is not None:
         child_env.pop(input_env, None)
+    for key in ("KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"):
+        child_env.pop(key, None)
     child_env.update(_session_scalars(output))
     child_env.update(render_kube_env(output))
     if suppress_kubeconfig:
-        for key in ("KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"):
-            child_env.pop(key, None)
+        child_env.pop("KUBECONFIG", None)
     if output_var is not None:
         child_env[output_var] = render_output_var(output)
     return child_env

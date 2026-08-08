@@ -209,10 +209,12 @@ def test_multi_node_run_succeeds_without_output_var(
     assert FakePopen.last_env["TUNSTRAP_OUTPUT_FILE"] == f"{session_dir}/tunnel-data/output.json"
 
 
-def test_suppress_kubeconfig_drops_all_three_kube_env_names() -> None:
-    """suppress_kubeconfig (the tunstrap_tofu proxy's guard) must drop
-    KUBE_CONFIG_PATH/_PATHS too, not just KUBECONFIG -- those are the names
-    the providers actually read (ADR entry 7)."""
+def test_suppress_kubeconfig_drops_only_injected_kubeconfig() -> None:
+    """suppress_kubeconfig (the tunstrap_tofu proxy's guard) drops only the
+    injected KUBECONFIG. KUBE_CONFIG_PATH must survive -- it is the
+    provider-facing name Mode A relies on through the proxy (issue #14); a
+    guard that also dropped it would make Mode A unusable through
+    tunstrap_tofu, the documented entry point (ADR entry 20)."""
     from tunstrap.cli import _build_child_env
 
     out = OutputSchema.model_validate(
@@ -224,6 +226,75 @@ def test_suppress_kubeconfig_drops_all_three_kube_env_names() -> None:
         }
     )
     env = _build_child_env(out, output_var=None, input_env=None, suppress_kubeconfig=True)
+    assert "KUBECONFIG" not in env
+    assert env["KUBE_CONFIG_PATH"] == _RICH_KUBE["path"]
+
+
+def test_suppress_kubeconfig_drops_only_injected_kubeconfig_multi_file() -> None:
+    """Same guarantee on the >=2-file branch: KUBE_CONFIG_PATHS survives."""
+    from tunstrap.cli import _build_child_env
+
+    other = dict(_RICH_KUBE, path="/s/tunnel-data/node-b-k3s")
+    out = OutputSchema.model_validate(
+        {
+            "connections": {
+                "a": {"ports": {}, "kube_targets": {"k3s": _RICH_KUBE}},
+                "b": {"ports": {}, "kube_targets": {"k3s": other}},
+            },
+            "pid": 1,
+            "session_dir": "/s",
+            "started_at": "now",
+        }
+    )
+    env = _build_child_env(out, output_var=None, input_env=None, suppress_kubeconfig=True)
+    assert "KUBECONFIG" not in env
+    assert "KUBE_CONFIG_PATH" not in env
+    assert env["KUBE_CONFIG_PATHS"] == f"{_RICH_KUBE['path']}:{other['path']}"
+
+
+def test_plain_path_keeps_full_kube_channel_untouched() -> None:
+    """Without suppress_kubeconfig (plain `tunstrap run`), _build_child_env
+    passes render_kube_env's channel through unfiltered -- all names the
+    conditional cardinality contract sets reach the child."""
+    from tunstrap.cli import _build_child_env
+
+    out = OutputSchema.model_validate(
+        {
+            "connections": {"h": {"ports": {}, "kube_targets": {"k3s": _RICH_KUBE}}},
+            "pid": 1,
+            "session_dir": "/s",
+            "started_at": "now",
+        }
+    )
+    env = _build_child_env(out, output_var=None, input_env=None, suppress_kubeconfig=False)
+    assert env["KUBECONFIG"] == _RICH_KUBE["path"]
+    assert env["KUBE_CONFIG_PATH"] == _RICH_KUBE["path"]
+    assert "KUBE_CONFIG_PATHS" not in env
+
+
+@pytest.mark.parametrize("suppress_kubeconfig", [False, True])
+def test_inherited_kube_env_never_survives_even_without_kube_targets(
+    monkeypatch: pytest.MonkeyPatch, suppress_kubeconfig: bool
+) -> None:
+    """A stray operator KUBECONFIG/KUBE_CONFIG_PATH(S) must never reach the
+    child, on either path, even when there are no kube targets to inject a
+    replacement that would otherwise overwrite it."""
+    from tunstrap.cli import _build_child_env
+
+    monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config")
+    monkeypatch.setenv("KUBE_CONFIG_PATH", "/home/operator/.kube/config")
+    monkeypatch.setenv("KUBE_CONFIG_PATHS", "/home/operator/.kube/config:/other")
+    out = OutputSchema.model_validate(
+        {
+            "connections": {"h": {"ports": {}, "kube_targets": {}}},
+            "pid": 1,
+            "session_dir": "/s",
+            "started_at": "now",
+        }
+    )
+    env = _build_child_env(
+        out, output_var=None, input_env=None, suppress_kubeconfig=suppress_kubeconfig
+    )
     assert "KUBECONFIG" not in env
     assert "KUBE_CONFIG_PATH" not in env
     assert "KUBE_CONFIG_PATHS" not in env
