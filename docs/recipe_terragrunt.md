@@ -284,8 +284,8 @@ locals {
   # try() is load-bearing: jsondecode("") is an error, so a bare jsondecode
   # would make `tofu plan` fail whenever the infrastructure is not applied yet
   # (the empty-string default).
-  tunnel   = try(jsondecode(var.tunstrap), { connections = {} })
-  kubepath = try(local.tunnel.connections.node.kube_targets.k3s.path, "")
+  tunnel   = try(jsondecode(var.tunstrap), { nodes = {} })
+  kubepath = try(local.tunnel.nodes.node.kube.k3s.path, "")
 
   inert               = local.kubepath == ""
   kube_config_path    = local.inert ? null : local.kubepath
@@ -326,7 +326,7 @@ reason if dropped:
    This is what makes a forgotten `commands` entry fail loudly instead of
    silently reaching a cluster some other way.
 3. **`path` comes from the materialized file, not from a hand-written path.**
-   `run` always forces `daemon.materialize = true`, so `connections.*.kube_targets.*.path`
+   `run` always forces `daemon.materialize = true`, so `nodes.*.kube.*.path`
    is a real on-disk kubeconfig (mode 0600), patched so `server:` and
    `tls-server-name` already point at the tunnelled port. The provider just reads it.
 4. **`sensitive = true` on the variable.** Defence in depth, not the fix — it
@@ -336,10 +336,9 @@ reason if dropped:
 ### What is, and is not, in `TF_VAR_tunstrap`
 
 `run` **projects** the envelope before exporting it on this channel. Each
-`kube_targets` entry keeps:
+`kube` entry keeps:
 
-`cluster_name`, `context_name`, `local_port`, `endpoint`, `tls_server_name`,
-`certificate_authority_data`, `path`
+`path`, `context`, `endpoint`
 
 and **drops** `client_key_data` (a private key), `content_b64` (the whole
 patched kubeconfig, which embeds that key) and `client_certificate_data` (not a
@@ -354,40 +353,35 @@ has to not be there in the first place.
 
 Nothing is lost. `run` always materializes, so `path` points at an on-disk
 kubeconfig (mode 0600) that contains every dropped field. A module that wants
-inline provider configuration rather than `config_path` still has
-`certificate_authority_data` (a published trust anchor, not a credential) plus
-`endpoint` and `tls_server_name`, and supplies its own client credentials.
+inline provider configuration rather than `config_path` reads
+`certificate_authority_data` (a published trust anchor, not a credential),
+`tls_server_name`, and its own client credentials from that file directly —
+only `path`, `context` and `endpoint` travel through `TF_VAR_tunstrap` itself.
 
 `tunstrap start` is **not** affected: it writes the complete envelope to
 stdout, a pipe consumed directly by the caller who already supplied the input,
 and without `--materialize` its `content_b64` is the only way to obtain the
 kubeconfig at all.
 
-### Fetched files are exported verbatim, not projected
+### Fetched files are materialized, not carried in the envelope
 
-The projection above touches only `kube_targets`. Every `fetch_files` entry
-keeps its `content_b64` whole — the bytes the operator asked `--fetch` to
-pull, unchanged. That asymmetry is deliberate, not an oversight:
+The projection above (kube) and this one (`fetch_files`) follow the same
+rule: `run` materializes content to disk under the session dir's
+`tunnel-data/`, mode `0600`, and the consumer-facing envelope carries only a
+reference to it. Each `fetch_files` entry becomes `{path, size, sha256}` on
+success, `{error}` on failure — never `content_b64`.
 
-- The kube credentials were **tunstrap's own** material, injected without the
-  operator asking, with a lossless on-disk alternative (`path`) already in the
-  envelope — dropping them cost nothing.
-- A fetched file is **opt-in twice**: the operator names it with `--fetch`
-  *and* elects `--output-var`, and it is the operator's own content under their
-  own classification. `FetchedFile` has no `path` (`schemas.py:292`), so
-  dropping `content_b64` would be a silent, unrecoverable breakage of any
-  consumer that reads it.
+`FetchedFile` **has a `path`** (`schemas.py`, extended for this ticket), so
+the lossless on-disk alternative exists, the same way it already existed for
+kube.
 
-Silently discarding data the operator explicitly requested is a worse failure
-mode than persisting data they asked to be exported. The same plan-file
-persistence applies, so **do not `--fetch` a secret while using `--output-var`**
-— tunstrap fetches into the envelope (`content_b64`), not onto disk, so the
-bytes would be persisted. Deliver a secret to the module by a path it reads
-directly, not through this channel. The intended end-state (materialize fetched
-files under the session dir at `0o600`, give `FetchedFile` a `path`, then drop
-`content_b64`) is recorded in the spec's "Out of scope".
+**The plan-file-persistence risk is resolved as a class, not documented
+around**: since fetched content never enters `TF_VAR_tunstrap` or the
+materialized file at all, `--fetch`ing a secret cannot land it in a saved
+Terraform plan file through this channel. Read the file directly at
+`fetch_files.<name>.path` if you need its contents.
 
-One other free-form string rides this channel unprojected: `warnings[*].error`.
+One free-form string rides this channel unprojected: `warnings[*].error`.
 It is exception text from an optional-node or kube-target failure (`manager.py`,
 `kube.py`) — connection, auth or TLS messages, not key material — so it is left
 intact rather than truncated.
@@ -401,10 +395,135 @@ every provider plugin, `external` data source and `local-exec` provisioner.
 Nothing in the module needs it; if you need a value from the payload downstream,
 export it explicitly rather than relying on inheritance.
 
-If you have more than one node in the payload, the scalar `TUNSTRAP_*` env and
-`KUBECONFIG` are not injected (they have no node dimension and would collide);
-only `TF_VAR_tunstrap` is set, and the module picks the node out of
-`connections[<node>]`. See the `--output-var` rules in the README.
+If you have more than one node in the payload, the kube env channel —
+`KUBECONFIG`/`KUBE_CONFIG_PATH(S)` — is still injected: it is unconditional
+on node count and aggregates every kube target across every node into one
+file list. Only the old `TUNSTRAP_<TARGET>_*` scalars — a concept that no
+longer exists — were ever suppressed for multi-node. `TF_VAR_tunstrap` is set
+unconditionally too, and the module picks the node out of `nodes[<node>]`.
+See the `--output-var` rules in the README.
+
+## Mode A: env-native kube (satisfies the ticket's strict "nothing live enters Terraform" contract)
+
+The module above reads its kube identity from `var.tunstrap`, which is
+connection data travelling through a Terraform input variable — exactly what
+ticket #15 asked to stop. Mode A is the alternative that actually satisfies
+that contract: no `var.`-bound value, no file read in HCL at all, for kube.
+
+1. `run` exports `KUBE_CONFIG_PATH` (one kube target) or `KUBE_CONFIG_PATHS`
+   (two or more) from its own process environment, unconditionally — see "The
+   input variable is scrubbed," above. A provider block that sets nothing but
+   a literal `config_context = "tunstrap-<node>-<target>"` per alias resolves
+   its `config_path`/`config_paths` from those env vars alone, via the
+   provider's own `EnvDefaultFunc`. A two-alias worked example, one provider
+   block per kube target, sharing the same `KUBE_CONFIG_PATHS` list:
+
+   ```hcl
+   provider "kubernetes" {
+     alias          = "node1_k3s"
+     config_context = "tunstrap-node1-k3s"  # literal -- never derived from var.tunstrap
+   }
+   provider "kubernetes" {
+     alias          = "node2_k3s"
+     config_context = "tunstrap-node2-k3s"
+   }
+   ```
+
+2. **Warning, explicit:** never derive `config_context`'s value from
+   `var.tunstrap` or any other live/decoded data. It must be a literal string
+   in the config, matching the deterministic naming scheme exactly
+   (`tunstrap-<node>-<target>`). Deriving it live would reintroduce a
+   variable-bound value for data that has an env-native, fully static
+   alternative, defeating the point of Mode A.
+
+3. **Measured facts a consumer needs**, restated from the ticket's own six
+   findings plus this design's provider findings, not re-derived:
+
+   - **#1** — provider configuration **is** re-evaluated at apply.
+   - **#2** — outputs **freeze silently**: `file()` read through an output
+     returns the plan-time value at apply, with no error — the nastiest
+     failure mode, name it as such.
+   - **#3** — per-alias `config_context` works with an env-supplied
+     kubeconfig path (Mode A's own basis, shown in item 1's example).
+   - **#4** — plan-safe end to end, measured live: plan with one set of
+     ports, mutate only the kubeconfig, apply the *saved* plan → the alias
+     uses the mutated value, zero "Mismatch between input and plan variable
+     value" — the e2e-level confirmation that Mode A's env-native path
+     really is plan-safe across a saved-plan reuse, not just a theoretical
+     consequence of finding #1.
+   - **#5** — `KUBE_CONFIG_PATHS` is colon-separated on Linux (comma
+     silently falls back to `localhost:80`).
+   - **#6** — a live value bound to a `var.` **does** trip "Mismatch between
+     input and plan variable value" on a saved plan (Mode B's one-shot rule
+     rests on this).
+   - A live value bound to a **resource attribute** (not a provider config
+     block) produces `Error: Provider produced inconsistent final plan` —
+     confirmed for `hashicorp/kubernetes` v2.38.0
+     (`docs/artifacts/2026-08-07-issue15-provider-env-findings.md`, Q3).
+     Provider-block placement, as shown in item 1's example, is the only
+     supported shape in both Mode A and Mode B.
+
+4. The `config_context` values above follow tunstrap's deterministic naming
+   scheme (`tunstrap-<node>-<target>`) exactly — the same names
+   `rename_identities` writes into the materialized kubeconfig. That matters
+   beyond providers: anyone who pipes the materialized file straight into
+   `kubectl --context` instead of through a provider block uses the same
+   literal context names.
+
+## Mode B: unified-file convenience (ports + kube references; does NOT satisfy the ticket's strict contract)
+
+A real consumer may use Mode A for kube and Mode B for ports in the same
+module. Nothing here satisfies the ticket's strict "nothing live enters
+Terraform" guarantee — state that plainly to a reader, not glossed over.
+There is no literal, operator-pinned path and no `var.`-derived locator
+anywhere in this section: the session dir stays ephemeral unconditionally.
+
+5. **The shape**, a worked example reading the env-carried
+   `TUNSTRAP_OUTPUT_FILE` locator via Terragrunt's `get_env(...)` — no
+   `--session-dir` precondition and no operator-agreed path:
+
+   ```hcl
+   locals {
+     tunnel = try(
+       jsondecode(file(get_env("TUNSTRAP_OUTPUT_FILE"))),
+       { nodes = {} },
+     )
+   }
+
+   provider "kubernetes" {
+     config_path = local.tunnel.nodes.node1.kube.k3s.path
+   }
+   ```
+
+   Read directly inside the `locals` block that feeds the provider config —
+   never through an `output`, per finding #2.
+
+6. **Ports lose their integer form** (`"host:port"`, not a bare port
+   number) — the extraction idiom:
+
+   ```hcl
+   locals {
+     service1_port = split(":", local.tunnel.nodes.node1.ports.service1)[1]
+   }
+   ```
+
+7. **The stability contract**, restated plainly: **both** Mode B forms —
+   item 5's `TUNSTRAP_OUTPUT_FILE` form and the `--output-var`
+   (`var.tunstrap`) form — are **one-shot `plan && apply` only**, with no
+   saved-plan reuse across a tunstrap restart for either and no locator
+   exemption of any kind (the check compares the variable's whole value; the
+   file itself is deleted at teardown alongside the rest of `tunnel-data/`).
+   Findings #1, #2 and #6 back this. Stated as plainly as the design doc
+   states it: *"Neither Mode B form survives a tunstrap restart. If you need
+   a saved plan to apply cleanly against fresh ports or fetched-file
+   content, re-run plan in the same tunstrap invocation."*
+
+8. **`jsondecode`, not JavaScript.** Consumption is via HCL's `jsondecode`;
+   there is no JS runtime anywhere in this stack (ADR entry 12).
+
+9. **Fetched files:** *"Fetched file content never enters a Terraform
+   variable or plan file — only its path, size, and checksum do. Read the
+   file itself at `fetch_files.<name>.path` if you need its contents."*
 
 ## Measured Terragrunt facts
 
