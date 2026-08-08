@@ -463,7 +463,6 @@ def test_stdin_payload_output_env_forces_materialize_for_kube_targets(
     )
     res = CliRunner().invoke(main, ["start", "--output", "env"], input=stdin_payload)
     assert res.exit_code == 0, res.output
-    assert (
-        captured["schema"].daemon.materialize is True
-    ), "--output env must force materialize=True for a stdin payload too"
+    forced_materialize = captured["schema"].daemon.materialize is True
+    assert forced_materialize, "--output env must force materialize=True for a stdin payload too"
     assert f"export KUBECONFIG='{payload_session_dir / 'tunnel-data' / 'k3s'}'" in res.output

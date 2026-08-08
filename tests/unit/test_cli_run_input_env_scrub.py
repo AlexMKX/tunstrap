@@ -158,9 +158,8 @@ def test_scrub_is_narrow_and_leaves_the_rest_of_the_environment_alone(
     env = _run(monkeypatch, spawn, tmp_path)
 
     assert env["TUNSTRAP_UNRELATED_KEEP_ME"] == "keep"
-    assert env["TUNSTRAP_SESSION_DIR"] == str(
-        tmp_path
-    ), "the session scalars must survive the scrub"
+    session_dir_survived = env["TUNSTRAP_SESSION_DIR"] == str(tmp_path)
+    assert session_dir_survived, "the session scalars must survive the scrub"
 
 
 def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
