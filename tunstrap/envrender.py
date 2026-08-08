@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from tunstrap.exceptions import MultiNodeEnvUnsupported
-from tunstrap.schemas import InputSchema, OutputSchema, RunKubeTarget
+from tunstrap.schemas import (
+    InputSchema,
+    OutputSchema,
+    UnifiedFetchRef,
+    UnifiedKubeRef,
+    UnifiedNode,
+    UnifiedSession,
+)
 
 _NON_ALNUM = re.compile(r"[^A-Z0-9]")
 
@@ -95,23 +103,43 @@ def render_env(output: OutputSchema) -> dict[str, str]:
 
 
 def render_output_var(output: OutputSchema) -> str:
-    """Serialise the envelope for ``--output-var``, minus the kube credentials.
+    """Serialise the unified structure for ``--output-var``."""
+    return json.dumps(render_unified_output(output), separators=(",", ":"))
 
-    The consumer binds this to a Terraform variable, and OpenTofu writes
-    root-module variable values into the plan file, so the private key and the
-    embedded-credential kubeconfig must never enter it. They are not needed:
-    ``run`` forces ``materialize=True``, so the chain reads ``path``.
 
-    The projection is applied per kube target through ``RunKubeTarget``, an
-    allow-list model — see its docstring for the field-by-field rationale.
+def render_unified_output(output: OutputSchema) -> dict[str, Any]:
+    """Build the unified, node-qualified structure without content payloads.
+
+    Callers must ensure fetched files are already materialized and carry their
+    path before calling this function.
     """
-    payload = output.model_dump(mode="json")
-    for node in payload["connections"].values():
-        node["kube_targets"] = {
-            name: RunKubeTarget.model_validate(target).model_dump(mode="json")
-            for name, target in node["kube_targets"].items()
+    nodes: dict[str, object] = {}
+    for node_name, node in output.connections.items():
+        kube = {
+            kname: UnifiedKubeRef(
+                path=target.path, context=target.context_name, endpoint=target.endpoint
+            )
+            for kname, target in node.kube_targets.items()
         }
-    return json.dumps(payload, separators=(",", ":"))
+        ports = {tname: f"127.0.0.1:{port}" for tname, port in node.ports.items()}
+        fetch_files = {
+            fname: (
+                UnifiedFetchRef(error=f.error)
+                if f.error is not None
+                else UnifiedFetchRef(path=f.path, size=f.size, sha256=f.sha256)
+            )
+            for fname, f in node.fetch_files.items()
+        }
+        nodes[node_name] = UnifiedNode(ports=ports, kube=kube, fetch_files=fetch_files).model_dump(
+            exclude_none=True
+        )
+    session = UnifiedSession(
+        session_dir=output.session_dir,
+        pid=output.pid,
+        started_at=output.started_at,
+        warnings=output.warnings,
+    ).model_dump(mode="json")
+    return {"session": session, "nodes": nodes}
 
 
 def predicted_env_keys(schema: InputSchema) -> set[str]:

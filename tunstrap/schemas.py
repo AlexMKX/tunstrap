@@ -311,6 +311,7 @@ class FetchedFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content_b64: str | None = None
+    path: str | None = None
     size: int | None = None
     sha256: str | None = None
     error: str | None = None
@@ -418,6 +419,57 @@ class OutputSchema(BaseModel):
     session_dir: str
     started_at: str
     warnings: list[TunnelWarning] = Field(default_factory=list)
+
+
+class UnifiedKubeRef(BaseModel):
+    """Kube reference in the unified output: never credentials, never content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None
+    context: str
+    endpoint: str
+
+
+class UnifiedSession(BaseModel):
+    """Session metadata block of the unified output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_dir: str
+    pid: int
+    started_at: str
+    warnings: list[TunnelWarning] = Field(default_factory=list)
+
+
+class UnifiedFetchRef(BaseModel):
+    """Fetched-file reference in the unified output: never content_b64."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+    error: str | None = None
+
+
+class UnifiedNode(BaseModel):
+    """One node's body in the unified output: ports, kube refs, fetch_files."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ports: dict[str, str] = Field(default_factory=dict)
+    kube: dict[str, UnifiedKubeRef] = Field(default_factory=dict)
+    fetch_files: dict[str, UnifiedFetchRef] = Field(default_factory=dict)
+
+
+class UnifiedOutput(BaseModel):
+    """The entire consumer-facing output: two reserved top-level keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session: UnifiedSession
+    nodes: dict[str, UnifiedNode]
 
 
 class ErrorOutput(BaseModel):

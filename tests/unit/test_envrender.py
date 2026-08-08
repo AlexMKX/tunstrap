@@ -1,8 +1,17 @@
+import json
+
 import pytest
 
-from tunstrap.envrender import format_exports, predicted_env_keys, render_env, render_kube_env
+from tunstrap.envrender import (
+    format_exports,
+    predicted_env_keys,
+    render_env,
+    render_kube_env,
+    render_output_var,
+    render_unified_output,
+)
 from tunstrap.exceptions import MultiNodeEnvUnsupported
-from tunstrap.schemas import InputSchema, KubeTargetOutput, NodeOutput, OutputSchema
+from tunstrap.schemas import FetchedFile, InputSchema, KubeTargetOutput, NodeOutput, OutputSchema
 
 pytestmark = pytest.mark.unit
 
@@ -20,6 +29,90 @@ def _kube_out(port, path):
         content_b64="",
         path=path,
     )
+
+
+def _kube_out_full(port, path, *, context):
+    result = _kube_out(port, path)
+    result.context_name = context
+    return result
+
+
+def test_render_unified_output_shape() -> None:
+    """Ports, kube references, and fetched-file references use the unified shape."""
+    out = OutputSchema(
+        connections={
+            "node1": NodeOutput(
+                ports={"service1": 5432},
+                kube_targets={
+                    "k3s": _kube_out_full(
+                        7000, "/s/tunnel-data/node1-k3s", context="tunstrap-node1-k3s"
+                    )
+                },
+                fetch_files={
+                    "hosts": FetchedFile(
+                        content_b64="aG9zdHM=",
+                        size=6,
+                        sha256="ab" * 32,
+                        path="/s/tunnel-data/node1-hosts",
+                    )
+                },
+            )
+        },
+        pid=42,
+        session_dir="/s",
+        started_at="2026-08-07T00:00:00Z",
+    )
+    unified = render_unified_output(out)
+    assert unified["session"] == {
+        "session_dir": "/s",
+        "pid": 42,
+        "started_at": "2026-08-07T00:00:00Z",
+        "warnings": [],
+    }
+    node = unified["nodes"]["node1"]
+    assert node["ports"] == {"service1": "127.0.0.1:5432"}
+    assert node["kube"]["k3s"] == {
+        "path": "/s/tunnel-data/node1-k3s",
+        "context": "tunstrap-node1-k3s",
+        "endpoint": "https://127.0.0.1:7000",
+    }
+    assert node["fetch_files"]["hosts"] == {
+        "path": "/s/tunnel-data/node1-hosts",
+        "size": 6,
+        "sha256": "ab" * 32,
+    }
+    dumped = json.dumps(unified)
+    for leaked in ("client_certificate_data", "client_key_data", "content_b64"):
+        assert leaked not in dumped
+
+
+def test_render_unified_output_multi_node() -> None:
+    """Node dimension is a nested key: two nodes, two independent bodies."""
+    out = OutputSchema(
+        connections={
+            "a": NodeOutput(ports={"db": 1}),
+            "b": NodeOutput(ports={"db": 2}),
+        },
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    unified = render_unified_output(out)
+    assert set(unified["nodes"]) == {"a", "b"}
+    assert unified["nodes"]["a"]["ports"]["db"] == "127.0.0.1:1"
+    assert unified["nodes"]["b"]["ports"]["db"] == "127.0.0.1:2"
+
+
+def test_render_output_var_serializes_the_unified_shape() -> None:
+    """The output variable decodes to the unified output shape."""
+    out = OutputSchema(
+        connections={"h": NodeOutput(ports={"db": 1})},
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    decoded = json.loads(render_output_var(out))
+    assert decoded == render_unified_output(out)
 
 
 def test_render_ports_and_session():
