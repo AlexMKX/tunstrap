@@ -45,7 +45,20 @@ _TOFU = "tofu"
 # Terragrunt's extra_arguments.env_vars scopes TUNSTRAP_INPUT to the listed
 # commands AND their automatic ``init`` (measured fact 4 in the design spec), so
 # a ``terragrunt plan`` sets it for the auto-init too — without this bypass the
-# auto-init would build a needless second tunnel.
+# auto-init would build a needless second tunnel. ``validate`` and ``fmt`` are
+# the same kind of provable no-cluster-contact command as ``init``: ``validate``
+# checks the configuration against installed provider schemas only and never
+# configures a provider (no cluster round-trip, unlike ``plan``/``apply``);
+# ``fmt`` touches only local ``.tf`` files. Bypassing them avoids a pointless
+# SSH tunnel plus kubeconfig materialization on every ``validate``/``fmt``.
+#
+# Tension: this bypasses TUNSTRAP_INPUT even when a consumer deliberately
+# listed ``validate``/``fmt`` in Terragrunt's ``extra_arguments.commands`` —
+# the opt-in the "everything else tunnels" rule below otherwise honours. An
+# earlier allow-list version of this bypass set was rejected on exactly that
+# opt-in-should-win reasoning; ``validate``/``fmt`` are added here as narrow,
+# individually-justified exceptions (provably cluster-free, same as ``init``),
+# not a reopening of that allow-list.
 #
 # Everything NOT in this set TUNNELS. TUNSTRAP_INPUT is set only for commands
 # the consumer deliberately listed in Terragrunt's ``commands``, so the proxy
@@ -53,7 +66,7 @@ _TOFU = "tofu"
 # ``commands`` and asserts the tunnelled row) rather than second-guess it with a
 # cluster-only allow-list of its own. An earlier allow-list version did exactly
 # that and was a behaviour change, not the ``-chdir`` gap fix it posed as.
-_BYPASS_COMMANDS = frozenset({"init", "version"})
+_BYPASS_COMMANDS = frozenset({"init", "version", "validate", "fmt"})
 
 # Global flags that take their value as a SEPARATE argv token (``-chdir DIR``).
 # Their ``=`` form (``-chdir=DIR``) is one token and is handled by the bare
@@ -84,10 +97,11 @@ def main() -> int:
 def _should_bypass(argv: list[str]) -> bool:
     """True iff the subcommand needs no tunnel (``TUNSTRAP_INPUT`` assumed set).
 
-    The pinned bypass set: ``init`` and ``version`` subcommands, plus anything
-    ``_find_subcommand`` returns ``None`` for (``-version``/``-help`` global
-    flags, or no subcommand at all). Everything else tunnels. Pinned exhaustively
-    by the ``_should_bypass`` table test; do not broaden without updating it.
+    The pinned bypass set: ``init``, ``version``, ``validate`` and ``fmt``
+    subcommands, plus anything ``_find_subcommand`` returns ``None`` for
+    (``-version``/``-help`` global flags, or no subcommand at all). Everything
+    else tunnels. Pinned exhaustively by the ``_should_bypass`` table test; do
+    not broaden without updating it.
     """
     subcmd = _find_subcommand(argv)
     return subcmd is None or subcmd in _BYPASS_COMMANDS

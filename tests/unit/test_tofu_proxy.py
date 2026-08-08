@@ -188,6 +188,8 @@ _BYPASS_CASES = [
     (["-version"], "version flag prints and exits; no cluster contact"),
     (["-help"], "help prints and exits; no cluster contact"),
     ([], "no subcommand prints help; no cluster contact"),
+    (["validate"], "validate checks against installed provider schemas only; no cluster"),
+    (["fmt"], "fmt touches only local .tf files; no cluster"),
     # The documented gap the shell shim could not close (its ``case "$1"`` saw
     # ``-chdir`` as the first token, so it tunnelled a needless init):
     (["-chdir=somewhere", "init"], "-chdir=DIR init: shell matched $1 only"),
@@ -208,12 +210,10 @@ _TUNNEL_CASES = [
     # asked for them (Terragrunt's ``commands`` list is the authority). The
     # proxy must not veto that:
     "output",
-    "validate",
     "show",
     "state",
     "taint",
     "untaint",
-    "fmt",
     "providers",
     "test",
     # An unknown subcommand tunnels rather than guesses — failing loudly inside
@@ -264,7 +264,7 @@ def test_bypass_decision_execs_tofu(
     assert capturing_execvp == [["tofu", *argv]]
 
 
-@pytest.mark.parametrize("cmd", ["plan", "output", "validate", "test", "-chdir=x plan"])
+@pytest.mark.parametrize("cmd", ["plan", "output", "test", "-chdir=x plan"])
 def test_tunnel_decision_runs_tofu_in_process(
     monkeypatch: pytest.MonkeyPatch,
     capturing_execvp: list[list[str]],

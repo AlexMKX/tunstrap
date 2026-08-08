@@ -72,7 +72,7 @@ from `argv` and `TUNSTRAP_INPUT`:
 | Condition | Branch | What happens |
 |---|---|---|
 | `TUNSTRAP_INPUT` unset | pass-through | `execvp tofu "$@"` — no tunnel, no `tunstrap`. This is the "infra not applied yet" path: Terragrunt omits the env_var, so the proxy is a transparent `tofu` wrapper. |
-| subcommand is `init`/`version`/`-version`/`-help`, or no subcommand | pass-through | `execvp tofu "$@"` — same. `init` only configures the backend and downloads providers; it never reaches the cluster API. Skipping it avoids a redundant tunnel per `terragrunt plan` (Terragrunt's `extra_arguments.env_vars` reaches the listed commands **and** their automatic `init`). The subcommand is parsed past global flags, so `tofu -chdir=DIR init` also bypasses (see "A fixed gap" below). |
+| subcommand is `init`/`version`/`validate`/`fmt`/`-version`/`-help`, or no subcommand | pass-through | `execvp tofu "$@"` — same. `init` only configures the backend and downloads providers; `validate` checks the configuration against installed provider schemas only; `fmt` touches only local `.tf` files — none of the three ever reach the cluster API. Skipping them avoids a redundant tunnel per `terragrunt plan`/`validate`/`fmt` (Terragrunt's `extra_arguments.env_vars` reaches the listed commands **and** their automatic `init`). The subcommand is parsed past global flags, so `tofu -chdir=DIR init` also bypasses (see "A fixed gap" below). **Note:** this bypasses `TUNSTRAP_INPUT` even if you deliberately list `validate`/`fmt` in `commands` below — both are provably cluster-free, so the proxy does not build a tunnel for them regardless of that opt-in. |
 | otherwise | tunnelled | opens the tunnel, injects `TF_VAR_tunstrap` (the connection envelope) plus the scalar env, runs `tofu`, and tears the tunnel down in a `finally` — so the tunnel's lifetime is exactly the child's. Reuses `tunstrap run`'s hardened path in-process; no second process level. |
 
 **Never write to stdout.** Terragrunt captures and labels `tofu`'s stdout by
@@ -269,6 +269,11 @@ commands make provider API calls". Concretely:
 | `console` | yes, if you use it | can evaluate provider data sources; add it if interactive |
 | `init`, `validate` | no | backend config / schema checks only; no cluster contact |
 | `output`, `show`, `state *`, `taint`, `untaint`, `fmt`, `providers` | no | read/rewrite state and files |
+
+`validate` and `fmt` are also in the proxy's own bypass set (see "How the proxy
+works," above): even if you list either in `commands`, the proxy still
+`execvp`s `tofu` directly for them rather than tunnelling, because both are
+provably cluster-free.
 
 Everything not listed gets `TUNSTRAP_INPUT` unset and takes the proxy's
 pass-through branch, so the failure mode of forgetting a command is a **provider
