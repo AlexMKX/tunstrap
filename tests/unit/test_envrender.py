@@ -108,6 +108,33 @@ def test_render_kube_env_two_files_sets_paths_not_path() -> None:
     assert "KUBE_CONFIG_PATH" not in env
 
 
+def test_render_kube_env_not_materialized_raises() -> None:
+    """An unmaterialized target is rejected by render_kube_env itself."""
+    out = OutputSchema(
+        connections={"h": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7000, None)})},
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    with pytest.raises(ValueError, match="not materialized"):
+        render_kube_env(out)
+
+
+def test_render_kube_env_multi_node_not_materialized_raises() -> None:
+    """An unmaterialized target is rejected during multi-node aggregation."""
+    out = OutputSchema(
+        connections={
+            "a": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7000, "/s/a-k3s")}),
+            "b": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7001, None)}),
+        },
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    with pytest.raises(ValueError, match="not materialized"):
+        render_kube_env(out)
+
+
 def test_predicted_env_keys_reserves_all_three_for_one_kube_target() -> None:
     """Reserve every conditional kube-channel key whenever kube targets exist."""
     schema = InputSchema.model_validate(
@@ -229,7 +256,7 @@ def test_predicted_env_keys_no_kube_omits_kubeconfig() -> None:
 
 
 def test_predicted_env_keys_multi_node_is_empty() -> None:
-    """Multi-node input injects no scalars at all, so nothing can collide."""
+    """Multi-node input injects no TUNSTRAP_* scalars, so nothing can collide."""
     node = {
         "host": "h.example.net",
         "user": "u",
