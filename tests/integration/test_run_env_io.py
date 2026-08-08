@@ -1,11 +1,11 @@
 """`run --input-env` / `--output-var` against the real docker SSH rig.
 
 Validates: a complete InputSchema handed to run through the environment opens
-real tunnels; the child receives the OutputSchema as JSON (projected to drop
-the kube credentials — see tests/unit/test_cli_run_output_var_projection.py)
-and the advertised endpoints actually accept connections; multi-node results
-carry every node and no ambiguous TUNSTRAP_* scalars; and the teardown removes
-the session.
+real tunnels; the child receives the unified output structure as JSON
+(projected to drop the kube credentials — see
+tests/unit/test_cli_run_output_var_projection.py) and the advertised endpoints
+actually accept connections; multi-node results carry every node and no
+target-scoped TUNSTRAP_* scalars; and the teardown removes the session.
 
 Both nodes point at `sshd-bastion`: it is the only service in the rig with
 AllowTcpForwarding enabled and a route to the internal `target-1`, so it is
@@ -44,13 +44,15 @@ _TIMEOUT = 120
 _PROBE_SINGLE = """
 import json, os, socket, sys
 envelope = json.loads(os.environ["TF_VAR_tunstrap"])
-assert sorted(envelope["connections"]) == ["hub"], envelope["connections"]
-port = envelope["connections"]["hub"]["ports"]["web"]
-assert os.environ["TUNSTRAP_WEB_PORT"] == str(port), (
-    os.environ["TUNSTRAP_WEB_PORT"], port
+assert sorted(envelope["nodes"]) == ["hub"], envelope["nodes"]
+endpoint = envelope["nodes"]["hub"]["ports"]["web"]
+materialized = json.load(open(os.environ["TUNSTRAP_OUTPUT_FILE"]))
+assert materialized["nodes"]["hub"]["ports"]["web"] == endpoint, (
+    materialized["nodes"]["hub"]["ports"]["web"], endpoint
 )
-assert envelope["pid"] > 0, envelope["pid"]
-assert envelope["session_dir"], envelope["session_dir"]
+port = int(endpoint.rsplit(":", 1)[1])
+assert envelope["session"]["pid"] > 0, envelope["session"]["pid"]
+assert envelope["session"]["session_dir"], envelope["session"]["session_dir"]
 socket.create_connection(("127.0.0.1", port), 5).close()
 sys.stdout.write("PROBE_OK")
 """
@@ -58,14 +60,15 @@ sys.stdout.write("PROBE_OK")
 _PROBE_MULTI = """
 import json, os, socket, sys
 envelope = json.loads(os.environ["TF_VAR_tunstrap"])
-assert sorted(envelope["connections"]) == ["edge", "hub"], sorted(envelope["connections"])
-# TUNSTRAP_INPUT is the payload variable the parent inherited, not an injected scalar.
-leaked = sorted(
-    k for k in os.environ if k.startswith("TUNSTRAP_") and k != "TUNSTRAP_INPUT"
-)
+assert sorted(envelope["nodes"]) == ["edge", "hub"], sorted(envelope["nodes"])
+# TUNSTRAP_INPUT is the payload variable the parent inherited, not an injected
+# scalar; TUNSTRAP_SESSION_DIR/_PID/_OUTPUT_FILE are the three sanctioned
+# survivors, unconditional on node count -- not the ambiguous per-target scalars.
+survivors = {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE", "TUNSTRAP_INPUT"}
+leaked = sorted(k for k in os.environ if k.startswith("TUNSTRAP_") and k not in survivors)
 assert leaked == [], leaked
 for name in ("hub", "edge"):
-    port = envelope["connections"][name]["ports"]["web"]
+    port = int(envelope["nodes"][name]["ports"]["web"].rsplit(":", 1)[1])
     socket.create_connection(("127.0.0.1", port), 5).close()
 sys.stdout.write("PROBE_OK")
 """
@@ -170,11 +173,18 @@ def test_multi_node_env_input_carries_every_node_and_no_scalars(
     assert not (session_dir / "tunnel-data").exists(), "teardown left tunnel-data behind"
 
 
-def test_multi_node_without_output_var_is_exit_1(
-    ssh_test_cluster: dict[str, Any], tmp_path: Path
+def test_multi_node_without_output_var_now_succeeds(
+    ssh_test_cluster: dict[str, Any], tmp_path: Path, started_daemons: list[str]
 ) -> None:
-    """Two nodes and no --output-var: rejected before any daemon is spawned."""
+    """Two nodes and no --output-var succeeds: materialization covers multi-node
+    unconditionally, so the opt-in --output-var gate has nothing left to force.
+
+    Materialization *content* is not re-verified here -- that is the unit
+    tier's job (test_cli_run_materialize.py); this test's remaining job is
+    confirming the real console script allows the case.
+    """
     session_dir = tmp_path / "session"
+    started_daemons.append(str(session_dir))
     result = _run(
         [
             "run",
@@ -187,10 +197,9 @@ def test_multi_node_without_output_var_is_exit_1(
         ],
         _payload(ssh_test_cluster, names=["hub", "edge"]),
     )
-    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
-    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
-    assert json.loads(result.stderr)["error"] == "MultiNodeEnvUnsupported"
-    assert not session_dir.exists(), "a pre-spawn rejection created a session dir"
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "MultiNodeEnvUnsupported" not in result.stderr, result.stderr
+    assert not (session_dir / "tunnel-data").exists(), "teardown left tunnel-data behind"
 
 
 def test_unset_payload_variable_is_exit_1(tmp_path: Path) -> None:
