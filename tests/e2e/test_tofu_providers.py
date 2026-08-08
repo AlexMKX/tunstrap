@@ -151,7 +151,7 @@ def test_apply_creates_real_objects_through_the_tunnel_and_destroy_removes_them(
 
     # --- assertion 4c: the path the module used is the path the envelope gave ---
     envelope = json.loads(apply_env["TF_VAR_tunstrap"])
-    expected_path = envelope["connections"]["node"]["kube_targets"]["k3s"]["path"]
+    expected_path = envelope["nodes"]["node"]["kube"]["k3s"]["path"]
     assert expected_path
     state = json.loads((tofu_module / "terraform.tfstate").read_text())
     assert state["outputs"]["kubepath_used"]["value"] == expected_path
@@ -248,13 +248,14 @@ def test_real_provider_failure_surfaces_as_nonzero(
         "  user: {}\n"
     )
     envelope = {
-        "connections": {
+        "nodes": {
             "node": {
                 "ports": {},
-                "kube_targets": {
+                "kube": {
                     "k3s": {
-                        "endpoint": f"https://127.0.0.1:{dead_port}",
                         "path": str(dead_kubeconfig),
+                        "context": "dead",
+                        "endpoint": f"https://127.0.0.1:{dead_port}",
                     }
                 },
             }

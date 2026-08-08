@@ -2,7 +2,7 @@
 #   tunstrap run --output-var TF_VAR_tunstrap
 #     -> var.tunstrap (JSON string)
 #     -> try(jsondecode(...))
-#     -> connections.node.kube_targets.k3s.path
+#     -> nodes.node.kube.k3s.path
 #     -> provider config_path
 #
 # The inert branch is deliberately identical in shape to the one the consumer
@@ -24,8 +24,8 @@ variable "tunstrap" {
 locals {
   # try() is load-bearing: jsondecode("") is an error, so a bare jsondecode
   # would make `tofu plan` fail whenever the infrastructure is not applied yet.
-  tunnel   = try(jsondecode(var.tunstrap), { connections = {} })
-  kubepath = try(local.tunnel.connections.node.kube_targets.k3s.path, "")
+  tunnel   = try(jsondecode(var.tunstrap), { nodes = {} })
+  kubepath = try(local.tunnel.nodes.node.kube.k3s.path, "")
 
   # Both providers must be configured *equivalently* - the whole point of the
   # helm block is that it reaches the same cluster the kubernetes provider
@@ -70,8 +70,8 @@ resource "helm_release" "probe" {
 }
 
 # Read straight out of terraform.tfstate by the chain-integrity assertion and
-# compared against connections.node.kube_targets.k3s.path in the envelope, so a
-# hard-coded or fallback path cannot pass.
+# compared against nodes.node.kube.k3s.path in the envelope, so a hard-coded
+# or fallback path cannot pass.
 #
 # nonsensitive() is required, not cosmetic: `sensitive = true` on var.tunstrap
 # taints everything derived from it, and OpenTofu refuses an output that

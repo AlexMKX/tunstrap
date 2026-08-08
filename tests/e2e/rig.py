@@ -168,7 +168,7 @@ def tunstrap_input_json(rig: dict[str, Any], *, materialize: bool | None = None)
     """The InputSchema the shim reads from TUNSTRAP_INPUT.
 
     The node key is ``node`` and the kube-target key is ``k3s`` because
-    ``module/main.tf`` decodes ``connections.node.kube_targets.k3s.path``.
+    ``module/main.tf`` decodes ``nodes.node.kube.k3s.path``.
 
     ``materialize`` is omitted by default, on purpose. ``run`` forces
     ``daemon.materialize = True`` on an --input-env payload ("the one place run

@@ -336,7 +336,7 @@ def test_terragrunt_apply_destroy_through_the_proxy(
     parsed = json.loads(out.stdout)
     kubepath = parsed["kubepath_used"]["value"]
     envelope = json.loads(by_cmd["apply"][-1]["TF_VAR_tunstrap"])
-    expected_path = envelope["connections"]["node"]["kube_targets"]["k3s"]["path"]
+    expected_path = envelope["nodes"]["node"]["kube"]["k3s"]["path"]
     path_detail = f"output kubepath_used={kubepath!r} envelope path={expected_path!r}"
     assert kubepath == expected_path, path_detail
 
@@ -422,7 +422,7 @@ def test_tunnelled_output_through_tunstrap_run_parses_cleanly(
     # opens a fresh tunnel with its own session dir, so its path is always a
     # different temp dir; comparing against it would fail on every green run.
     envelope = json.loads(by_cmd["apply"][-1]["TF_VAR_tunstrap"])
-    expected_path = envelope["connections"]["node"]["kube_targets"]["k3s"]["path"]
+    expected_path = envelope["nodes"]["node"]["kube"]["k3s"]["path"]
     path_detail = (
         f"tunnelled output kubepath_used={kubepath!r} apply envelope path={expected_path!r}"
     )
