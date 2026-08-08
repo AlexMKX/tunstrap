@@ -910,6 +910,34 @@ def test_launch_failure_is_127_and_tears_down(
     assert len(teardowns) == 1
 
 
+def test_materialization_failure_is_daemon_error_not_launch_failure(
+    monkeypatch: pytest.MonkeyPatch, teardowns: list[tuple[Any, ...]]
+) -> None:
+    """An unwritable session dir must not be misreported as "failed to launch
+    command" (exit 127): that message and code mean the child itself could
+    not be found or exec'd, not that the session directory is unwritable.
+    Reported as DaemonError (exit 4), the same as any other unexpected
+    post-spawn failure; teardown still runs exactly once."""
+
+    def _boom(_out: Any) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(
+        cli_mod,
+        "spawn_daemon",
+        lambda _s, session_dir=None, *, input_env=None: _success_payload(session_dir),
+    )
+    monkeypatch.setattr(cli_mod, "write_materialized_output", _boom)
+    result = CliRunner().invoke(main, _ARGS, input="secret\n")
+    assert result.exit_code == 4
+    assert result.stdout == "", f"run leaked to stdout: {result.stdout!r}"
+    assert "failed to launch command" not in result.stderr
+    error = json.loads(result.stderr)
+    assert error["error"] == "DaemonError"
+    assert error["details"]["type"] == "PermissionError"
+    assert len(teardowns) == 1
+
+
 def test_failing_signal_restoration_cannot_skip_teardown(
     monkeypatch: pytest.MonkeyPatch,
     teardowns: list[tuple[Any, ...]],

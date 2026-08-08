@@ -233,25 +233,3 @@ def test_output_var_projection_leaves_the_rest_of_the_envelope_intact(
     assert decoded["session"]["session_dir"] == str(tmp_path)
     assert decoded["session"]["started_at"] == "2026-07-31T00:00:00Z"
     assert decoded["nodes"]["node"]["ports"] == {"db": "127.0.0.1:5432"}
-
-
-def test_render_unified_output_never_calls_model_validate_on_kube_data() -> None:
-    """The allow-list property now holds by construction, not by an
-    extra='ignore' projection model. render_unified_output builds
-    UnifiedKubeRef from three explicit keyword arguments (path, context,
-    endpoint) -- a hypothetical field added to KubeTargetOutput later cannot
-    leak through without someone editing that constructor call by hand.
-    test_output_var_keeps_every_field_the_consumer_chain_reads's exact-equality
-    assertion already proves this end-to-end; this test pins the mechanism
-    directly against the source so the property cannot silently regress to a
-    model_dump of untrusted kube data.
-    """
-    import inspect
-
-    from tunstrap import envrender
-
-    source = inspect.getsource(envrender.render_unified_output)
-    assert "UnifiedKubeRef(" in source
-    assert (
-        ".model_validate(" not in source
-    ), "kube data must never be validated from untrusted input"

@@ -69,6 +69,62 @@ def test_run_materializes_output_json(tmp_path: Path, monkeypatch: pytest.Monkey
     assert _FakePopen.last_env["TUNSTRAP_OUTPUT_FILE"] == str(materialized)
 
 
+def test_run_materializes_output_json_for_multi_node_without_output_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A two-node run with no --output-var still writes tunnel-data/output.json,
+    carrying both nodes -- materialization is unconditional on both --output-var
+    and node count, not just on node count alone."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    payload = {
+        "connections": {
+            "a": {"ports": {"db": 5432}, "fetch_files": {}, "kube_targets": {}},
+            "b": {"ports": {"db": 5433}, "fetch_files": {}, "kube_targets": {}},
+        },
+        "pid": 99,
+        "session_dir": str(session_dir),
+        "started_at": "2026-08-07T00:00:00Z",
+    }
+    monkeypatch.setattr(
+        cli_mod,
+        "spawn_daemon",
+        lambda schema, session_dir=None, *, input_env=None: {"kind": "success", "payload": payload},
+    )
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(cli_mod, "_teardown_run", cleaning_teardown)
+    monkeypatch.setenv(
+        "TUNSTRAP_INPUT",
+        json.dumps(
+            {
+                "nodes": {
+                    "a": {
+                        "host": "h1",
+                        "user": "u",
+                        "ssh_password": "p",
+                        "remote_targets": {"db": "127.0.0.1:5432"},
+                    },
+                    "b": {
+                        "host": "h2",
+                        "user": "u",
+                        "ssh_password": "p",
+                        "remote_targets": {"db": "127.0.0.1:5433"},
+                    },
+                }
+            }
+        ),
+    )
+    result = CliRunner().invoke(main, ["run", "--input-env", "TUNSTRAP_INPUT", "--", "true"])
+    assert result.exit_code == 0, result.stderr
+    materialized = session_dir / "tunnel-data" / "output.json"
+    assert materialized.exists()
+    assert stat.S_IMODE(materialized.stat().st_mode) == 0o600
+    out = OutputSchema.model_validate(payload)
+    decoded = json.loads(materialized.read_text())
+    assert decoded == render_unified_output(out)
+    assert sorted(decoded["nodes"]) == ["a", "b"]
+
+
 class _FakePopen:
     last_env: dict[str, str] | None = None
     returncode = 0

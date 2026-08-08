@@ -161,9 +161,9 @@ def _start_schema(
     ``--output env`` forces materialization (``render_kube_env`` needs a
     kubeconfig on disk) in both channels: flag mode via ``force_materialize``,
     and a stdin payload here, overriding its own ``daemon.materialize`` --
-    otherwise a stdin payload declaring ``kube_targets`` with
-    ``materialize: false`` would reach the unconditional ``render_kube_env``
-    call with an unmaterialized path and raise a bare ``ValueError``.
+    otherwise a ``materialize: false`` stdin payload with ``kube_targets``
+    would hit the unconditional ``render_kube_env`` with an unmaterialized
+    path and raise a bare ``ValueError``.
     """
     if connection is None:
         if _conn_flags_present(
@@ -494,8 +494,8 @@ def _run_child(
     including ``OutputSchema.model_validate`` — which is exactly the case an
     earlier design left unguarded: a malformed success payload orphaned the
     daemon, because the session path was recovered from that same payload.
-    Materialization runs unconditionally, before the child starts, so
-    ``TUNSTRAP_OUTPUT_FILE`` always names a file that already exists.
+    Materialization runs before the child starts, so ``TUNSTRAP_OUTPUT_FILE``
+    always names a file that already exists.
     """
     out = OutputSchema.model_validate(payload)
     write_materialized_output(out)
@@ -505,10 +505,16 @@ def _run_child(
         input_env=input_env,
         suppress_kubeconfig=suppress_kubeconfig,
     )
-    # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
-    # forwarded to the child while it runs in the foreground.
-    # pylint: disable-next=consider-using-with
-    proc = subprocess.Popen(cmd, env=child_env)
+    try:
+        # Popen + .wait() (not subprocess.run) so SIGINT/SIGTERM can be
+        # forwarded to the child. Caught narrowly here, not around this whole
+        # function: an OSError from write_materialized_output above must not
+        # be misreported as "failed to launch command".
+        # pylint: disable-next=consider-using-with
+        proc = subprocess.Popen(cmd, env=child_env)
+    except OSError as exc:
+        sys.stderr.write(f"run: failed to launch command: {exc}\n")
+        return 127
 
     def _forward(signum: int, _frame: object) -> None:
         try:
@@ -548,6 +554,11 @@ def _supervise_child(  # pylint: disable=too-many-arguments
     a list *inside* the ``try``, so even a failure capturing them leaves the
     teardown reachable, and the restoration loop is nested in its own ``try``
     whose ``finally`` performs the teardown.
+
+    No ``except OSError`` here: ``_run_child`` handles the one OSError this
+    window reports as "failed to launch command" (``Popen``) internally, so
+    any other OSError reaches ``run_command``'s generic handler as ``DaemonError``
+    instead, not misattributed to the child command.
     """
     saved: list[tuple[int, Any]] = []
     try:
@@ -560,9 +571,6 @@ def _supervise_child(  # pylint: disable=too-many-arguments
             input_env=input_env,
             suppress_kubeconfig=suppress_kubeconfig,
         )
-    except OSError as exc:
-        sys.stderr.write(f"run: failed to launch command: {exc}\n")
-        return 127
     finally:
         try:
             # A distinct name: `signum` above is bound to signal.Signals, and
@@ -713,12 +721,9 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
             suppress_kubeconfig=suppress_kubeconfig,
         )
     except TunstrapError as exc:
-        # An expected outcome keeps its own exit code, mapped through
-        # exit_code_for rather than the generic "unexpected failure during
-        # run". Nothing in the current post-spawn window raises a
-        # TunstrapError, but a caller of _run_child's helpers doing so in the
-        # future gets its own exit code instead of a blanket exit 4. Teardown
-        # has already run in _supervise_child's finally, as it has below.
+        # An expected outcome keeps its own exit code via exit_code_for, not
+        # the generic exit 4 below. Nothing in the post-spawn window raises a
+        # TunstrapError today; this is future-proofing for one that does.
         sys.stderr.write(json.dumps(exc.to_error_output()) + "\n")
         returncode = exit_code_for(exc)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
