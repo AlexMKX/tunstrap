@@ -288,6 +288,22 @@ class InputSchema(BaseModel):
                     )
         return value
 
+    @model_validator(mode="after")
+    def _validate_kube_identity_names_are_unique(self) -> InputSchema:
+        """Reject collisions in the joined node and target identity name."""
+        seen: dict[str, tuple[str, str]] = {}
+        for node_name, node in self.nodes.items():
+            for target_name in node.kube_targets or {}:
+                joined = f"tunstrap-{node_name}-{target_name}"
+                if joined in seen:
+                    other_node, other_target = seen[joined]
+                    raise ValueError(
+                        f"kube identity name collision: ({node_name!r}, {target_name!r}) "
+                        f"and ({other_node!r}, {other_target!r}) both render {joined!r}"
+                    )
+                seen[joined] = (node_name, target_name)
+        return self
+
 
 class FetchedFile(BaseModel):
     """Either a successful read (content_b64+size+sha256) or an error string."""
