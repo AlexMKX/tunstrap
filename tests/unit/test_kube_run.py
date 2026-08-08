@@ -111,6 +111,26 @@ async def test_run_kube_target_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out.content_b64  # non-empty patched kubeconfig
 
 
+@pytest.mark.asyncio
+async def test_run_kube_target_reports_renamed_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Output identity names are deterministic and node-qualified."""
+    monkeypatch.setattr(
+        "tunstrap.kube.sans_from_cert",
+        lambda _der: (["dev-kube-1", "192.0.2.11"], []),
+    )
+    conn = _FakeConn((FIXTURES / "single_internal_ip.yaml").read_bytes())
+    outputs, _, _ = await run_kube_targets(
+        conn,
+        {"k3s": KubeTarget.model_validate({"kubeconfig_path": "/etc/k3s.yaml"})},
+        connect_timeout=5,
+        probe=_probe_ok,
+        node_name="edge",
+    )
+    out = outputs["k3s"]
+    assert out.context_name == "tunstrap-edge-k3s"
+    assert out.cluster_name == "tunstrap-edge-k3s"
+
+
 def test_default_probe_is_callable() -> None:
     """A default TLS probe is exported for production use."""
     from tunstrap.kube import default_san_probe

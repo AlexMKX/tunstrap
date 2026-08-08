@@ -39,6 +39,7 @@ __all__ = [
     "dump_kubeconfig",
     "parse_kubeconfig",
     "patch_view",
+    "rename_identities",
     "run_kube_targets",
     "sans_from_cert",
 ]
@@ -270,6 +271,55 @@ def patch_view(
             body["tls-server-name"] = tls_server_name
 
 
+def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
+    """Rename the current-context's cluster/user/context to a deterministic name.
+
+    ``tunstrap-<node>-<target>`` is used for cluster, user, and context alike.
+    Other contexts keep their own names, but references to the renamed cluster
+    or user are updated so shared entries remain valid.
+    """
+    new_name = f"tunstrap-{node}-{target}"
+    current = doc.get("current-context")
+    assert isinstance(current, str)
+    contexts_raw = doc.get("contexts")
+    contexts: list[object] = contexts_raw if isinstance(contexts_raw, list) else []
+    ctx_entry = _find_named(contexts, current)
+    assert ctx_entry is not None
+    ctx_body = ctx_entry["context"]
+    assert isinstance(ctx_body, dict)
+    old_cluster = ctx_body["cluster"]
+    old_user = ctx_body["user"]
+    assert isinstance(old_cluster, str)
+    assert isinstance(old_user, str)
+
+    ctx_entry["name"] = new_name
+    ctx_body["cluster"] = new_name
+    ctx_body["user"] = new_name
+
+    cluster_entry = _find_named(doc.get("clusters") or [], old_cluster)
+    assert cluster_entry is not None
+    cluster_entry["name"] = new_name
+
+    user_entry = _find_named(doc.get("users") or [], old_user)
+    assert user_entry is not None
+    user_entry["name"] = new_name
+
+    doc["current-context"] = new_name
+
+    for entry in contexts:
+        if entry is ctx_entry or not isinstance(entry, dict):
+            continue
+        other_body = entry.get("context")
+        if not isinstance(other_body, dict):
+            continue
+        if other_body.get("cluster") == old_cluster:
+            other_body["cluster"] = new_name
+        if other_body.get("user") == old_user:
+            other_body["user"] = new_name
+
+    return new_name
+
+
 def dump_kubeconfig(view: KubeconfigView) -> bytes:
     """Serialise the (patched) ruamel doc back to YAML bytes."""
     buf = io.BytesIO()
@@ -366,10 +416,12 @@ async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-ta
             continue
 
         patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
+        assert isinstance(view.doc, dict)
+        new_identity = rename_identities(view.doc, node_name, name)
         patched = dump_kubeconfig(view)
         outputs[name] = KubeTargetOutput(
-            cluster_name=view.cluster_name,
-            context_name=view.context_name,
+            cluster_name=new_identity,
+            context_name=new_identity,
             local_port=local_port,
             endpoint=f"https://127.0.0.1:{local_port}",
             tls_server_name=None if insecure else tls_name,
