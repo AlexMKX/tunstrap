@@ -273,7 +273,9 @@ commands make provider API calls". Concretely:
 `validate` and `fmt` are also in the proxy's own bypass set (see "How the proxy
 works," above): even if you list either in `commands`, the proxy still
 `execvp`s `tofu` directly for them rather than tunnelling, because both are
-provably cluster-free.
+provably cluster-free. Consequence: `tofu validate` therefore runs *without*
+`TF_VAR_tunstrap` set at all — keep a default on the variable, as the module
+below does (`default = ""`), or `validate` hits an unset-variable error.
 
 Everything not listed gets `TUNSTRAP_INPUT` unset and takes the proxy's
 pass-through branch, so the failure mode of forgetting a command is a **provider

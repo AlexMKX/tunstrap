@@ -384,13 +384,16 @@ def test_tunnelled_drops_an_inherited_kubeconfig_in_the_multi_node_case(
 ) -> None:
     """An operator-inherited KUBECONFIG is dropped in the multi-node case too.
 
-    ``_build_child_env``'s ``suppress_kubeconfig`` pop is unconditional on node
-    count, so a multi-node payload -- which has no per-target kube channel of
-    its own to override the inherited value -- still loses it. The proxy
-    supports multi-node via its hardcoded ``--output-var``, so this case is
-    reachable and must stay guarded.
-
-    Without this test the pop is deletable with the suite green.
+    This fixture's connections are ports-only (no kube_targets), so
+    ``render_kube_env`` injects nothing to overwrite the inherited value --
+    the removal observed here is ``_build_child_env``'s unconditional
+    pre-injection scrub of inherited KUBECONFIG/KUBE_CONFIG_PATH/_PATHS, not
+    the ``suppress_kubeconfig`` pop (that scrub fires regardless of
+    ``suppress_kubeconfig``, so this test would pass with it False too). The
+    parametrized ``test_inherited_kube_env_never_survives_even_without_kube_targets``
+    in ``test_cli_run_output_var.py`` pins that property directly at the
+    ``_build_child_env`` level; this test is its proxy-path duplicate,
+    observed through the real ``tunstrap_tofu`` entry point end to end.
     """
     # Inherited operator KUBECONFIG present.
     monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config-some-other-cluster")

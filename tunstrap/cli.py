@@ -406,10 +406,10 @@ def _build_child_env(
     envelope: its consumer persists the value into an OpenTofu plan file.
 
     ``suppress_kubeconfig`` drops only the *injected* ``KUBECONFIG``, keeping
-    ``KUBE_CONFIG_PATH``/``KUBE_CONFIG_PATHS`` -- Mode A provider access through the proxy.
-    Providers never read plain ``KUBECONFIG`` (measured in #15); the guard instead protects
-    ``kubectl``/``helm`` CLI children and ``local-exec`` provisioners. Inherited names of all three
-    are always dropped before injection, on both paths.
+    ``KUBE_CONFIG_PATH``/``KUBE_CONFIG_PATHS`` -- Mode A's proxy channel. Providers
+    never read plain ``KUBECONFIG`` (measured in #15); the guard protects
+    ``kubectl``/``helm`` CLI children and ``local-exec`` provisioners. Inherited
+    names of all three are always dropped before injection, on both paths.
     """
     child_env = dict(os.environ)
     if input_env is not None:
