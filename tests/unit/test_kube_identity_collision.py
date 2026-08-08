@@ -6,13 +6,13 @@ test drives, not a kind-style already-unique name (kind's context is
 `kind-<cluster>`, so a kind-based test would pass without proving anything;
 see the ticket's "Testing trap" section).
 
-RED against current tunstrap/kube.py: both node's kube_targets report
-context_name == cluster_name == "default", so a `KUBECONFIG=a:b` merge would
-have the second silently overwrite the first's context/cluster/user entries.
-
-GREEN after identity renaming: each output's context_name/cluster_name/user
-identity is the deterministic `tunstrap-<node>-<target>` name, distinct per
-node even though both fixtures carry identical upstream names.
+Two k3s-style upstream kubeconfigs with identical context/cluster/user names
+("default") are driven through `run_kube_targets` for two different node
+names. Each output's context_name/cluster_name/user identity is the
+deterministic `tunstrap-<node>-<target>` name, distinct per node even though
+both fixtures carry identical upstream names -- proven both in the
+extracted `KubeTargetOutput` fields and in the serialized kubeconfig
+document, which is what a `KUBECONFIG`-list consumer actually parses.
 """
 
 from __future__ import annotations
@@ -117,10 +117,11 @@ async def test_two_k3s_style_targets_get_distinct_deterministic_identities(
 ) -> None:
     """Two nodes whose upstream k3s kubeconfigs both name everything 'default'.
 
-    Under the current implementation this fails: both outputs report
-    context_name == cluster_name == "default" -- the exact collision a
-    KUBECONFIG merge cannot resolve. Under the spike's recommended
-    combination each is `tunstrap-<node>-kube`, distinct by construction.
+    Each output's context_name/cluster_name is renamed to the deterministic
+    `tunstrap-<node>-kube` identity, distinct per node -- resolving the
+    exact collision a `KUBECONFIG` merge of the two raw upstream configs
+    could not, since both would otherwise report
+    context_name == cluster_name == "default".
     """
     monkeypatch.setattr(
         "tunstrap.kube.sans_from_cert",

@@ -21,10 +21,10 @@ from tunstrap.schemas import (
 pytestmark = pytest.mark.unit
 
 
-def _kube_out(port, path):
+def _kube_out(port, path, *, context="ctx"):
     return KubeTargetOutput(
         cluster_name="c",
-        context_name="ctx",
+        context_name=context,
         local_port=port,
         endpoint=f"https://127.0.0.1:{port}",
         tls_server_name="c",
@@ -37,9 +37,7 @@ def _kube_out(port, path):
 
 
 def _kube_out_full(port, path, *, context):
-    result = _kube_out(port, path)
-    result.context_name = context
-    return result
+    return _kube_out(port, path, context=context)
 
 
 def test_render_unified_output_shape() -> None:

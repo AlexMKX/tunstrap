@@ -199,6 +199,15 @@ def _start_schema(
     )
 
 
+def _session_scalars(out: OutputSchema) -> dict[str, str]:
+    """The three survivor scalars, shared to avoid a second hardcoded copy."""
+    return {
+        "TUNSTRAP_SESSION_DIR": out.session_dir,
+        "TUNSTRAP_PID": str(out.pid),
+        "TUNSTRAP_OUTPUT_FILE": materialized_output_path(out.session_dir),
+    }
+
+
 def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     """Write ``start``'s envelope to stdout, then exit with the mapped code.
 
@@ -213,11 +222,7 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     if kind == "success" and output_fmt == "env":
         out = OutputSchema.model_validate(message["payload"])
         write_materialized_output(out)
-        env = {
-            "TUNSTRAP_SESSION_DIR": out.session_dir,
-            "TUNSTRAP_PID": str(out.pid),
-            "TUNSTRAP_OUTPUT_FILE": materialized_output_path(out.session_dir),
-        }
+        env = _session_scalars(out)
         env.update(render_kube_env(out))
         sys.stdout.write(format_exports(env))
     else:
@@ -387,9 +392,7 @@ def _build_child_env(
 ) -> dict[str, str]:
     """Inherited env, scrubbed of the input payload, plus the exported channels.
 
-    Unconditional on node count: the three session scalars
-    (``TUNSTRAP_SESSION_DIR``/``_PID``/``_OUTPUT_FILE``) and the kube channel
-    are injected regardless of how many nodes or kube targets exist.
+    Session scalars (``_session_scalars``) + kube channel are both unconditional on node count.
 
     ``input_env`` names the variable holding the InputSchema, whose ``ssh_pkey``
     is an SSH private key. ``run`` is the one component that knows this variable
@@ -412,9 +415,7 @@ def _build_child_env(
     child_env = dict(os.environ)
     if input_env is not None:
         child_env.pop(input_env, None)
-    child_env["TUNSTRAP_SESSION_DIR"] = output.session_dir
-    child_env["TUNSTRAP_PID"] = str(output.pid)
-    child_env["TUNSTRAP_OUTPUT_FILE"] = materialized_output_path(output.session_dir)
+    child_env.update(_session_scalars(output))
     child_env.update(render_kube_env(output))
     if suppress_kubeconfig:
         for key in ("KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"):
