@@ -21,6 +21,42 @@ def _key(name: str) -> str:
     return _NON_ALNUM.sub("_", name.upper())
 
 
+def _kube_channel_keys(count: int) -> set[str]:
+    """Names of the kube-channel env keys the conditional contract exports.
+
+    0 files: nothing. Exactly 1: KUBECONFIG + KUBE_CONFIG_PATH. >=2:
+    KUBECONFIG + KUBE_CONFIG_PATHS. KUBE_CONFIG_PATH and KUBE_CONFIG_PATHS are
+    never both present -- KUBE_CONFIG_PATH wins over KUBE_CONFIG_PATHS per the
+    measured OpenTofu kubernetes/helm provider precedence (docs/artifacts/
+    2026-08-07-issue15-provider-env-findings.md), so exporting both once a
+    second file exists would silently hide every cluster but the first.
+    """
+    if count == 0:
+        return set()
+    if count == 1:
+        return {"KUBECONFIG", "KUBE_CONFIG_PATH"}
+    return {"KUBECONFIG", "KUBE_CONFIG_PATHS"}
+
+
+def render_kube_env(output: OutputSchema) -> dict[str, str]:
+    """Build the node-count-agnostic kube channel: KUBECONFIG plus the
+    OpenTofu-provider-facing var the conditional contract picks.
+
+    This channel has no node dimension: it collects one materialized path per
+    kube_target across every node, so it is safe to call for any node count.
+    """
+    kube_paths: list[str] = []
+    for node in output.connections.values():
+        for kname, target in node.kube_targets.items():
+            if target.path is None:
+                raise ValueError(f"kube target {kname!r} not materialized; cannot set KUBECONFIG")
+            kube_paths.append(target.path)
+    if not kube_paths:
+        return {}
+    joined = ":".join(kube_paths)
+    return {key: joined for key in _kube_channel_keys(len(kube_paths))}
+
+
 def render_env(output: OutputSchema) -> dict[str, str]:
     """Build the TUNSTRAP_* env mapping for a single-node OutputSchema."""
     if len(output.connections) != 1:
@@ -46,17 +82,15 @@ def render_env(output: OutputSchema) -> dict[str, str]:
         put(f"TUNSTRAP_{base}_PORT", str(port))
         put(f"TUNSTRAP_{base}_ENDPOINT", f"127.0.0.1:{port}")
 
-    kube_paths: list[str] = []
     for kname, target in node.kube_targets.items():
         base = _key(kname)
         if target.path is None:
             raise ValueError(f"kube target {kname!r} not materialized; cannot set KUBECONFIG")
         put(f"TUNSTRAP_{base}_KUBECONFIG", target.path)
         put(f"TUNSTRAP_{base}_ENDPOINT", target.endpoint)
-        kube_paths.append(target.path)
 
-    if kube_paths:
-        put("KUBECONFIG", ":".join(kube_paths))
+    for key, value in render_kube_env(output).items():
+        put(key, value)
     return env
 
 
@@ -81,34 +115,34 @@ def render_output_var(output: OutputSchema) -> str:
 
 
 def predicted_env_keys(schema: InputSchema) -> set[str]:
-    """Env keys ``render_env`` will produce for this *input* schema.
+    """Conservatively predict env keys that may be produced for this schema.
 
     Used pre-spawn to reject an ``--output-var`` NAME that would collide with
-    an injected key, before a daemon exists to orphan. Multi-node input
-    injects no scalars at all, so the answer there is the empty set.
+    an injected key, before a daemon exists to orphan. Multi-node input injects
+    no ``TUNSTRAP_*`` scalars, but kube-channel keys remain possible.
 
     The result is a superset of the eventual actual key set when an optional
     target fails and is absent from the output. A superset only rejects more
     names, never fewer, so it cannot let a real collision through.
     """
-    if len(schema.nodes) != 1:
-        return set()
-    (node,) = schema.nodes.values()
-    keys = {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID"}
-    for tname in node.remote_targets:
-        base = _key(tname)
-        keys.update(
-            {
-                f"TUNSTRAP_{base}_HOST",
-                f"TUNSTRAP_{base}_PORT",
-                f"TUNSTRAP_{base}_ENDPOINT",
-            }
-        )
-    for kname in node.kube_targets or {}:
-        base = _key(kname)
-        keys.update({f"TUNSTRAP_{base}_KUBECONFIG", f"TUNSTRAP_{base}_ENDPOINT"})
-    if node.kube_targets:
-        keys.add("KUBECONFIG")
+    keys: set[str] = set()
+    if len(schema.nodes) == 1:
+        (node,) = schema.nodes.values()
+        keys.update({"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID"})
+        for tname in node.remote_targets:
+            base = _key(tname)
+            keys.update(
+                {
+                    f"TUNSTRAP_{base}_HOST",
+                    f"TUNSTRAP_{base}_PORT",
+                    f"TUNSTRAP_{base}_ENDPOINT",
+                }
+            )
+        for kname in node.kube_targets or {}:
+            base = _key(kname)
+            keys.update({f"TUNSTRAP_{base}_KUBECONFIG", f"TUNSTRAP_{base}_ENDPOINT"})
+    if any(node.kube_targets for node in schema.nodes.values()):
+        keys.update({"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"})
     return keys
 
 

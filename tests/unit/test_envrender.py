@@ -1,6 +1,6 @@
 import pytest
 
-from tunstrap.envrender import format_exports, predicted_env_keys, render_env
+from tunstrap.envrender import format_exports, predicted_env_keys, render_env, render_kube_env
 from tunstrap.exceptions import MultiNodeEnvUnsupported
 from tunstrap.schemas import InputSchema, KubeTargetOutput, NodeOutput, OutputSchema
 
@@ -65,6 +65,88 @@ def test_render_kube_not_materialized_raises():
         render_env(out)
 
 
+def test_render_kube_env_zero_files_returns_empty() -> None:
+    """No kube_targets anywhere -> no keys at all."""
+    out = OutputSchema(
+        connections={"h": NodeOutput(ports={"db": 1})},
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    assert render_kube_env(out) == {}
+
+
+def test_render_kube_env_one_file_sets_path_not_paths() -> None:
+    """Exactly one materialized file: KUBECONFIG + KUBE_CONFIG_PATH, no _PATHS."""
+    out = OutputSchema(
+        connections={"h": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7000, "/s/k3s")})},
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    env = render_kube_env(out)
+    assert env == {"KUBECONFIG": "/s/k3s", "KUBE_CONFIG_PATH": "/s/k3s"}
+    assert "KUBE_CONFIG_PATHS" not in env
+
+
+def test_render_kube_env_two_files_sets_paths_not_path() -> None:
+    """Two materialized files use KUBE_CONFIG_PATHS and not KUBE_CONFIG_PATH."""
+    out = OutputSchema(
+        connections={
+            "a": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7000, "/s/a-k3s")}),
+            "b": NodeOutput(ports={}, kube_targets={"k3s": _kube_out(7001, "/s/b-k3s")}),
+        },
+        pid=1,
+        session_dir="/s",
+        started_at="now",
+    )
+    env = render_kube_env(out)
+    assert env == {
+        "KUBECONFIG": "/s/a-k3s:/s/b-k3s",
+        "KUBE_CONFIG_PATHS": "/s/a-k3s:/s/b-k3s",
+    }
+    assert "KUBE_CONFIG_PATH" not in env
+
+
+def test_predicted_env_keys_reserves_all_three_for_one_kube_target() -> None:
+    """Reserve every conditional kube-channel key whenever kube targets exist."""
+    schema = InputSchema.model_validate(
+        {
+            "nodes": {
+                "node": {
+                    "host": "h.example.net",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "kube_targets": {"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}},
+                }
+            }
+        }
+    )
+    keys = predicted_env_keys(schema)
+    assert {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"} <= keys
+
+
+def test_predicted_env_keys_reserves_all_three_for_two_kube_targets_one_node() -> None:
+    """Reserve every conditional kube-channel key for multiple declared targets."""
+    schema = InputSchema.model_validate(
+        {
+            "nodes": {
+                "node": {
+                    "host": "h.example.net",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "kube_targets": {
+                        "a": {"kubeconfig_path": "/etc/a.yaml"},
+                        "b": {"kubeconfig_path": "/etc/b.yaml"},
+                    },
+                }
+            }
+        }
+    )
+    keys = predicted_env_keys(schema)
+    assert {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"} <= keys
+
+
 def test_render_requires_single_node_zero() -> None:
     """Zero connections raise the typed error, not a bare ValueError."""
     out = OutputSchema(connections={}, pid=1, session_dir="/s", started_at="now")
@@ -93,12 +175,8 @@ def test_format_exports_quotes_safely():
     assert "export B='z'" in txt
 
 
-def test_predicted_env_keys_matches_render_env() -> None:
-    """The predictor and render_env agree exactly for a matching input/output pair.
-
-    This is the anti-drift guard: adding a key to render_env without adding it
-    to predicted_env_keys makes this test fail.
-    """
+def test_predicted_env_keys_covers_render_env() -> None:
+    """The predictor covers the actual keys for a matching input/output pair."""
     schema = InputSchema.model_validate(
         {
             "nodes": {
@@ -123,7 +201,7 @@ def test_predicted_env_keys_matches_render_env() -> None:
         session_dir="/run/s",
         started_at="now",
     )
-    assert predicted_env_keys(schema) == set(render_env(out))
+    assert set(render_env(out)) <= predicted_env_keys(schema)
 
 
 def test_predicted_env_keys_no_kube_omits_kubeconfig() -> None:
