@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from tunstrap.session import SessionDir, SessionError, SessionIdentityUnreadable
+from tunstrap.session import (
+    SessionDir,
+    SessionError,
+    SessionIdentityUnreadable,
+    atomic_write,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -112,6 +117,192 @@ def test_write_file_rejects_slash_name(tmp_path: Path) -> None:
     sd = SessionDir.create(supplied=None, base=tmp_path)
     with pytest.raises(SessionError, match="unsafe materialized file name"):
         sd.materialize("sub/dir", b"x")
+
+
+# ---------------------------------------------------------------------------
+# atomic_write + _write_file: issue #21
+# (parent dir mode, temp cleanup on failure, short-write loop, no-progress guard)
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_write_creates_parent_dir_at_0700(tmp_path: Path) -> None:
+    """A missing parent is minted at 0700, not at the ambient umask.
+
+    Defect 1 (issue #21): ``mkdir(parents=True, exist_ok=True)`` with no mode
+    left ``tunnel-data`` at ``0o777 & ~umask`` (``0o775`` under the Debian
+    default ``0o002``) -- group/world-readable -- while the 0600 file inside it
+    was correct. The parent hosts 0600 credentials, so it must match
+    ``SessionDir.create``'s 0700 when ``atomic_write`` is the one to mint it.
+
+    REACHABILITY: in production this ``mkdir`` is a no-op -- ``tunnel-data`` is
+    always pre-created at 0700 by ``SessionDir.create`` (daemon) before any
+    call site reaches ``atomic_write`` (see test_atomic_write_does_not_widen_parent
+    and the blast-radius note). This test pins the direct-caller /
+    defence-in-depth case; it is NOT a live-hole reproduction.
+    """
+    saved_umask = os.umask(0o002)
+    try:
+        target = tmp_path / "tunnel-data" / "output.json"
+        atomic_write(target, b'{"x": 1}\n')
+        parent_mode = stat.S_IMODE((tmp_path / "tunnel-data").stat().st_mode)
+        file_mode = stat.S_IMODE(target.stat().st_mode)
+    finally:
+        os.umask(saved_umask)
+    assert parent_mode == 0o700, f"parent mode {oct(parent_mode)} exposes group/world"
+    assert file_mode == 0o600
+
+
+def test_atomic_write_does_not_widen_parent(tmp_path: Path) -> None:
+    """When the parent already exists at 0700 (the production case), atomic_write's
+    ``mkdir(exist_ok=True)`` is a no-op and never widens the mode.
+
+    Documents the reachability verdict: the daemon mints ``tunnel-data`` at 0700
+    via ``SessionDir.create`` before the parent (start/run) ever calls
+    ``write_materialized_output`` -> ``atomic_write``, and ``materialize_atomic``
+    runs in the daemon after the same ``create``. So ``path.parent`` is always
+    already correct and the new ``mode=0o700`` argument never re-runs in
+    production. The fix is defence-in-depth; it must not undo a correct mode.
+    """
+    parent = tmp_path / "tunnel-data"
+    parent.mkdir(mode=0o700)
+    atomic_write(parent / "output.json", b"{}\n")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+
+
+def test_atomic_write_unlinks_temp_so_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed write unlinks its temp, so the pid-pinned O_EXCL name does not
+    permanently block a same-pid retry.
+
+    Defect 2 (issue #21): a write failure orphaned ``.<name>.<pid>.tmp``. The
+    temp name is pinned to ``os.getpid()`` (different processes never compete
+    for it), so the *same*-process retry -- the realistic case -- hit
+    ``FileExistsError`` on O_EXCL forever. That was the opposite of the old
+    docstring's claim that O_EXCL "guards against a colliding concurrent writer".
+    """
+    target = tmp_path / "out.json"
+    real_write = os.write
+
+    def failing_write(fd: int, data: object) -> int:
+        raise OSError("simulated write failure (ENOSPC/EIO)")
+
+    monkeypatch.setattr(os, "write", failing_write)
+    with pytest.raises(OSError, match="simulated write failure"):
+        atomic_write(target, b"first attempt fails")
+
+    leftover = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftover == [], f"stale temp left behind: {leftover}"
+
+    monkeypatch.setattr(os, "write", real_write)
+    atomic_write(target, b"second attempt, same pid")
+    assert target.read_bytes() == b"second attempt, same pid"
+
+
+def test_atomic_write_cleanup_preserves_original_error_when_temp_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cleanup path must not mask the original failure if the temp is already
+    gone when it runs.
+
+    Contract for the inner ``except FileNotFoundError: pass`` in atomic_write's
+    cleanup: if something between create and the unlink already removed the
+    temp, suppressing the missing-file error keeps the *original* failure
+    propagating instead of replacing it with a misleading ".tmp not found".
+
+    Triggered with a stand-in os.replace that unlinks the temp then raises
+    (real os.replace is atomic and never does this); the point is to prove the
+    cleanup preserves the original error, not to model a realistic replace.
+
+    Mutation signal: if the ``except FileNotFoundError: pass`` is deleted,
+    os.unlink raises FileNotFoundError and shadows the original OSError -- the
+    test sees FileNotFoundError instead of "replace failed" -> clean red.
+    """
+    target = tmp_path / "gone.json"
+
+    def unlink_then_fail(src: str, dst: str) -> None:
+        os.unlink(src)  # temp now gone before cleanup runs
+        raise OSError("replace failed after temp removed")
+
+    monkeypatch.setattr(os, "replace", unlink_then_fail)
+    with pytest.raises(OSError, match="replace failed after temp removed"):
+        atomic_write(target, b"data")
+
+
+def test_atomic_write_loops_past_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every byte is written even when os.write returns partial counts.
+
+    Defect 3 (issue #21): the return value of os.write was ignored, so a short
+    write silently truncated. A short write to a regular file is hard to trigger
+    naturally, so this stand-in patches os.write to write one byte per call
+    (labelled: it simulates a filesystem handing back partial counts) -- the
+    same hazard ``_worker._write_message`` already loops for on its IPC pipe.
+    """
+    target = tmp_path / "short.json"
+    real_write = os.write
+    payload = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # 26 bytes
+
+    def one_byte_write(fd: int, data: object) -> int:
+        real_write(fd, bytes(data)[:1])  # type: ignore[arg-type]
+        return 1
+
+    monkeypatch.setattr(os, "write", one_byte_write)
+    atomic_write(target, payload)
+    assert target.read_bytes() == payload
+
+
+def test_atomic_write_raises_on_zero_progress_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A no-progress os.write (returns 0) raises OSError instead of looping forever.
+
+    ``os.write`` on a blocking regular-file fd essentially never returns 0 for a
+    non-empty buffer, so this guard is defence-in-depth -- but a loop with no
+    no-progress guard would spin forever if it ever did, so the guard is
+    load-bearing for robustness. It mirrors ``_worker._write_message``'s own
+    ``if written <= 0`` check.
+
+    Mutation signal (why this test exists): if the ``if written <= 0`` guard is
+    deleted, os.write returns 0, the loop slices ``view[0:]`` (unchanged) and
+    re-calls os.write; the stub raises on its second call, so the test sees
+    RuntimeError instead of OSError -- a clean red rather than a hang.
+    """
+    target = tmp_path / "zero.json"
+    calls: list[int] = []
+
+    def zero_then_boom(fd: int, data: object) -> int:
+        calls.append(1)
+        if len(calls) == 1:
+            return 0  # no progress
+        raise RuntimeError("second os.write call must not happen")
+
+    monkeypatch.setattr(os, "write", zero_then_boom)
+    with pytest.raises(OSError, match="no progress"):
+        atomic_write(target, b"ABC")
+    assert len(calls) == 1, "guard must fire on the first zero return"
+
+
+def test_materialize_loops_past_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SessionDir._write_file (behind materialize/write_identity) also loops past
+    short writes -- the second unchecked os.write site named in issue #21.
+
+    Same partial-write stand-in as test_atomic_write_loops_past_short_writes.
+    """
+    sd = SessionDir.create(supplied=None, base=tmp_path)
+    real_write = os.write
+    payload = b"kubeconfig-bytes-" * 4  # 68 bytes
+
+    def one_byte_write(fd: int, data: object) -> int:
+        real_write(fd, bytes(data)[:1])  # type: ignore[arg-type]
+        return 1
+
+    monkeypatch.setattr(os, "write", one_byte_write)
+    path = sd.materialize("hub-k3s", payload)
+    assert Path(path).read_bytes() == payload
 
 
 def test_rejects_relative_supplied_dir(tmp_path: Path) -> None:

@@ -32,6 +32,24 @@ from tunstrap.identity import (
 _TUNNEL_DATA = "tunnel-data"
 
 
+def _write_all(fd: int, content: bytes) -> None:
+    """Write all of ``content`` to ``fd``, looping past short writes.
+
+    ``os.write`` is permitted to return fewer bytes than requested (a "short
+    write"); ignoring the count silently truncates the file. This mirrors the
+    loop in ``_worker._write_message`` so the two raw-fd writers in this
+    codebase agree, including the ``written <= 0`` no-progress guard (a 0
+    return would otherwise spin forever). A ``memoryview`` avoids copying the
+    tail on each slice.
+    """
+    view = memoryview(content)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("os.write made no progress; cannot complete write")
+        view = view[written:]
+
+
 def atomic_write(path: Path, content: bytes) -> None:
     """Write ``content`` to ``path`` (mode 0600) via temp file + ``os.replace``.
 
@@ -39,18 +57,54 @@ def atomic_write(path: Path, content: bytes) -> None:
     the final path is indistinguishable from a valid short one to a naive
     reader, while a temp file plus ``os.replace`` guarantees only a complete
     old or complete new file is ever observable at ``path`` -- load-bearing
-    for a process killed mid-write. ``O_EXCL`` on the temp name guards against
-    a colliding concurrent writer; the mode is fixed at the temp file's
-    creation, so ``os.replace`` never exposes a wider-than-0600 window.
+    for a process killed mid-write.
+
+    The temp name is pinned to ``os.getpid()``, so distinct processes never
+    compete for it; ``O_EXCL`` therefore guards the *same* process against
+    re-entering on top of its own leftover temp, not a separate writer. Any
+    failure between the create and a successful ``os.replace`` unlinks the
+    temp first, so a same-pid retry is never permanently blocked by
+    ``O_EXCL``. The only way a stale temp survives is a hard crash
+    (``SIGKILL``) between ``os.open`` and the cleanup, which Python cannot
+    intercept; that residual is what would surface as ``FileExistsError`` on
+    a later same-pid call, flagging that a prior run died mid-write.
+
+    The mode is fixed at the temp file's creation, so ``os.replace`` never
+    exposes a wider-than-0600 window. ``path.parent`` is created with mode
+    0700 to match ``SessionDir.create``'s ``tunnel-data``. In production this
+    ``mkdir(exist_ok=True)`` is a no-op: every call site
+    (``materialize_atomic`` in the daemon, ``write_materialized_output`` in
+    the start/run parent) reaches ``atomic_write`` with ``path.parent``
+    already minted at 0700 by ``SessionDir.create``, which runs in the daemon
+    before the parent ever writes. The ``mode=0o700`` here is therefore
+    defence-in-depth for a direct caller, not a live-hole fix. ``mkdir``'s
+    ``mode`` applies only to the leaf directory; that is sufficient because
+    ``path.parent`` is always exactly ``tunnel-data`` and its parent (the
+    session dir) is guaranteed to pre-exist at every call site, so no
+    intermediate component is ever created under the ambient umask.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
     fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
     try:
-        os.write(fd, content)
+        _write_all(fd, content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        # Orphaning the temp would make O_EXCL reject every later same-pid
+        # retry (the name is pid-pinned); remove it so the next call starts
+        # clean. The inner FileNotFoundError suppress covers a real race, not a
+        # hypothetical one: the temp lives inside tunnel-data, and a concurrent
+        # teardown (``SessionDir.cleanup``'s rmtree) can remove it between the
+        # ``os.open`` above and this unlink -- an interrupted run is exactly
+        # when both happen at once. Without the suppress that ENOENT would
+        # raise and mask the original error we are about to re-raise.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
     finally:
         os.close(fd)
-    os.replace(tmp_path, path)
 
 
 class SessionError(Exception):
@@ -271,7 +325,7 @@ class SessionDir:
         path = self._validated_path(name)
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
-            os.write(fd, content)
+            _write_all(fd, content)
         finally:
             os.close(fd)
         return str(path)
