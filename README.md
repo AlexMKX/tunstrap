@@ -529,7 +529,10 @@ tool itself never writes content to disk — the "content never to disk" guarant
 is preserved.
 
 When `materialize=true`: the patched kubeconfig (including embedded private keys)
-is written mode 0600 to `<session-dir>/tunnel-data/<node>-<kube_target_name>`.
+is written mode 0600 to `<session-dir>/tunnel-data/kube-<node>-<kube_target_name>`.
+Fetched files materialize to `fetch-<node>-<fetch_name>`; these leaf names are an
+implementation detail, and consumers must read `path` from the output envelope
+rather than construct it.
 The daemon removes these files on `stop` or `atexit` — except when `stop` cannot
 confirm the daemon died, in which case it deliberately keeps them (see the `run`
 teardown notes above) and says so with `"preserved": true`. The `path` field in the

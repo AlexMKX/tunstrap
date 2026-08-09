@@ -288,16 +288,11 @@ class SessionDir:
         """Write daemon.pid (mode 0600) into tunnel-data/."""
         self._write_file("daemon.pid", f"{pid}\n".encode("ascii"))
 
-    def materialize(self, name: str, content: bytes) -> str:
-        """Write `content` to tunnel-data/<name> (mode 0600); return the path."""
-        return self._write_file(name, content)
-
     def materialize_atomic(self, name: str, content: bytes) -> str:
         """Write `content` to tunnel-data/<name> via atomic replace; return the path.
 
-        Same name-safety rules as ``materialize``, but the true-atomic write
-        primitive (temp file + ``os.replace``) fetched-file materialization
-        needs -- see ``atomic_write``.
+        Name-safety rules come from ``_validated_path``; the write itself uses
+        the true-atomic primitive (temp file + ``os.replace``) -- see ``atomic_write``.
         """
         path = self._validated_path(name)
         atomic_write(path, content)

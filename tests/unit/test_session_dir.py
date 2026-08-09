@@ -98,7 +98,7 @@ def test_write_identity_and_materialize(tmp_path: Path) -> None:
     """Identity files and a materialized file land in tunnel-data, mode 0600."""
     sd = SessionDir.create(supplied=None, base=tmp_path)
     sd.write_identity(pid=4321)
-    path = sd.materialize("hub-k3s", b"kubeconfig-bytes")
+    path = sd.materialize_atomic("hub-k3s", b"kubeconfig-bytes")
     data_dir = Path(sd.session_dir) / "tunnel-data"
     assert (data_dir / "daemon.pid").read_text().strip() == "4321"
     assert Path(path).read_bytes() == b"kubeconfig-bytes"
@@ -109,14 +109,14 @@ def test_write_file_rejects_traversal_name(tmp_path: Path) -> None:
     """materialize() with a traversal name is rejected (defense in depth)."""
     sd = SessionDir.create(supplied=None, base=tmp_path)
     with pytest.raises(SessionError, match="unsafe materialized file name"):
-        sd.materialize("../escaped", b"x")
+        sd.materialize_atomic("../escaped", b"x")
 
 
 def test_write_file_rejects_slash_name(tmp_path: Path) -> None:
     """materialize() with a nested path is rejected."""
     sd = SessionDir.create(supplied=None, base=tmp_path)
     with pytest.raises(SessionError, match="unsafe materialized file name"):
-        sd.materialize("sub/dir", b"x")
+        sd.materialize_atomic("sub/dir", b"x")
 
 
 # ---------------------------------------------------------------------------
@@ -287,22 +287,26 @@ def test_atomic_write_raises_on_zero_progress_write(
 def test_materialize_loops_past_short_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SessionDir._write_file (behind materialize/write_identity) also loops past
-    short writes -- the second unchecked os.write site named in issue #21.
+    """SessionDir._write_file (behind write_identity) also loops past short
+    writes -- the second unchecked os.write site named in issue #21.
+
+    Driven through ``write_identity`` because that is ``_write_file``'s only
+    caller: issue #16 moved both materializers onto the atomic primitive, so
+    routing this through materialization would exercise ``atomic_write``
+    instead and leave ``_write_file``'s loop unpinned.
 
     Same partial-write stand-in as test_atomic_write_loops_past_short_writes.
     """
     sd = SessionDir.create(supplied=None, base=tmp_path)
     real_write = os.write
-    payload = b"kubeconfig-bytes-" * 4  # 68 bytes
 
     def one_byte_write(fd: int, data: object) -> int:
         real_write(fd, bytes(data)[:1])  # type: ignore[arg-type]
         return 1
 
     monkeypatch.setattr(os, "write", one_byte_write)
-    path = sd.materialize("hub-k3s", payload)
-    assert Path(path).read_bytes() == payload
+    sd.write_identity(pid=1234567)
+    assert (Path(sd.session_dir) / "tunnel-data" / "daemon.pid").read_text() == "1234567\n"
 
 
 def test_rejects_relative_supplied_dir(tmp_path: Path) -> None:
@@ -720,7 +724,7 @@ def test_validated_path_rejects_symlinked_tunnel_data(tmp_path: Path) -> None:
     data.symlink_to(target)
 
     with pytest.raises(SessionError, match="tunnel-data is a symlink"):
-        sd.materialize("hub-k3s", b"patched-kubeconfig-with-client_key_data")
+        sd.materialize_atomic("hub-k3s", b"patched-kubeconfig-with-client_key_data")
 
     # The sink must still be empty: the patched kubeconfig never landed.
     assert list(target.iterdir()) == [], "materialized bytes reached the symlink target"

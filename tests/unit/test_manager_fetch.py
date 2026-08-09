@@ -90,7 +90,7 @@ async def test_no_fetch_files_skips_fetcher(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_fetch_files_results_populate_node_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Fetcher results are materialized to tunnel-data/<node>-<name>, path set."""
+    """Fetcher results are materialized to their fetch-prefixed leaf, path set."""
     fake_result = {"kubeconfig": FetchedFile(content_b64="YQ==", size=1, sha256="ca97")}
 
     async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
@@ -104,7 +104,7 @@ async def test_fetch_files_results_populate_node_output(
     out = await mgr.start_all_and_build_output(pid=1, session_dir=session.session_dir)
     assert isinstance(out, OutputSchema)
     materialized = out.connections["a"].fetch_files["kubeconfig"]
-    expected_path = str(Path(session.session_dir) / "tunnel-data" / "a-kubeconfig")
+    expected_path = str(Path(session.session_dir) / "tunnel-data" / "fetch-a-kubeconfig")
     assert materialized.path == expected_path
     assert Path(expected_path).read_bytes() == base64.b64decode("YQ==")
     assert materialized.content_b64 == "YQ=="

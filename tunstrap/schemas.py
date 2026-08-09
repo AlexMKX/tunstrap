@@ -22,6 +22,15 @@ def _validate_identifier_key(kind: str, name: str) -> None:
         raise ValueError(f"{kind} key {name!r}: must match ^[a-zA-Z_][a-zA-Z0-9_-]*$")
 
 
+def materialized_file_name(kind: str, node_name: str, item_name: str) -> str:
+    """Render a materialized-file leaf name for validated item kind and names.
+
+    The kind prefix makes names collision-free across kinds. Within-kind
+    uniqueness relies on the InputSchema validator failing closed.
+    """
+    return f"{kind}-{node_name}-{item_name}"
+
+
 def _parse_host_port(value: str) -> tuple[str, int]:
     """Parse 'host:port' or '[ipv6]:port' into (host, port).
 
@@ -290,18 +299,33 @@ class InputSchema(BaseModel):
 
     @model_validator(mode="after")
     def _validate_kube_identity_names_are_unique(self) -> InputSchema:
-        """Reject collisions in the joined node and target identity name."""
-        seen: dict[str, tuple[str, str]] = {}
+        """Reject colliding kube identities and materialized-file leaf names."""
+        identity_seen: dict[str, tuple[str, str]] = {}
         for node_name, node in self.nodes.items():
             for target_name in node.kube_targets or {}:
                 joined = f"tunstrap-{node_name}-{target_name}"
-                if joined in seen:
-                    other_node, other_target = seen[joined]
+                if joined in identity_seen:
+                    other_node, other_target = identity_seen[joined]
                     raise ValueError(
                         f"kube identity name collision: ({node_name!r}, {target_name!r}) "
                         f"and ({other_node!r}, {other_target!r}) both render {joined!r}"
                     )
-                seen[joined] = (node_name, target_name)
+                identity_seen[joined] = (node_name, target_name)
+
+        materialized_seen: dict[str, tuple[str, str, str]] = {}
+        for node_name, node in self.nodes.items():
+            for kind, items in (("kube", node.kube_targets), ("fetch", node.fetch_files)):
+                for item_name in items or {}:
+                    leaf = materialized_file_name(kind, node_name, item_name)
+                    if leaf in materialized_seen:
+                        other_kind, other_node, other_item = materialized_seen[leaf]
+                        raise ValueError(
+                            "materialized file name collision: "
+                            f"({kind!r}, {node_name!r}, {item_name!r}) and "
+                            f"({other_kind!r}, {other_node!r}, {other_item!r}) "
+                            f"both render {leaf!r}"
+                        )
+                    materialized_seen[leaf] = (kind, node_name, item_name)
         return self
 
 
