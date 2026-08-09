@@ -6,7 +6,8 @@ the daemon generates the session dir itself, cleanup removes the whole dir;
 when the caller supplies it, cleanup removes only `tunnel-data/` (the caller's
 directory is never touched). `--session-dir` is untrusted: an existing
 tunnel-data that is a symlink, a non-directory, or not owned by the current
-user is rejected.
+user is rejected. A supplied root must be owned by the current user and has
+its group/other write bits cleared on use, because it hosts 0600 credentials.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import dataclasses
 import os
 import shutil
 import signal
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -97,7 +99,10 @@ class SessionDir:
             if not supplied_path.is_absolute():
                 raise SessionError("session dir must be an absolute path")
             root = supplied_path.resolve()
-            root.mkdir(parents=True, exist_ok=True)
+            # Explicit 0o700 so a freshly minted root can never carry group/other
+            # write bits under a permissive umask and then fail its own check.
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            cls._secure_supplied_root(root)
             generated = False
 
         try:
@@ -107,6 +112,12 @@ class SessionDir:
                 "session already active",
                 {"session_dir": str(root)},
             ) from exc
+        except OSError as exc:
+            # acquire_session_lock raises OSError on an unsafe lock file (a
+            # symlink, or a regular file not owned by us). Translate it to the
+            # domain SessionError every other session refusal uses, mirroring
+            # _reclaim_data_slot; the original OSError is chained for the cause.
+            raise SessionError(f"cannot acquire session lock at {root}: {exc}") from exc
 
         try:
             data = root / _TUNNEL_DATA
@@ -134,6 +145,91 @@ class SessionDir:
                 raise SessionError("tunnel-data exists and is not owned by this user")
             shutil.rmtree(data)
 
+    @staticmethod
+    def _secure_supplied_root(root: Path) -> None:
+        """Tighten a caller-supplied root: proven-owned, write bits cleared.
+
+        Why this guard is NOT redundant given ``acquire_session_lock``'s
+        ``O_NOFOLLOW`` + ``fstat`` (issue #25 part (A)): that pair validates an
+        *inode* reached through an fd. Directory write permission, by contrast,
+        is authority over the *entries* of that directory -- create, unlink,
+        rename -- and is wholly independent of the mode and ownership of the
+        files inside it. No amount of fstat hardening on an opened fd reaches an
+        entry-level attack. With write access to the root another uid can unlink
+        the live ``session.lock`` (a fresh inode then passes every (A) check and
+        wins flock, since flock is per-inode), rename ``tunnel-data`` aside and
+        substitute a symlink (a rename within the parent needs write on the
+        parent only), or hardlink ``session.lock`` to a runner-owned victim. The
+        root guard is therefore the load-bearing premise of
+        ``_reclaim_data_slot``'s ``shutil.rmtree`` (lock exclusivity) and of
+        ``_validated_path``'s containment -- remove it and both collapse.
+
+        Note the limit of *tightening* specifically: clearing the write bits
+        stops a hostile entry being planted from now on, but says nothing about
+        one planted before tunstrap first ran. The hardlink case is therefore
+        closed where it lands rather than here, by ``acquire_session_lock``'s
+        ``st_nlink`` refusal.
+
+        Why refusal became tightening: the mode cannot distinguish a user-private
+        group (the Debian/Ubuntu default, zero cross-uid risk) from a genuinely
+        shared one, and as verified on a stock umask-0002 account refusing it
+        broke ``mkdir d && tunstrap run --session-dir d`` with a generic
+        ``DaemonError``. Refusing was the wrong enforcement because it rejected a
+        safe common case.
+
+        Why tightening is legitimate: ownership is already proven before the
+        chmod (an unowned root is refused, never tightened), so the runner is
+        within its rights to set the mode. The tool already forces 0700 on a
+        root it creates itself and on ``tunnel-data``, so clearing write bits on
+        a supplied root is the same posture applied where the runner cannot pick
+        the initial mode.
+
+        Why only the write bits (``S_IWGRP | S_IWOTH``) are cleared, and why the
+        parent is never inspected: clearing preserves read/exec, so a legitimate
+        0755 root is left at 0755 rather than force-chmodded to 0700. The parent
+        is out of scope -- a root under a 1777 ``/tmp`` with its own mode is
+        safe, and inspecting the parent would break ``mkdtemp``-based tests and
+        reach outside what the runner owns.
+
+        fd-based and TOCTOU-free: the mode is read and set through one fd held
+        open for the call, so a concurrent rename-symlink swap between a stat
+        and a chmod cannot retarget the change. After fchmod the mode is re-stat
+        through the same fd, and if the write bits survive (an ACL mask or an
+        exotic filesystem that silently ignores fchmod) the root is refused
+        rather than accepted on a no-op chmod -- a silently-failing fchmod must
+        not ship as "accept anything".
+        """
+        try:
+            dirfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            raise SessionError(f"cannot open session dir {root}: {exc}") from exc
+        try:
+            st = os.fstat(dirfd)
+            if st.st_uid != os.getuid():
+                raise SessionError("session dir is not owned by the current user")
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                try:
+                    os.fchmod(
+                        dirfd,
+                        stat.S_IMODE(st.st_mode) & ~(stat.S_IWGRP | stat.S_IWOTH),
+                    )
+                except OSError as exc:
+                    raise SessionError(
+                        f"session dir {root} is group- or world-writable and "
+                        f"could not be tightened: {exc}; run chmod go-w {root}"
+                    ) from exc
+                # Re-stat through the same fd: an ACL mask or exotic filesystem
+                # can let fchmod succeed yet leave the bits set, and accepting
+                # that as a tightening would be a no-op guard.
+                if os.fstat(dirfd).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    raise SessionError(
+                        f"session dir {root} is group- or world-writable and "
+                        f"could not be tightened (write bits survived fchmod); "
+                        f"run chmod go-w {root}"
+                    )
+        finally:
+            os.close(dirfd)
+
     def write_identity(self, *, pid: int) -> None:
         """Write daemon.pid (mode 0600) into tunnel-data/."""
         self._write_file("daemon.pid", f"{pid}\n".encode("ascii"))
@@ -154,6 +250,14 @@ class SessionDir:
         return str(path)
 
     def _validated_path(self, name: str) -> Path:
+        # ``path.resolve().parent != self._data.resolve()`` is a no-op when
+        # ``tunnel-data`` itself is the symlink -- both sides resolve through
+        # the attacker's link and compare equal. The explicit ``is_symlink``
+        # check is therefore what actually keeps materialization inside the
+        # session dir; without it a substituted ``tunnel-data`` symlink would
+        # pass containment and write a patched kubeconfig into attacker space.
+        if self._data.is_symlink():
+            raise SessionError("tunnel-data is a symlink; refusing to follow")
         if "/" in name or "\\" in name:
             raise SessionError(f"unsafe materialized file name: {name!r}")
         if name in (".", ".."):

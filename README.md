@@ -517,6 +517,9 @@ failure.
 - Private keys (`ssh_pkey`) stay in process memory; they are never written
   to `~/.ssh` or to a tempfile. Parsing happens via
   `asyncssh.import_private_key`.
+- A caller-supplied `--session-dir` must be owned by the invoking user; tunstrap
+  clears its group/other write bits on use, because it stores 0600 credentials
+  (`tunnel-data/`) there. No pre-`chmod` is required of the operator.
 
 **On-disk materialization** (`daemon.materialize`)
 

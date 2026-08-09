@@ -434,11 +434,11 @@ def _mint_session_dir(session_dir: str | None) -> tuple[str, str | None]:
     makes cleanup depend on the very object whose validation can fail. Minting
     it here makes the path a precondition of spawning.
 
-    ``SessionDir.create`` accepts a supplied absolute path and does
-    ``mkdir(parents=True, exist_ok=True)`` (``session.py:57-63``), so an empty
-    pre-created directory is valid worker input. A supplied path sets
-    ``generated=False``, so the worker never removes the root; ``run``
-    therefore removes the root it minted itself, and only that one.
+    ``SessionDir.create`` accepts a supplied absolute path, creates it 0700
+    when absent, and when present requires it owned by the current user and
+    clears its group/other write bits -- so an empty pre-created directory
+    under any umask is valid worker input. A supplied path sets
+    ``generated=False``; ``run`` removes only the root it minted itself.
     """
     if session_dir is not None:
         return session_dir, None

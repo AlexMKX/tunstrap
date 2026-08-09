@@ -33,7 +33,9 @@ data once the daemon is confirmed gone, and otherwise preserves it and reports
 `"preserved": true`. When the preserved directory is one tunstrap minted under
 `TMPDIR`, the diagnostic names it too — `stop` never removes its own
 `--session-dir` argument, so that directory is yours to delete once the daemon
-is dealt with.
+is dealt with. A caller-supplied session dir must be owned by the invoking user;
+tunstrap clears its group/other write bits on use, because it stores 0600
+credentials (`tunnel-data/`) there — no pre-`chmod` is required.
 
 ## Prerequisites
 
