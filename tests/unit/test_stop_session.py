@@ -11,10 +11,12 @@ processes and no real signals, so this passes unchanged on macOS.
 
 These are the ``stop``-verb tests: the daemon is *not* a child of the stopping
 process, so ``no_child_pid`` below pins ``os.waitpid`` to ECHILD for the whole
-module and every case here exercises the signal-0 fallback in ``_has_exited``.
-The child topology — ``run``, where the daemon is a Popen child and its pid
-survives its exit as a zombie — cannot be modelled with a patched ``os.kill``
-at all, and lives in test_stop_session_child.py against a real process.
+module; the grace-poll cases exercise the signal-0 fallback in ``_has_exited``,
+but the non-positive-pid ``stop_session`` cases return at the entry guard
+before any probe runs. The child topology — ``run``, where the daemon is a
+Popen child and its pid survives its exit as a zombie — cannot be modelled with
+a patched ``os.kill`` at all, and lives in test_stop_session_child.py against
+a real process.
 """
 
 from __future__ import annotations
@@ -237,25 +239,73 @@ def test_waitpid_failure_falls_back_instead_of_escaping(
     assert calls == [signal.SIGTERM, 0, signal.SIGKILL], "the signal-0 probe must still run"
 
 
-def test_non_positive_pid_never_reaches_waitpid(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("pid", [0, -1], ids=["zero", "minus-one"])
+def test_non_positive_pid_never_reaches_waitpid(monkeypatch: pytest.MonkeyPatch, pid: int) -> None:
     """A corrupt daemon.pid must not turn the reap into a process-group wait.
 
-    ``waitpid(0, ...)`` collects any child in the caller's process group, which
-    under ``run`` includes the foreground command whose exit status is the CLI's
-    return value. Drop the ``pid > 0`` guard and this records that call.
+    Targets ``_has_exited`` directly rather than routing through
+    ``stop_session``: ``_has_exited`` is a module-level function a future
+    caller could reach without ``stop_session``'s entry guard, so its own
+    ``pid > 0`` guard is pinned here independently. The two guards protect
+    different syscalls — ``_has_exited``'s keeps a non-positive pid off
+    ``waitpid`` (0 reaps any child in the caller's group, a negative pid a
+    child group, letting a corrupt ``daemon.pid`` steal ``run``'s foreground
+    child and its exit status), while ``stop_session``'s entry guard keeps it
+    off ``os.kill`` and ``verify_session``. Drop ``_has_exited``'s ``pid > 0``
+    guard and the recorder below captures the call.
+
+    The contract for a non-positive pid is ``False``: the reap is skipped, and
+    the signal-0 fallback — a no-op stand-in here so no real process group is
+    touched — raises nothing, so no exit is ever proven. ``True`` is reserved
+    for a *proven* exit: a successful reap, or ``ProcessLookupError`` from the
+    probe. ``False`` is the fail-safe direction, because a ``True`` would let
+    the grace poll report a daemon stopped that was never identified. Real
+    ``os.kill(0, 0)`` and ``os.kill(-1, 0)`` succeed on any live host, so the
+    stand-in matches the host's answer rather than inventing one.
     """
-    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
-    monotonic_values = iter([0.0, 0.0, 1.0])
-    monkeypatch.setattr(session_mod.time, "monotonic", lambda: next(monotonic_values))
-    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
     waited: list[int] = []
     monkeypatch.setattr(
-        session_mod.os, "waitpid", lambda pid, _options: (waited.append(pid), (pid, 0))[1]
+        session_mod.os,
+        "waitpid",
+        lambda _pid, _options: (waited.append(_pid), (_pid, 0))[1],
     )
+    monkeypatch.setattr(session_mod.os, "kill", lambda _p, _s: None)
 
-    stop_session(SESSION, 0, 1, force=True)
+    assert session_mod._has_exited(pid) is False
     assert waited == [], "waitpid must never be handed a pid that selects a process group"
+
+
+@pytest.mark.parametrize("pid", [0, -1], ids=["zero", "minus-one"])
+def test_stop_session_never_signals_a_non_positive_pid(
+    monkeypatch: pytest.MonkeyPatch, pid: int
+) -> None:
+    """A non-positive pid is refused at ``stop_session``'s entry, before any signal.
+
+    ``os.kill(-1, SIGTERM)`` delivers the signal to every process the caller can
+    address; ``os.kill(0, SIGTERM)`` to the whole process group. That is the
+    blast radius of a corrupt ``daemon.pid`` once it reaches the kill path.
+    ``read_identity`` is the gate that keeps such a value out in production, but
+    ``stop_session`` re-asserts ``pid > 0`` at its entry — before
+    ``verify_session``'s own probe and before any real signal — so a direct
+    caller that bypasses ``read_identity`` still cannot widen a signal. The
+    outcome is unresolved (``identity check unavailable``), so the caller
+    preserves rather than deletes, matching ``read_identity``'s disposal for the
+    same value.
+
+    ``verify_session`` is pinned permissive even though the entry guard returns
+    before it: it documents that the guard does not lean on the gate below it.
+    The recorder captures ``(pid, sig)`` so a variant that signals the wrong pid
+    is caught alongside one that signals at all.
+    """
+    monkeypatch.setattr(session_mod, "verify_session", _fixed_check(IdentityCheckResult.match))
+    monkeypatch.setattr(session_mod.time, "sleep", lambda _s: None)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda p, sig: sent.append((p, sig)))
+
+    outcome = stop_session(SESSION, pid, 1, force=True)
+
+    assert sent == [], f"os.kill was called for pid={pid}: {sent}"
+    assert outcome == StopOutcome(False, "identity check unavailable")
 
 
 def test_stop_session_writes_nothing(

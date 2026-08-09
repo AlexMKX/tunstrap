@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from tunstrap import cli as cli_mod
+from tunstrap import session as session_mod
 from tunstrap.cli import main
 from tunstrap.session import SessionError, SessionIdentityUnreadable, StopOutcome
 
@@ -254,3 +255,38 @@ def test_stop_deletes_nothing_when_it_cannot_read_the_identity(tmp_path: Path, s
     unsignalled = f"a preserving outcome reported no preserved key: {result.stdout!r}"
     assert result.stdout.endswith('", "preserved": true}\n'), unsignalled
     assert f"session data preserved under {tmp_path}" in result.stderr
+
+
+def test_stop_with_a_non_positive_pid_through_the_cli_never_signals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The composed path: a corrupt ``-1`` pid through the real CLI never signals.
+
+    Every other layer is tested with the layer below it stubbed, so no test
+    drives a non-positive pid through the real CLI. A regression that reopens
+    the hole by a different route — a new ``stop_session`` caller that skips
+    ``read_identity``, or a change to which exception ``cli.stop_command``
+    catches — would pass the whole suite today. This writes ``-1`` into a real
+    ``tunnel-data/daemon.pid`` and invokes ``stop`` through Click's runner with
+    ``os.kill`` replaced by a recorder, so the only way it stays green is for
+    the chain to hold end to end: ``read_identity`` rejects ``-1``, and even if
+    it did not, ``stop_session``'s entry guard does.
+
+    The recorder staying empty is the blast-radius contract; ``preserved: true``
+    with ``tunnel-data`` still on disk is the disposal contract for a daemon
+    that cannot be addressed (not ``not found``, which would delete). Asserted
+    on ``result.stdout`` because Click's ``CliRunner`` interleaves stderr into
+    ``result.output``.
+    """
+    data, _ = _session_with_identity(tmp_path, pid="-1\n")
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(session_mod.os, "kill", lambda p, s: sent.append((p, s)))
+
+    result = CliRunner().invoke(main, ["stop", "--session-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert sent == [], f"os.kill was called with a non-positive pid: {sent}"
+    body = json.loads(result.stdout)
+    assert body["stopped"] is False
+    assert body["preserved"] is True
+    assert data.exists(), "tunnel-data must survive a pid it could not address"

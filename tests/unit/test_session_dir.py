@@ -242,3 +242,34 @@ def test_malformed_identity_is_distinguishable_from_a_missing_one(tmp_path: Path
 
     with pytest.raises(SessionIdentityUnreadable):
         SessionDir.read_identity(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["0\n", "-1\n", "  -7 \n"],
+    ids=["zero", "minus-one", "negative-with-whitespace"],
+)
+def test_non_positive_identity_is_unreadable(tmp_path: Path, body: str) -> None:
+    """A non-positive pid is corrupt state, not a stop target.
+
+    Under ``kill(2)`` a pid of 0 means the caller's own process group and a
+    negative pid a process group — with ``-1`` meaning *every* process the
+    caller can signal, a broadcast rather than a single group — so handing such
+    a value to ``os.kill`` widens a signal far beyond the recorded daemon, the
+    exact hazard ``_has_exited`` already guards ``waitpid`` against (where the
+    same encodings select a child group, or for ``-1`` any child).
+    ``read_identity`` is the gate that keeps a corrupt ``daemon.pid`` (or a
+    hostile ``--session-dir`` whose body is ``-1``) off the kill path entirely,
+    so 0 and negatives are ``SessionIdentityUnreadable``: the corrupt-state
+    answer that makes both ``run`` and ``stop`` preserve rather than signal or
+    clean up.
+
+    Whitespace is part of the case because the reader does ``int(raw.strip())``,
+    which would otherwise turn ``"  -7 \\n"`` into a perfectly valid, perfectly
+    dangerous ``-7``.
+    """
+    (tmp_path / "tunnel-data").mkdir()
+    (tmp_path / "tunnel-data" / "daemon.pid").write_text(body)
+
+    with pytest.raises(SessionIdentityUnreadable):
+        SessionDir.read_identity(str(tmp_path))

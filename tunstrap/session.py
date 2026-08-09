@@ -187,8 +187,22 @@ class SessionDir:
         Raises ``SessionIdentityUnreadable`` — a ``SessionError`` subclass —
         for everything except a genuinely absent file, so a caller can tell
         "nothing was ever recorded" from "there is something here I cannot
-        address". The message is identical in all three cases; only the type
-        differs.
+        address". Every unreadable case shares the ``cannot read identity
+        from <data>: …`` shape; only the tail differs (the underlying
+        ``OSError``/``ValueError`` text, or, for a non-positive value, the
+        explicit reason).
+
+        A non-positive value is unreadable on purpose. Under ``kill(2)`` a pid
+        of 0 means the caller's own process group and a negative pid a process
+        group — with ``-1`` meaning *every* process the caller can signal, a
+        broadcast rather than a single group — so handing such a value to
+        ``os.kill`` widens a signal far beyond the recorded daemon. Under
+        ``waitpid(2)`` the same encodings select a child group (or, for ``-1``,
+        any child), the exact hazard ``_has_exited`` already guards against. An
+        attacker-controlled ``--session-dir`` (or a corrupt ``daemon.pid``)
+        could plant such a value deliberately; refusing it here is the gate that
+        keeps it off the kill path, which re-asserts ``pid > 0`` at its entry as
+        defence in depth.
         """
         data = Path(session_dir).resolve() / _TUNNEL_DATA
         try:
@@ -198,9 +212,14 @@ class SessionDir:
         except OSError as exc:
             raise SessionIdentityUnreadable(f"cannot read identity from {data}: {exc}") from exc
         try:
-            return int(raw.strip())
+            pid = int(raw.strip())
         except ValueError as exc:
             raise SessionIdentityUnreadable(f"cannot read identity from {data}: {exc}") from exc
+        if pid <= 0:
+            raise SessionIdentityUnreadable(
+                f"cannot read identity from {data}: pid {pid} is not positive"
+            )
+        return pid
 
     @classmethod
     def cleanup_path(cls, session_dir: str) -> list[str]:
@@ -312,7 +331,23 @@ def stop_session(  # pylint: disable=too-many-return-statements
     (``cli._stop_outcome_json``), while ``cli._teardown_run_inner`` prints
     nothing on success and stderr on failure, so a foreground child keeps fd 1
     to itself. Deciding here would serve only one of them.
+
+    A non-positive ``pid`` is refused at function entry, before any syscall.
+    Under ``kill(2)`` such a value selects a process *group* (0 is the caller's
+    group; ``-1`` is every process the caller can signal), so
+    ``os.kill(-1, SIGTERM)`` would broadcast the signal. ``read_identity`` is
+    the gate that keeps a corrupt ``daemon.pid`` (or a hostile ``--session-dir``)
+    from reaching this function in production, and ``_process_exists`` refuses
+    the same value independently, but the guard here does not lean on either:
+    it runs first, so it also covers ``verify_session``'s own signal-0 probe,
+    and a direct caller that bypasses ``read_identity`` — or a host where the
+    upstream gates have failed — still cannot widen a signal. It returns
+    ``identity check unavailable``: an unresolved outcome, so the caller
+    preserves rather than deletes — the same disposal ``read_identity`` demands
+    for the identical value.
     """
+    if pid <= 0:
+        return StopOutcome(False, "identity check unavailable")
     check = verify_session(session_dir, pid)
     if check == IdentityCheckResult.not_found:
         return StopOutcome(False, "not found")

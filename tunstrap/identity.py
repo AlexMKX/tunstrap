@@ -100,7 +100,20 @@ def _check_lock(lock_path: Path, pid: int) -> IdentityCheckResult:
 
 
 def _process_exists(pid: int) -> bool:
-    """True iff a process with the given PID currently exists."""
+    """True iff a process with the given PID currently exists.
+
+    A non-positive pid is never a process: ``kill(2)`` reads 0 as "the
+    caller's process group" and negatives as a process-group selector (with
+    ``-1`` meaning *every* process the caller can signal). ``os.kill`` with
+    such a pid is therefore a group/broadcast probe that answers True for as
+    long as any signalable process exists — which is always — so it cannot
+    confirm "the recorded daemon is alive". Refusing it here is what keeps a
+    corrupt ``daemon.pid`` (or a hostile ``--session-dir``) of ``-1`` from
+    verifying as ``match``; ``stop_session`` re-asserts ``pid > 0`` at its
+    entry as defence in depth.
+    """
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
