@@ -54,11 +54,18 @@ class KubeconfigView:
     """Extracted current-context view plus the live parsed document.
 
     `doc` is the round-trip ruamel document used later for in-place patching
-    (comments/key order preserved). The scalar fields are the extracted
+    (comments/key order preserved). It is always a mapping: ``_load_root``
+    rejects a non-mapping root as a ``KubeParseError`` before a view is ever
+    built, so callers (and the type checker) can rely on that without a runtime
+    re-check. ``cluster_body`` is the live cluster mapping the current context
+    resolves to (the same object ``patch_view`` rewrites in place); carrying it
+    avoids re-resolving the cluster by name and re-checking what
+    ``_cluster_section`` already validated. The scalar fields are the extracted
     current-context cluster/user material.
     """
 
-    doc: object
+    doc: dict[str, object]
+    cluster_body: dict[str, object]
     context_name: str
     cluster_name: str
     user_name: str
@@ -101,6 +108,7 @@ def parse_kubeconfig(raw: bytes) -> KubeconfigView:
 
     return KubeconfigView(
         doc=doc,
+        cluster_body=cluster_body,
         context_name=current,
         cluster_name=str(cluster_name),
         user_name=str(user_name),
@@ -257,14 +265,13 @@ def patch_view(
     Rewrites `server:` to the local forwarded endpoint. On secure patch sets
     `tls-server-name`. On insecure patch sets `insecure-skip-tls-verify: true`
     and removes `certificate-authority-data`. Other clusters are untouched.
+
+    The cluster body mutated here is the live ruamel object ``parse_kubeconfig``
+    already resolved and validated (it has a ``server`` and is a mapping), so no
+    re-resolution or re-validation is needed -- the ``KubeconfigView`` carries
+    that object as ``cluster_body``.
     """
-    doc = view.doc
-    assert isinstance(doc, dict)
-    cluster = _find_named(doc.get("clusters") or [], view.cluster_name)
-    assert cluster is not None  # parse_kubeconfig guaranteed this
-    body_raw = cluster["cluster"]
-    assert isinstance(body_raw, dict), "parse_kubeconfig guaranteed cluster.cluster is a dict"
-    body: dict[str, object] = body_raw
+    body = view.cluster_body
     body["server"] = f"https://127.0.0.1:{local_port}"
     if insecure:
         body["insecure-skip-tls-verify"] = True
@@ -275,7 +282,40 @@ def patch_view(
             body["tls-server-name"] = tls_server_name
 
 
-def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
+def _sweep_shared_refs(
+    contexts: list[object],
+    ctx_entry: dict[str, object],
+    old_cluster: str,
+    old_user: str,
+    new_name: str,
+) -> None:
+    """Repoint ``cluster``/``user`` on non-selected contexts that shared them.
+
+    The current-context's own entry (``ctx_entry``) has already been renamed in
+    place; every OTHER context whose ``cluster``/``user`` pointed at the same
+    entry is repointed at ``new_name`` so a multi-context document that shares
+    one cluster or user stays internally consistent after the rename. Entries
+    that are not mappings, or whose ``context`` body is not a mapping, are
+    skipped: the active context was already validated by the caller, and these
+    foreign/stale entries are left untouched on purpose.
+    """
+    for entry in contexts:
+        if entry is ctx_entry or not isinstance(entry, dict):
+            continue
+        other_body = entry.get("context")
+        if not isinstance(other_body, dict):
+            continue
+        if other_body.get("cluster") == old_cluster:
+            other_body["cluster"] = new_name
+        if other_body.get("user") == old_user:
+            other_body["user"] = new_name
+
+
+def rename_identities(
+    doc: dict[str, object],
+    node: str,
+    target: str,
+) -> str:
     """Rename the current-context's cluster/user/context to a deterministic name.
 
     ``tunstrap-<node>-<target>`` is used for cluster, user, and context alike.
@@ -285,30 +325,58 @@ def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
     internally consistent after the rename (the non-selected contexts are NOT
     left byte-stable -- only their own ``name`` is preserved).
 
-    The fetched kubeconfig is untrusted input. If it already contains the
-    generated name in any of ``clusters``/``users``/``contexts``, this raises
-    ``KubeParseError`` rather than silently producing a duplicate or
-    uniquifying the name. A collision means the upstream file is using
-    tunstrap's reserved ``tunstrap-<node>-<target>`` namespace -- a
-    misconfiguration or a shadowing attempt -- and renaming around it would
-    hide that. Uniquifying (``-2`` suffixes) is rejected on purpose: the
-    deterministic name is a consumer-facing literal (see
-    ``docs/recipe_terragrunt.md``) and must not become non-deterministic. The
-    check runs before any mutation, so a rejection leaves ``doc`` unchanged.
+    The fetched kubeconfig is untrusted input. Every structural defect -- a
+    non-string current-context, a current-context absent from ``contexts``, a
+    non-mapping context body, cluster/user references that are not strings or
+    that name entries missing from ``clusters``/``users`` -- raises
+    ``KubeParseError``, as does a reserved-namespace collision where the file
+    already contains the generated ``tunstrap-<node>-<target>`` name in any of
+    ``clusters``/``users``/``contexts``. These are typed raises rather than
+    ``assert``: this function is public (exported via ``__all__``), so its
+    contract must hold for direct callers and ``python -O`` cannot be allowed
+    to erase the check. For the only in-tree caller the seven structural guards
+    are defence-in-depth: ``run_kube_targets`` always runs ``parse_kubeconfig``
+    on the same document first, and that dominates every structural case here
+    -- both functions narrow ``contexts`` with the same ``isinstance`` check,
+    resolve names with the same first-match ``_find_named``, and nothing
+    mutates ``current-context``/``contexts``/``clusters``/``users`` between the
+    two calls (``patch_view`` only rewrites the live cluster body's
+    server/TLS fields). The sole raise reachable from ``run_kube_targets`` is
+    therefore the reserved-namespace collision. All rejections run before any
+    mutation, so a rejection leaves ``doc`` unchanged.
+
+    A collision means the upstream file is using tunstrap's reserved
+    ``tunstrap-<node>-<target>`` namespace -- a misconfiguration or a shadowing
+    attempt -- and renaming around it would hide that. Uniquifying (``-2``
+    suffixes) is rejected on purpose: the deterministic name is a
+    consumer-facing literal (see ``docs/recipe_terragrunt.md``) and must not
+    become non-deterministic.
     """
     new_name = f"tunstrap-{node}-{target}"
     current = doc.get("current-context")
-    assert isinstance(current, str)
+    if not isinstance(current, str):
+        raise KubeParseError(
+            f"kubeconfig current-context is not a string, got {type(current).__name__}"
+        )
     contexts_raw = doc.get("contexts")
     contexts: list[object] = contexts_raw if isinstance(contexts_raw, list) else []
     ctx_entry = _find_named(contexts, current)
-    assert ctx_entry is not None
-    ctx_body = ctx_entry["context"]
-    assert isinstance(ctx_body, dict)
-    old_cluster = ctx_body["cluster"]
-    old_user = ctx_body["user"]
-    assert isinstance(old_cluster, str)
-    assert isinstance(old_user, str)
+    if ctx_entry is None:
+        raise KubeParseError(f"current-context {current!r} not found in contexts")
+    ctx_body_raw = ctx_entry.get("context")
+    if not isinstance(ctx_body_raw, dict):
+        raise KubeParseError(f"context {current!r} body is not a mapping")
+    old_cluster = ctx_body_raw.get("cluster")
+    old_user = ctx_body_raw.get("user")
+    if not isinstance(old_cluster, str):
+        raise KubeParseError(
+            f"context {current!r} cluster reference is not a string, "
+            f"got {type(old_cluster).__name__}"
+        )
+    if not isinstance(old_user, str):
+        raise KubeParseError(
+            f"context {current!r} user reference is not a string, got {type(old_user).__name__}"
+        )
 
     # Reserved-namespace guard. Runs before any mutation so a rejection leaves
     # the document untouched. ``_find_named`` returns first-match, which is
@@ -326,30 +394,29 @@ def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
             "'tunstrap-<node>-<target>' namespace"
         )
 
-    ctx_entry["name"] = new_name
-    ctx_body["cluster"] = new_name
-    ctx_body["user"] = new_name
-
+    # Resolve the cluster/user entries the current context names. These lookups
+    # run before any mutation for the same reason as the collision guard above:
+    # a half-renamed document on rejection would be worse than the original.
     cluster_entry = _find_named(doc.get("clusters") or [], old_cluster)
-    assert cluster_entry is not None
-    cluster_entry["name"] = new_name
-
+    if cluster_entry is None:
+        raise KubeParseError(
+            f"context {current!r} references cluster {old_cluster!r} not present in clusters"
+        )
     user_entry = _find_named(doc.get("users") or [], old_user)
-    assert user_entry is not None
+    if user_entry is None:
+        raise KubeParseError(
+            f"context {current!r} references user {old_user!r} not present in users"
+        )
+
+    ctx_entry["name"] = new_name
+    ctx_body_raw["cluster"] = new_name
+    ctx_body_raw["user"] = new_name
+    cluster_entry["name"] = new_name
     user_entry["name"] = new_name
 
     doc["current-context"] = new_name
 
-    for entry in contexts:
-        if entry is ctx_entry or not isinstance(entry, dict):
-            continue
-        other_body = entry.get("context")
-        if not isinstance(other_body, dict):
-            continue
-        if other_body.get("cluster") == old_cluster:
-            other_body["cluster"] = new_name
-        if other_body.get("user") == old_user:
-            other_body["user"] = new_name
+    _sweep_shared_refs(contexts, ctx_entry, old_cluster, old_user, new_name)
 
     return new_name
 
@@ -442,7 +509,6 @@ async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-ta
 
         try:
             patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
-            assert isinstance(view.doc, dict)
             new_identity = rename_identities(view.doc, node_name, name)
             patched = dump_kubeconfig(view)
         except KubeParseError as exc:

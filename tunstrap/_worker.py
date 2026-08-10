@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from tunstrap.activity import ActivityTracker
 from tunstrap.exceptions import DaemonError, SessionActive
 from tunstrap.manager import TunnelManager
-from tunstrap.schemas import ErrorOutput, InputSchema, OutputSchema
+from tunstrap.schemas import ErrorOutput, InputSchema
 from tunstrap.session import SessionDir
 
 _SCHEMA_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB is more than enough for any sane input
@@ -127,7 +127,9 @@ async def _run(args: argparse.Namespace, session: SessionDir) -> int:
         session.cleanup()
         return 2
 
-    assert isinstance(result, OutputSchema)
+    # result is OutputSchema here: start_all_and_build_output returns
+    # OutputSchema | ErrorOutput, and the ErrorOutput branch above returns 2,
+    # so mypy narrows the union to OutputSchema without a runtime check.
     _write_message(
         args.ipc_fd,
         {"kind": "success", "payload": result.model_dump(mode="json")},

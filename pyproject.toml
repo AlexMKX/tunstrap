@@ -65,11 +65,22 @@ target-version = "py310"
 # output-sensitive examples; only exclude those Markdown files from formatting.
 exclude = ["docs/**/*.md"]
 
+[tool.ruff.lint]
+# S101 (assert) is enforced so production modules can never reintroduce an
+# `assert`. This codebase documents twice (tunstrap/cli.py,
+# tunstrap/daemon.py) that an assert raises AssertionError -- outside the
+# TunstrapError handler, so it escapes as a traceback -- and that `python -O`
+# erases the check altogether, leaving a bare TypeError/AttributeError in its
+# place. Tests are built on `assert` and retain it via the per-file-ignores
+# entry below. Only S101 is pulled in (not the whole `S` bandit group).
+extend-select = ["S101"]
+
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures deliberately model process failures, legacy annotations, and
 # naive certificates; keep test code unchanged while retaining these rules in
-# production modules.
-"tests/**/*.py" = ["DTZ001", "PLW1510", "PYI034", "PYI036", "RUF012", "RUF059", "UP024", "UP035", "UP037"]
+# production modules. S101 stays enabled here: the test suite is built on
+# `assert`, so the production-only assert ban must not apply under tests/**.
+"tests/**/*.py" = ["S101", "DTZ001", "PLW1510", "PYI034", "PYI036", "RUF012", "RUF059", "UP024", "UP035", "UP037"]
 # Coverage instrumentation is deliberately fail-open: startup must continue
 # even when the optional coverage bootstrap fails.
 "sitecustomize.py" = ["S110"]
