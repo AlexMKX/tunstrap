@@ -167,33 +167,35 @@ tunstrap start root@edge1.example.net \
 ### `--output env` (consume via `eval`)
 
 `start` defaults to `--output json`. With `--output env` it instead prints
-POSIX `export` lines (and force-materializes kube files), ready for `eval`:
+POSIX `export` lines and force-materializes both patched kubeconfigs and
+fetched files under `tunnel-data/` (mode 0600; see [On-disk
+materialization](#on-disk-materialization)), ready for `eval`:
 
 ```bash
 eval "$(tunstrap start root@edge1 --ssh-key ~/.ssh/id_ed25519 \
   --target api=127.0.0.1:6443 --kube k3s=/etc/rancher/k3s/k3s.yaml --output env)"
 
-curl "http://$TUNSTRAP_API_ENDPOINT/healthz"
 kubectl get nodes          # KUBECONFIG is exported automatically
 
 tunstrap stop --session-dir "$TUNSTRAP_SESSION_DIR"
 ```
 
-Variables emitted (no node segment; names upper-cased, non-alphanumerics → `_`):
+Variables emitted:
 
 | Variable | Meaning |
 |---|---|
 | `TUNSTRAP_SESSION_DIR` | Session dir — pass to `stop --session-dir`. |
 | `TUNSTRAP_PID` | Daemon PID. |
-| `TUNSTRAP_<NAME>_PORT` | Local forwarded port for `--target NAME=...`. |
-| `TUNSTRAP_<NAME>_ENDPOINT` | `127.0.0.1:<port>` for a target; full URL for a kube target. |
-| `TUNSTRAP_<NAME>_KUBECONFIG` | Materialized kubeconfig path for `--kube NAME=...`. |
-| `KUBECONFIG` | Colon-joined paths of all kube targets. |
+| `TUNSTRAP_OUTPUT_FILE` | Absolute path to the materialized unified output JSON. |
+| `KUBECONFIG` | Colon-joined materialized paths of all kube targets; emitted when at least one kube file exists. |
+| `KUBE_CONFIG_PATH` | Same value as `KUBECONFIG`; emitted with exactly one kube file. It takes precedence over `KUBE_CONFIG_PATHS` in the OpenTofu providers. |
+| `KUBE_CONFIG_PATHS` | Same value as `KUBECONFIG`; emitted with two or more kube files. It is not emitted with `KUBE_CONFIG_PATH`. |
 
 ### `run` (foreground wrapper with guaranteed teardown)
 
-`run` opens the tunnel and injects the same `TUNSTRAP_*` / `KUBECONFIG`
-environment into a child command. It always removes inherited `KUBECONFIG`,
+`run` opens the tunnel and injects the same session scalars and kube channel
+(`KUBECONFIG` / `KUBE_CONFIG_PATH` / `KUBE_CONFIG_PATHS`, as applicable) into a
+child command. It always removes inherited `KUBECONFIG`,
 `KUBE_CONFIG_PATH`, and `KUBE_CONFIG_PATHS` before starting the child, even
 when the input has no kube targets. A direct `tunstrap run host -- kubectl ...`
 therefore does not retain an unrelated operator kube configuration.
@@ -284,41 +286,33 @@ schema.
 
 #### Structured output: `--output-var NAME`
 
-`--output-var NAME` puts the `OutputSchema`, JSON-encoded, into the child's
-environment under `NAME`, *alongside* the usual `TUNSTRAP_*` scalars rather
-than instead of them.
+`--output-var NAME` puts a JSON-encoded, node-keyed unified structure under
+`NAME`, alongside the three session scalars and the kube channel when kube
+files exist. Its top-level keys are `session` and `nodes`; each node contains
+`ports`, `kube`, and `fetch_files`.
 
-**The kube credentials are projected out of this channel.** Each
-`kube_targets` entry keeps `cluster_name`, `context_name`, `local_port`,
-`endpoint`, `tls_server_name`, `certificate_authority_data` and `path`, and
-drops `client_key_data`, `client_certificate_data` and `content_b64`. The
-documented consumer binds `NAME` to a Terraform variable, and OpenTofu
-persists root-module variable values in the plan file — which pipelines
-archive. Nothing is lost: `run` always materializes, so `path` is a real
-on-disk kubeconfig containing everything that was removed. `tunstrap start --output
-json` also projects materialized kube and fetched-file entries. Only an
-unmaterialized `start` envelope is complete on stdout.
+Each `nodes.<node>.ports.<target>` value is the string
+`"127.0.0.1:<local_port>"`, not an integer. The Terragrunt/OpenTofu recipe
+extracts the port with `split(":", ...)[1]`; see
+[`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md).
+
+`run` always materializes. The unified structure carries kube references as
+`{path, context, endpoint}` and fetched-file references as `{path, size,
+sha256}` (or `{error}` for an optional fetch failure). It does not carry file
+content or kube credentials. The documented consumer binds `NAME` to a
+Terraform variable, while `path` names the on-disk file a consumer can read.
+`tunstrap start --output json` likewise projects materialized kube and
+fetched-file entries; only an unmaterialized `start` envelope carries inline
+content on stdout.
 
 ```bash
 tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
   -- tofu plan
 ```
 
-The scalar environment is lossy by construction: it is single-node only, and
-it drops `warnings`, `started_at`, and every `kube_targets` field except
-`path` and `endpoint`. `--output-var` is the structured channel — keyed by
-node, and lossless apart from the kube-credential projection above.
-
-**Fetched-file content is exported verbatim, not projected.** The projection
-above removes only the kube credentials tunstrap itself injects. A fetched
-file is opt-in twice — the operator names it with `--fetch` and elects
-`--output-var` — and it is the operator's own content; `FetchedFile` has no
-on-disk `path`, so dropping it would silently lose data a consumer reads. The
-same plan-file persistence applies, so **do not `--fetch` a secret while using
-`--output-var`**: tunstrap fetches into the envelope (`content_b64`), not onto
-disk, so the bytes would be persisted. Deliver a secret to the module by a path
-it reads directly, not through this channel. The intended symmetry is tracked in
-the spec's "Out of scope".
+The scalar environment carries session bookkeeping and kube file locations; it
+does not describe ports, warnings, or node-qualified metadata. `--output-var`
+is the node-keyed structured channel for that metadata.
 
 - The variable named by `--input-env` is **removed** from the child's
   environment. It holds the `InputSchema`, whose `ssh_pkey` is an SSH private
@@ -329,12 +323,10 @@ the spec's "Out of scope".
 - `NAME` may not collide with a variable `run` itself injects or scrubs, else
   exit `64`.
   Collision with an unrelated inherited variable is a documented overwrite.
-- **One node:** scalars and `KUBECONFIG` as usual, plus `NAME` if given.
-- **More than one node:** `NAME` only — no `TUNSTRAP_*` scalars, because
-  `TUNSTRAP_<TARGET>_*` has no node dimension and same-named targets across
-  nodes would collide.
-- **More than one node without `--output-var`:** exit `1`
-  (`MultiNodeEnvUnsupported`), decided before any daemon is started.
+- **Any node count:** the three session scalars are injected, as is the
+  cardinality-appropriate kube channel when kube files exist; `NAME` is added
+  if given. Ports remain available in the unified JSON or its materialized file,
+  not as target-scoped environment variables.
 
 > This is the flag the Terragrunt/OpenTofu recipe builds on — it puts the
 > connection envelope (kube credentials projected out) into `TF_VAR_tunstrap`
@@ -352,7 +344,7 @@ its documented contract.)
 **Exit codes (`run`):** the child's exit code wins on success. Before the
 child runs, `run` may exit with `64` (usage error, including every row of the
 `--input-env` conflict matrix and an invalid or colliding `--output-var`),
-`1` (bad `--input-env` payload, or multi-node input without `--output-var`),
+`1` (bad `--input-env` payload),
 `2` (required tunnel failure), `3` (a live session already holds the
 requested `--session-dir`), or `4` (daemon error). `127` if the child binary
 cannot be launched, and `4` for any unexpected failure after the tunnel came
@@ -468,8 +460,8 @@ explicit `tls_server_name` is set:
 
 | Field | Description |
 |---|---|
-| `cluster_name` | Cluster name from the kubeconfig (unmaterialized only) |
-| `context_name` | `current-context` value (unmaterialized only) |
+| `cluster_name` | Deterministic renamed cluster identity `tunstrap-<node>-<target>` (unmaterialized only) |
+| `context_name` | Deterministic renamed context identity `tunstrap-<node>-<target>`, i.e. the patched file's `current-context` (unmaterialized only) |
 | `local_port` | OS-assigned local forwarded port (unmaterialized only) |
 | `endpoint` | `https://127.0.0.1:<local_port>` |
 | `tls_server_name` | Chosen TLS server name, or `null` on insecure fallback (unmaterialized only) |
@@ -480,8 +472,9 @@ explicit `tls_server_name` is set:
 | `path` | Absolute path to the materialized file, or `null` if `daemon.materialize=false` |
 
 Materialized `start --output json` targets use the projected form `{path,
-context, endpoint}`. The projected `context` field is renamed from the raw
-envelope's `context_name`.
+context, endpoint}`. Only the key is renamed from the raw envelope's
+`context_name` to `context`; its value is identical in both shapes and is
+always `tunstrap-<node>-<target>`.
 
 ## Output reference
 
@@ -503,8 +496,8 @@ envelope's `context_name`.
       },
       "kube_targets": {
         "k3s": {
-          "cluster_name": "default",
-          "context_name": "default",
+          "cluster_name": "tunstrap-edge1-k3s",
+          "context_name": "tunstrap-edge1-k3s",
           "local_port": 40124,
           "endpoint": "https://127.0.0.1:40124",
           "tls_server_name": "edge1.example.net",
@@ -525,6 +518,40 @@ envelope's `context_name`.
 ```
 
 `session_dir` is **always** present. Pass it to `stop --session-dir`.
+
+With `daemon.materialize: true`, `start --output json` retains the
+`OutputSchema` envelope but projects every materialized content-bearing entry
+to a reference. For example:
+
+```jsonc
+{
+  "connections": {
+    "edge1": {
+      "ports": {"kubeapi": 40123},
+      "fetch_files": {
+        "kubeconfig": {
+          "path": "/tmp/tunstrap-session-abc123/tunnel-data/fetch-edge1-kubeconfig",
+          "size": 2918,
+          "sha256": "d2a0bf3c..."
+        }
+      },
+      "kube_targets": {
+        "k3s": {
+          "path": "/tmp/tunstrap-session-abc123/tunnel-data/kube-edge1-k3s",
+          "context": "tunstrap-edge1-k3s",
+          "endpoint": "https://127.0.0.1:40124"
+        }
+      }
+    }
+  }
+}
+```
+
+The materialized kube projection renames only raw `context_name`'s key to
+`context`; its value is identical in both shapes and is always
+`tunstrap-<node>-<target>`.
+`--output-var` uses the same projected references under its node-keyed
+`{session, nodes}` structure, rather than this `OutputSchema` envelope.
 
 **Failure (`ErrorOutput`)**
 
