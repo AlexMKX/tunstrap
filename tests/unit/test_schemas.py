@@ -85,6 +85,17 @@ def test_daemon_options_auto_stop_idle_seconds_default_null() -> None:
     assert opts.auto_stop_idle_seconds is None
 
 
+def test_daemon_options_startup_timeout_defaults_to_conservative_five_minutes() -> None:
+    """The IPC deadline is long enough for normal multi-node remote startup."""
+    assert DaemonOptions().startup_timeout_seconds == 300
+
+
+def test_daemon_options_startup_timeout_rejects_zero() -> None:
+    """A non-positive IPC deadline would make startup unable to make progress."""
+    with pytest.raises(ValidationError):
+        DaemonOptions(startup_timeout_seconds=0)
+
+
 def test_daemon_options_auto_stop_idle_seconds_accepts_positive_int() -> None:
     """A positive integer is accepted."""
     opts = DaemonOptions(auto_stop_idle_seconds=60)

@@ -63,7 +63,9 @@ def _patch_transport_per_host(
     ) -> tuple[dict[str, int], list[Any]]:
         return {"p": 40000}, []
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, Any], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, Any], list[str]]:
         return {}, []
 
     monkeypatch.setattr(manager_mod, "open_connection", fake_open_connection)

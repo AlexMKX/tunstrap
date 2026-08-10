@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
+import time
 from typing import IO, Any
 
-from tunstrap.exceptions import DaemonHandshakeError
+from tunstrap.exceptions import DaemonHandshakeError, DaemonHandshakeTimeoutError
 from tunstrap.schemas import InputSchema
 
 
@@ -118,22 +120,95 @@ def spawn_daemon(
         proc.stdin = None
         _ = exc  # discarded; we surface via the IPC read path below
 
-    return _read_ipc_response(ipc_read_fd)
+    return _read_ipc_response(
+        ipc_read_fd,
+        proc,
+        timeout=schema.daemon.startup_timeout_seconds,
+        reap_timeout=schema.daemon.shutdown_grace_seconds,
+    )
 
 
-def _read_ipc_response(read_fd: int) -> dict[str, Any]:
-    """Block on the IPC pipe until EOF, parse, and return the message.
+def _kill_timed_out_worker(proc: subprocess.Popen[bytes], reap_timeout: int) -> bool:
+    """Escalate a timed-out termination to SIGKILL without leaking OSError."""
+    if proc.pid <= 0 or proc.poll() is not None:
+        return proc.poll() is not None
+    try:
+        proc.kill()
+        try:
+            proc.wait(timeout=reap_timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+    except OSError:
+        return proc.poll() is not None
+
+
+def _reap_timed_out_worker(proc: subprocess.Popen[bytes], reap_timeout: int) -> bool:
+    """Terminate a live worker from Popen, escalating once, and report reaping.
+
+    ``Popen`` is the verified owner handle created in this process. Its positive
+    pid is checked before either signal so malformed stand-ins cannot target a
+    process group or a non-positive pid. Each wait is bounded by the configured
+    shutdown grace, keeping the parent-side startup failure bounded even if the
+    worker ignores both signals.
+    """
+    if proc.pid <= 0 or proc.poll() is not None:
+        return proc.poll() is not None
+    try:
+        proc.terminate()
+        proc.wait(timeout=reap_timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        return _kill_timed_out_worker(proc, reap_timeout)
+    except OSError:
+        return proc.poll() is not None
+
+
+def _read_ipc_response(
+    read_fd: int,
+    proc: subprocess.Popen[bytes],
+    *,
+    timeout: int,
+    reap_timeout: int,
+) -> dict[str, Any]:
+    """Read one worker IPC frame through EOF before the startup deadline.
 
     Called only after ``Popen`` has detached the worker, so every failure here
     is parent-side by construction and raises ``DaemonHandshakeError``. A
     truncated or unparsable frame is precisely the case where we cannot tell
-    whether a worker is live, which is why the caller must assume one is.
+    whether a worker is live, which is why the caller must assume one is. On a
+    deadline expiry the parent owns the verified ``Popen`` handle, terminates
+    that worker, and waits for it before surfacing the distinct timeout error.
     """
+    deadline = time.monotonic() + timeout
     try:
-        with os.fdopen(read_fd, "rb") as reader:
-            raw = reader.read()
+        raw_parts: list[bytes] = []
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            readable, _, _ = select.select([read_fd], [], [], remaining)
+            if not readable:
+                raise TimeoutError
+            chunk = os.read(read_fd, 8192)
+            if not chunk:
+                break
+            raw_parts.append(chunk)
+    except TimeoutError as exc:
+        reaped = _reap_timed_out_worker(proc, reap_timeout)
+        raise DaemonHandshakeTimeoutError(
+            "worker IPC startup response timed out",
+            {"timeout_seconds": timeout, "worker_reaped": reaped, "pid": proc.pid},
+        ) from exc
     except OSError as exc:
         raise DaemonHandshakeError("failed to read worker IPC pipe", {"errno": exc.errno}) from exc
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    raw = b"".join(raw_parts)
 
     if not raw:
         raise DaemonHandshakeError("worker IPC pipe closed without a message", {})

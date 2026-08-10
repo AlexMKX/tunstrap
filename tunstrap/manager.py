@@ -152,7 +152,11 @@ class TunnelManager:
 
         if node.fetch_files:
             try:
-                fetched, required_failures = await fetch_files(runtime.conn, node.fetch_files)
+                fetched, required_failures = await fetch_files(
+                    runtime.conn,
+                    node.fetch_files,
+                    timeout=node.ssh_options.connect_timeout,
+                )
             except _NODE_STARTUP_ERRORS as exc:
                 runtime.error = str(exc)
                 await close_transport(runtime.conn, runtime.listeners)

@@ -50,7 +50,7 @@ def _classify_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-async def _fetch_one(sftp: asyncssh.SFTPClient, spec: FileSpec) -> FetchedFile:
+async def _fetch_one(sftp: asyncssh.SFTPClient, spec: FileSpec, timeout: float) -> FetchedFile:
     """Fetch one file, mapping every *expected* failure to a ``FetchedFile.error``.
 
     Owns the whole per-file decision tree — the 1 MiB cap checked twice (from
@@ -61,11 +61,15 @@ async def _fetch_one(sftp: asyncssh.SFTPClient, spec: FileSpec) -> FetchedFile:
     the batch.
     """
     try:
-        stat = await sftp.stat(spec.path)
-        if stat.size is not None and stat.size > _MAX_FETCH_BYTES:
-            raise _CapExceeded
-        async with sftp.open(spec.path, "rb") as fh:
-            data = await fh.read(_MAX_FETCH_BYTES + 1)
+
+        async def _read_remote_file() -> bytes | str:
+            stat = await sftp.stat(spec.path)
+            if stat.size is not None and stat.size > _MAX_FETCH_BYTES:
+                raise _CapExceeded
+            async with sftp.open(spec.path, "rb") as fh:
+                return await fh.read(_MAX_FETCH_BYTES + 1)
+
+        data = await asyncio.wait_for(_read_remote_file(), timeout=timeout)
         raw: bytes = data if isinstance(data, bytes) else data.encode()
         if len(raw) > _MAX_FETCH_BYTES:
             raise _CapExceeded
@@ -103,8 +107,10 @@ def _record_channel_failure(
 async def fetch_files(
     conn: asyncssh.SSHClientConnection,
     specs: dict[str, FileSpec],
+    *,
+    timeout: float,
 ) -> tuple[dict[str, FetchedFile], list[str]]:
-    """Fetch all files for a node over a single SFTP channel."""
+    """Fetch all files for a node over one SFTP channel within each-file timeout."""
     if not specs:
         return {}, []
 
@@ -120,7 +126,7 @@ async def fetch_files(
     try:
         async with sftp_cm as sftp:
             for name, spec in specs.items():
-                fetched = await _fetch_one(sftp, spec)
+                fetched = await _fetch_one(sftp, spec, timeout)
                 results[name] = fetched
                 if fetched.error is not None and spec.required:
                     required_failures.append(name)

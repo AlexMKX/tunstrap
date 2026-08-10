@@ -72,7 +72,9 @@ async def test_no_fetch_files_skips_fetcher(monkeypatch: pytest.MonkeyPatch) -> 
     """When fetch_files is None the fetcher is never invoked."""
     called: list[Any] = []
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         called.append((conn, specs))
         return {}, []
 
@@ -93,7 +95,9 @@ async def test_fetch_files_results_populate_node_output(
     """Fetcher results are materialized to their fetch-prefixed leaf, path set."""
     fake_result = {"kubeconfig": FetchedFile(content_b64="YQ==", size=1, sha256="ca97")}
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return fake_result, []
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
@@ -115,7 +119,9 @@ async def test_required_file_failure_aborts(monkeypatch: pytest.MonkeyPatch) -> 
     """A required-file failure aborts the node and closes its connection."""
     fake_conn = _FakeConn()
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return {"k": FetchedFile(error="SSH_FX_NO_SUCH_FILE")}, ["k"]
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
@@ -131,7 +137,9 @@ async def test_required_file_failure_aborts(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_soft_fail_file_keeps_node_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """An optional-file error keeps the node in OutputSchema."""
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return {"k": FetchedFile(error="SSH_FX_NO_SUCH_FILE")}, []
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
@@ -150,7 +158,9 @@ async def test_fetch_skipped_when_forward_fails(monkeypatch: pytest.MonkeyPatch)
     fake_conn = _FakeConn()
     fetch_called: list[bool] = []
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         fetch_called.append(True)
         return {}, []
 
@@ -181,7 +191,9 @@ async def test_fetch_transport_failure_stops_forwarder_and_aborts(
     """A transport-level failure in the fetcher aborts and closes resources."""
     fake_conn = _FakeConn()
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         raise ConnectionResetError("peer closed mid-fetch")
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)

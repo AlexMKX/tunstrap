@@ -76,12 +76,21 @@ class SSHOptions(BaseModel):
 
 
 class DaemonOptions(BaseModel):
-    """Daemon-side knobs: log file, shutdown grace, idle auto-stop."""
+    """Daemon-side knobs: log file, startup/shutdown deadlines, idle auto-stop."""
 
     model_config = ConfigDict(extra="forbid")
 
     log_file: str | None = None
     shutdown_grace_seconds: int = 10
+    startup_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum time the parent waits for the worker's startup IPC response. "
+            "On expiry the parent terminates the worker and waits up to "
+            "shutdown_grace_seconds before killing it."
+        ),
+    )
     auto_stop_idle_seconds: int | None = Field(
         default=None,
         ge=1,

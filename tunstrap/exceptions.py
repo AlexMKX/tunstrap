@@ -69,6 +69,10 @@ class DaemonHandshakeError(DaemonError):
     """
 
 
+class DaemonHandshakeTimeoutError(DaemonHandshakeError):
+    """The parent exceeded the configured deadline for the worker IPC response."""
+
+
 class KubeParseError(TunstrapError):
     """A fetched kubeconfig could not be used as-is.
 
@@ -90,6 +94,7 @@ _EXIT_CODES: dict[type[TunstrapError], int] = {
     SessionActive: 3,
     DaemonError: 4,
     DaemonHandshakeError: 4,
+    DaemonHandshakeTimeoutError: 4,
 }
 
 

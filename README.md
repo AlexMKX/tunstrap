@@ -360,6 +360,7 @@ up — in which case the daemon has already been torn down.
 | `nodes` | `dict[str, NodeInput]` | required | One entry per remote host |
 | `daemon.log_file` | `str \| null` | `null` | If set, daemon's stdout/stderr go here. Never contains fetched content. |
 | `daemon.shutdown_grace_seconds` | `int` | `10` | SIGTERM grace period before SIGKILL |
+| `daemon.startup_timeout_seconds` | `int` | `300` | Bounds the parent's wait for the worker's startup IPC frame. On expiry the parent terminates the worker within `shutdown_grace_seconds`. Must exceed a node's worst-case startup: `fetch_files` and `kube_targets` are fetched serially, each bounded by `ssh_options.connect_timeout`. |
 | `daemon.auto_stop_idle_seconds` | `int \| null` | `null` | Seconds of idle (no active forward connections) before the daemon SIGTERMs itself. `null` disables. |
 | `daemon.materialize` | `bool` | `false` | Write patched kubeconfig files to `<session-dir>/tunnel-data/` (mode 0600). See [On-disk materialization](#on-disk-materialization). |
 
@@ -375,7 +376,7 @@ up — in which case the daemon has already been torn down.
 | `ssh_pkey_passphrase` | `str \| null` | `null` | Optional passphrase for `ssh_pkey` |
 | `remote_targets` | `dict[str, str] \| null` | `null` | Up to 16 entries; each value is `"host:port"`. Host is resolved on the SSH server side, enabling bastion-style cross-host forwards. |
 | `ssh_options.compression` | `bool` | `false` | Enable SSH compression |
-| `ssh_options.connect_timeout` | `int` | `60` | Seconds |
+| `ssh_options.connect_timeout` | `int` | `60` | Seconds for connection establishment and each SFTP file fetch. |
 | `required` | `bool` | `true` | If false, this node may fail without aborting `start` |
 | `fetch_files` | `dict[str, FileSpec] \| null` | `null` | Files to read at start (max 16) |
 | `kube_targets` | `dict[str, KubeTarget] \| null` | `null` | Kubernetes clusters to access via the SSH tunnel (max 16). See [Kube mode](#kube-mode-kube_targets). |
