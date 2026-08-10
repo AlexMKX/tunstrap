@@ -241,7 +241,7 @@ def test_tunnel_carries_real_kube_api_traffic(kube_rig: dict[str, Any], tmp_path
     the feature under test rather than to the rig.
 
     Assertion audit - every assertion here is behavioural, and each has a
-    distinct symptom (measured; see docs/artifacts/2026-08-01-e2e-tier-baseline.md):
+    distinct symptom (demonstrated by the assertions below):
     - `started.returncode == 0`: fires if the forwarding drop-in is missing or
       the service is off kind's network, because the SAN probe itself traverses
       the forward during `start` and is refused `administratively prohibited`.

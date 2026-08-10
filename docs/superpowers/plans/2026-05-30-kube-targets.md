@@ -1,5 +1,8 @@
 # Kube-targets Implementation Plan
 
+> **Redaction/repoint note (2026-08-10):** Replaced ignored scratch-file paths
+> with an accurate description of their untracked location; no plan step changed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a self-contained "kube mode" to `tunstrap` so it reads a remote kubeconfig, forwards the apiserver port, probes the serving-cert SAN for `tls-server-name`, patches `server:`, and returns ready-to-use kubeconfig fields — eliminating the HCL-side reconstruction.
@@ -43,7 +46,7 @@
 ### Task 0.1: Record baseline test counts
 
 **Files:**
-- Create: `docs/artifacts/2026-05-30-kube-targets-baseline.md`
+- Record the baseline in the untracked artifacts directory.
 
 - [ ] **Step 1: Run the unit suite and capture counts**
 
@@ -62,7 +65,7 @@ Expected: all clean on the untouched baseline.
 
 - [ ] **Step 3: Write the baseline artifact**
 
-Create `docs/artifacts/2026-05-30-kube-targets-baseline.md` with the recorded unit count, gate statuses, and the date. (This file is gitignored by design — do not attempt to commit it.)
+Record the unit count, gate statuses, and date in the gitignored artifacts directory; do not attempt to commit that scratch file.
 
 - [ ] **Step 4: No commit**
 
@@ -2678,7 +2681,7 @@ git commit -m "docs: README kube mode, materialization, host-key, migration"
 ### Task 9.1: Full verification sweep
 
 **Files:**
-- Create/Update: `docs/artifacts/2026-05-30-kube-targets-baseline.md` (final counts)
+- Create/update the untracked baseline record with final counts.
 
 - [ ] **Step 1: Run the entire test + gate matrix**
 

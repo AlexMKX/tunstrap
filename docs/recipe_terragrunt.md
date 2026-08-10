@@ -127,7 +127,7 @@ parse time and there is one less moving part. Find the path once with
 # terragrunt.hcl and drop the include.
 #
 # Default: the absolute path of the installed tunstrap_tofu entry point.
-terraform_binary = "/home/you/.local/bin/tunstrap_tofu"
+terraform_binary = "$HOME/.local/bin/tunstrap_tofu"
 ```
 
 #### Localizing the bootstrap with `run_cmd` (optional)
@@ -479,7 +479,8 @@ proxy (see "How the proxy works," above, for why).
      failure mode, name it as such.
    - **#3** — per-alias `config_context` works with an env-supplied
      kubeconfig path (Mode A's own basis, shown in item 1's example).
-   - **#4** — plan-safe end to end, measured live: plan with one set of
+   - **#4** — plan-safe end to end, measured live in the unpublished #15 spike:
+     plan with one set of
      ports, mutate only the kubeconfig, apply the *saved* plan → the alias
      uses the mutated value, zero "Mismatch between input and plan variable
      value" — the e2e-level confirmation that Mode A's env-native path
@@ -493,7 +494,7 @@ proxy (see "How the proxy works," above, for why).
    - A live value bound to a **resource attribute** (not a provider config
      block) produces `Error: Provider produced inconsistent final plan` —
      confirmed for `hashicorp/kubernetes` v2.38.0
-     (`docs/artifacts/2026-08-07-issue15-provider-env-findings.md`, Q3).
+      (`docs/specs/2026-08-10-issue15-provider-env-precedence.md`, Q3).
      Provider-block placement, as shown in item 1's example, is the only
      supported shape in both Mode A and Mode B.
 

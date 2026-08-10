@@ -395,7 +395,7 @@ def test_tunnelled_drops_an_inherited_kubeconfig_in_the_multi_node_case(
     observed through the real ``tunstrap_tofu`` entry point end to end.
     """
     # Inherited operator KUBECONFIG present.
-    monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config-some-other-cluster")
+    monkeypatch.setenv("KUBECONFIG", "/tmp/operator/.kube/config-some-other-cluster")
     monkeypatch.setenv(VAR, _payload({"a": _node(), "b": _node()}))
     spawn[0](_success({"a": _conn(db=5432), "b": _conn(db=5433)}, session_dir=str(tmp_path)))
     with pytest.raises(SystemExit) as excinfo:

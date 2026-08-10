@@ -301,9 +301,9 @@ def test_inherited_kube_env_never_survives_even_without_kube_targets(
     replacement that would otherwise overwrite it."""
     from tunstrap.cli import _build_child_env
 
-    monkeypatch.setenv("KUBECONFIG", "/home/operator/.kube/config")
-    monkeypatch.setenv("KUBE_CONFIG_PATH", "/home/operator/.kube/config")
-    monkeypatch.setenv("KUBE_CONFIG_PATHS", "/home/operator/.kube/config:/other")
+    monkeypatch.setenv("KUBECONFIG", "/tmp/operator/.kube/config")
+    monkeypatch.setenv("KUBE_CONFIG_PATH", "/tmp/operator/.kube/config")
+    monkeypatch.setenv("KUBE_CONFIG_PATHS", "/tmp/operator/.kube/config:/other")
     out = OutputSchema.model_validate(
         {
             "connections": {"h": {"ports": {}, "kube_targets": {}}},

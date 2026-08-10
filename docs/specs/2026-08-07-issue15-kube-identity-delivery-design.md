@@ -1,5 +1,10 @@
 # Kubeconfig-as-identity delivery: deterministic contexts + multi-node kube channel
 
+> **Redaction/repoint note (2026-08-10):** Repointed provider evidence to its
+> committed spec, replaced a local worktree path with a placeholder, and marked
+> finding #4 as an unpublished-spike measurement because no automated test
+> covers its saved-plan mutation scenario.
+
 - Status: design, awaiting review
 - Date: 2026-08-07 (revised same day, iteration 3: the unified-output-contract
   pivot, marked **[PIVOT]** at each affected section below)
@@ -18,17 +23,16 @@
   (PR #13).
 - Measurement basis: the ticket's own six OpenTofu v1.12.5 findings (2026-08-06/
   07, **not re-derived here**); the provider-behaviour verification in
-  `docs/artifacts/2026-08-07-issue15-provider-env-findings.md` (OpenTofu
-  v1.12.5, `hashicorp/kubernetes` v2.38.0, `hashicorp/helm` v2.17.0, live-probed
-  against a real `kind` cluster, 2026-08-07); and the implementation spike in
-  `docs/artifacts/2026-08-07-issue15-spike-findings.md` (six prototype variants,
-  each run against the full `tests/unit` suite, 2026-08-07). All three are
-  cited by section below rather than repeated in full.
+  `docs/specs/2026-08-10-issue15-provider-env-precedence.md` (OpenTofu v1.12.5,
+  `hashicorp/kubernetes` v2.38.0, `hashicorp/helm` v2.17.0, live-probed against
+  a real `kind` cluster, 2026-08-07); and untracked implementation-spike notes
+  (six prototype variants, each run against the full `tests/unit` suite,
+  2026-08-07). The provider result is repeated in the committed spec.
 - Code citations (`kube.py:NNN`, `envrender.py:NNN`, `cli.py:NNN`) are against
   `e5ed15d`, the tip of `feature/run-env-io` at the time of writing (== the
   spike's `spike/issue15-variants` base commit).
 - Reference implementation: `variant/combined` in the scratch worktree
-  `/home/alex/Projects/garuda/worktrees/tunstrap-issue15-spike` — reviewed,
+   `<spike-worktree>` — reviewed,
   475/475 pre-existing unit tests pass plus one new regression test (476/476).
   **Cherry-pick precisely, not wholesale — corrected iteration 6.** The spike
   is safe to cherry-pick for exactly two things: `rename_identities` (V1c)
@@ -912,7 +916,7 @@ directly.
 
 ## Env-export contract (superset rejected; conditional adopted) [kube part, unchanged by the pivot — U4]
 
-`docs/artifacts/2026-08-07-issue15-provider-env-findings.md` (live-probed,
+`docs/specs/2026-08-10-issue15-provider-env-precedence.md` (live-probed,
 source-cited against `hashicorp/kubernetes` v2.38.0 and `hashicorp/helm`
 v2.17.0) settles the question the ticket's work item 3 left open:
 
@@ -1182,8 +1186,7 @@ proves nothing here**: kind's context is `kind-<cluster-name>`, already
 unique, so a kind-only regression test would pass unchanged even with the
 rename entirely absent. The mandatory regression test therefore uses two fake
 upstream kubeconfigs whose context/cluster/user names are **identical**
-(k3s-style), not kind-style — see the spike's prototype, reproduced verbatim
-in `docs/artifacts/2026-08-07-issue15-spike-findings.md`, "Part 3", and
+(k3s-style), not kind-style — see the untracked spike prototype and
 `variant/combined`'s `tests/unit/test_issue15_context_collision.py`. It drives
 `run_kube_targets` twice (two different `node_name`s, same k3s-style fixture
 content) and asserts:
@@ -1459,7 +1462,9 @@ only four]:**
   env-supplied kubeconfig path: two aliases, literal `config_context` each,
   sharing one `KUBECONFIG`/`KUBE_CONFIG_PATHS` list, each reach their own
   cluster — Mode A's basis, cited with the two-alias worked example above.
-- **#4** — **[was missing]** plan-safe end to end, measured live: plan with
+- **#4** — **[was missing]** plan-safe end to end, measured live in the
+  unpublished #15 spike (no automated test covers this saved-plan mutation
+  scenario): plan with
   one set of ports, mutate only the kubeconfig, apply the *saved* plan → the
   alias uses the mutated value, zero "Mismatch between input and plan
   variable value" — this is the e2e-level confirmation that Mode A's
@@ -1516,12 +1521,10 @@ only four]:**
 
 ## Pointers
 
-- `docs/artifacts/2026-08-07-issue15-provider-env-findings.md` — full
-  provider-precedence evidence (source citations + live transcripts) behind
-  the env-export contract above.
-- `docs/artifacts/2026-08-07-issue15-spike-findings.md` — full recon (file:line
-  behavior map), the six-variant comparison with real pytest runs, and the
-  regression-test prototype reproduced in "Testing contract" above.
+- `docs/specs/2026-08-10-issue15-provider-env-precedence.md` — committed
+  provider-precedence evidence behind the env-export contract above.
+- The untracked issue #15 spike notes contained the six-variant comparison and
+  regression-test prototype; they are not public reference material.
 - `docs/specs/2026-08-07-issue15-kube-identity-decisions.md` — the
   decision-history companion to this design, one entry per decision with
   alternatives considered and consequences.

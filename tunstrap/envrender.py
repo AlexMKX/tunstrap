@@ -51,8 +51,8 @@ def _kube_channel_keys(count: int) -> set[str]:
     Precondition: ``count >= 1``. Exactly 1: KUBECONFIG + KUBE_CONFIG_PATH. >=2:
     KUBECONFIG + KUBE_CONFIG_PATHS. KUBE_CONFIG_PATH and KUBE_CONFIG_PATHS are
     never both present -- KUBE_CONFIG_PATH wins over KUBE_CONFIG_PATHS per the
-    measured OpenTofu kubernetes/helm provider precedence (docs/artifacts/
-    2026-08-07-issue15-provider-env-findings.md), so exporting both once a
+    measured OpenTofu kubernetes/helm provider precedence (docs/specs/
+    2026-08-10-issue15-provider-env-precedence.md), so exporting both once a
     second file exists would silently hide every cluster but the first. The
     union of every branch is ``KUBE_ENV_NAMES``; this function picks the
     cardinality-correct subset to *set*, while the scrub reserves them all.

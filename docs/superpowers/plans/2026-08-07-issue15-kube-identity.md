@@ -1,5 +1,8 @@
 # Kubeconfig-as-identity delivery (issue #15) Implementation Plan
 
+> **Redaction/repoint note (2026-08-10):** Repointed provider evidence to its
+> committed spec and replaced local/ignored references with accurate placeholders.
+
 > **Status: historical record, NOT the executable plan.** This file carries the
 > full 8-iteration decision history inline. Implementers execute
 > `docs/superpowers/plans/2026-08-08-issue15-kube-identity-clean.md`
@@ -69,7 +72,7 @@ resulting recipe (kube-only guidance unchanged, unified-output guidance new).
 **Decision history:** `docs/specs/2026-08-07-issue15-kube-identity-decisions.md`
 (entries 10-13 are the pivot; entry 9 is marked superseded, not deleted).
 **Reference implementation:** `variant/combined` in the scratch worktree
-`/home/alex/Projects/garuda/worktrees/tunstrap-issue15-spike` — reviewed,
+`<spike-worktree>` — reviewed,
 475/475 pre-existing unit tests pass plus one new regression test (476/476).
 **Cherry-pick the `kube.py` rename change from it as-is; the `envrender.py`
 change needs its body replaced** — the spike's Axis 3 prototype (superset
@@ -79,7 +82,7 @@ spike predates the pivot and covers the kube part only (Tasks 1-3 below);
 nothing in it prototypes the unified output contract, materialization, or the
 scalar-channel removal (Tasks 5-6) — those are new code with no spike
 reference to cherry-pick from. Do not re-derive the six OpenTofu findings or
-the provider-precedence findings; both are already in `docs/artifacts/`.
+the provider-precedence findings; the latter is now committed in the provider-precedence spec.
 
 **Target branch:** `feature/run-env-io` (PR #13). Every task below assumes a
 checkout of that branch (not the spike worktree) as the working tree; the
@@ -503,7 +506,7 @@ land, unmodified in substance, regardless of how Task 1 was implemented.
 - [ ] **Step 1: Copy the spike's prototype under a repo-convention file name**
 
 Copy `tests/unit/test_issue15_context_collision.py` from the spike worktree
-(`/home/alex/Projects/garuda/worktrees/tunstrap-issue15-spike`, branch
+(` <spike-worktree>`, branch
 `variant/combined`) to `tests/unit/test_kube_identity_collision.py` in this
 checkout — **only the file is renamed** (this repo's other test files never
 carry an issue number, e.g. `test_kube_run.py`, `test_envrender.py`). **Keep
@@ -511,8 +514,7 @@ the test function name unchanged**,
 `test_two_k3s_style_targets_get_distinct_deterministic_identities` — it is
 already descriptive and needs no rename. Drop the module docstring's "spike"
 framing, replacing it with a plain description (content is otherwise correct
-verbatim; see `docs/artifacts/2026-08-07-issue15-spike-findings.md`, "Part 3",
-for the exact source, reproduced there in full).
+verbatim; see the untracked spike's Part 3 for the exact source).
 
 - [ ] **Step 2: Run to verify it is GREEN after Task 1**
 
@@ -683,8 +685,8 @@ def _kube_channel_keys(count: int) -> set[str]:
     0 files: nothing. Exactly 1: KUBECONFIG + KUBE_CONFIG_PATH. >=2:
     KUBECONFIG + KUBE_CONFIG_PATHS. KUBE_CONFIG_PATH and KUBE_CONFIG_PATHS are
     never both present -- KUBE_CONFIG_PATH wins over KUBE_CONFIG_PATHS per the
-    measured OpenTofu kubernetes/helm provider precedence (docs/artifacts/
-    2026-08-07-issue15-provider-env-findings.md), so exporting both once a
+    measured OpenTofu kubernetes/helm provider precedence (docs/specs/
+    2026-08-10-issue15-provider-env-precedence.md), so exporting both once a
     second file exists would silently hide every cluster but the first.
     """
     if count == 0:
@@ -1287,10 +1289,10 @@ nothing to change).
 | `docs/recipe_terragrunt.md:361-364` | "`tunstrap start` is not affected: it writes the complete envelope to stdout... without `--materialize` its `content_b64` is the only way to obtain the kubeconfig at all." | **Verify only, no rewrite.** Matches the existing, unchanged scope carve-out (design doc, "Compatibility") — `start`'s raw default JSON stdout is untouched by R16, for kube and (per "Fetched-file materialization," design doc) for `fetch_files` alike. Confirmed accurate. |
 | `docs/recipe_terragrunt.md:366-388` (whole subsection, "### Fetched files are exported verbatim, not projected") | Argues the **opposite** of R16: "Every `fetch_files` entry keeps its `content_b64` whole"; "`FetchedFile` has no `path` (`schemas.py:292`), so dropping `content_b64` would be a silent, unrecoverable breakage"; "tunstrap fetches into the envelope (`content_b64`), not onto disk"; the materialize-then-drop end-state "is recorded in the spec's Out of scope" (false — the issue15 design's "Out of scope" does not list it; this premise is now simply wrong, not aspirational) | **REWRITE — the whole subsection.** See Task 6's new step, below, for the replacement text. This is the finding the narrowed grep missed. |
 | `tests/e2e/module/main.tf:13` | Comment: "the kube target's `client_key_data`, `client_certificate_data` and `content_b64` are dropped" | **Unaffected by R16** (kube-only, unrelated field) — already inside the region Task 6 Step 0's existing shape-migration row for this file covers for the unrelated `connections.*`→`nodes.*` rename; no R16-specific change. |
-| `docs/artifacts/charharness_start.py:33,42` | Fetch/kube fixtures using `content_b64` | **Out of scope, stated explicitly.** The file's own docstring: "Not part of the test suite; lives in the gitignored artifacts dir." A local characterization harness, not shipped code, a test, or consumer documentation. |
+| Untracked characterization harness | Fetch/kube fixtures using `content_b64` | **Out of scope, stated explicitly.** It is not part of the test suite, shipped code, or consumer documentation. |
 | `docs/specs/2026-05-20-feature-fetch-files-design.md`, `docs/specs/2026-07-31-run-env-io-and-tofu-proxy-design.md`, `docs/specs/2026-08-03-run-env-io-decision-history.md`, `docs/specs/2026-05-30-kube-targets-design.md`, `docs/superpowers/plans/2026-06-25-cli-run-modes.md`, `docs/superpowers/plans/2026-05-30-kube-targets.md` | Pre-#15 design/decision/plan documents for already-shipped tickets (#14 and earlier), predating this ticket by weeks | **Out of scope, historical record — cited, never edited**, matching this plan's own established treatment of the pre-#15 decision history everywhere else in this document (e.g. "the pre-#15 decision history's `fetch_files[*].content_b64` entry," cited by name, never rewritten). Editing a completed ticket's own historical spec to match a later ticket's decision would falsify the historical record of what that ticket actually shipped. |
-| `docs/artifacts/superseded/2026-07-30-owner-tracking-and-consumer-ergonomics-design.md` | — | **Out of scope** — already in a `superseded/` directory; self-evidently not live. |
-| `docs/artifacts/2026-08-07-issue15-spike-findings.md:109,152,318,319` | Kube-only `content_b64` hits (patched-kubeconfig content in the collision-test prototype) | **Unaffected by R16** (kube, not `fetch_files`) **and** a frozen historical spike snapshot — the plan already states elsewhere that the spike predates the unified-output pivot and "nothing in it prototypes... these are new tests, not spike cherry-picks"; same treatment extends to R16. |
+| Untracked superseded owner-tracking design | — | **Out of scope** — historical scratch material, not live. |
+| Untracked issue #15 spike notes | Kube-only `content_b64` hits (patched-kubeconfig content in the collision-test prototype) | **Unaffected by R16** (kube, not `fetch_files`) and a frozen historical spike snapshot. |
 | `test_output_schema.py:25,32,46,63` | `FetchedFile(content_b64=...)` construction, xor-validation tests | **Unaffected** — these test `FetchedFile`'s own model validation (`content_b64`/`error` xor), which is unchanged; only a new optional `path` field is added, not a change to this xor. Add one new case: `path` defaults to `None`, is not part of the xor, and can be set independently after construction (mirrors `KubeTargetOutput.path`'s own test coverage, if any — check for a precedent test to mirror rather than inventing a new assertion style). |
 
 **Schema note:** `FetchedFile`'s xor validator (`schemas.py:303-314`) does not
@@ -2219,7 +2221,7 @@ doc's "Documentation" section, Mode A:
      below, rests on this).
    - A live value bound to a **resource attribute** (not a provider config
      block) produces `Error: Provider produced inconsistent final plan` —
-     cite `docs/artifacts/2026-08-07-issue15-provider-env-findings.md`'s Q3
+     cite the committed provider-precedence spec's Q3
      result, and show the provider-block placement as the only supported
      shape in both Mode A and Mode B.
 4. A one-line pointer to the deterministic naming scheme
@@ -2302,8 +2304,8 @@ file's current shape before writing, do not introduce a new prose style.
 
 - [ ] **Step 3: Cross-check against the two artifacts, the design doc, and the drift guard**
 
-Confirm every measured fact restated in both new sections matches
-`docs/artifacts/2026-08-07-issue15-provider-env-findings.md`, the ticket's
+Confirm every measured fact restated in both new sections matches the committed
+provider-precedence spec, the ticket's
 own six findings, and the design doc's "Stability contract" subsection
 verbatim — no rewording that could drift from the source transcripts or
 introduce a second, subtly different phrasing of the same rule. This is a

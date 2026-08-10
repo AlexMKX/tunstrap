@@ -1,12 +1,15 @@
 # `run` env I/O + the tofu proxy pattern
 
+> **Redaction/repoint note (2026-08-10):** Replaced an ignored local-artifact
+> path with its accurate unpublished description; no design claim changed.
+
 - Status: design, awaiting review
 - Date: 2026-07-31
 - Scope: three generic CLI additions (`--input-env`, `--output-var`, a
   single-variadic `run` argument surface), the stdout and cleanup invariants a
   foreground wrapper needs, a consumer-side `tofu` shim recipe, and a new `e2e`
   test tier proving real Kubernetes/Helm providers through a tunnel. Supersedes
-  `docs/artifacts/superseded/2026-07-30-owner-tracking-and-consumer-ergonomics-design.md`.
+  an untracked superseded owner-tracking design.
 - Measurement basis: Terragrunt **v1.1.1** + OpenTofu **v1.12.5**, and **Click
   8.4.2** (the version `click>=8.3,<9` in `pyproject.toml:12` resolves to today)
   for the argument-parsing findings, and **kind 0.30.0 / `kindest/node` v1.34.0 /

@@ -1,15 +1,18 @@
 # Decision history: kubeconfig-as-identity delivery (issue #15)
 
+> **Redaction/repoint note (2026-08-10):** Repointed provider evidence to its
+> committed spec and described the spike notes as unpublished.
+
 - Date: 2026-08-07 (revised same day, iteration 3: entries 10-13 record the
   unified-output-contract pivot; entry 9 is marked superseded rather than
   rewritten — an ADR is a history, decisions get superseded in place, not
   erased)
 - Companion design doc (kept as-is, not superseded):
   `docs/specs/2026-08-07-issue15-kube-identity-delivery-design.md`.
-- Companion evidence, not repeated here: `docs/artifacts/2026-08-07-issue15-
-  spike-findings.md` (implementation spike, six prototype variants against the
-  full unit suite) and `docs/artifacts/2026-08-07-issue15-provider-env-
-  findings.md` (live-probed OpenTofu provider precedence).
+- Companion evidence, not repeated here: untracked implementation-spike notes
+  (six prototype variants against the full unit suite) and
+  `docs/specs/2026-08-10-issue15-provider-env-precedence.md` (live-probed
+  OpenTofu provider precedence).
 - Ticket: [AlexMKX/tunstrap#15](https://github.com/AlexMKX/tunstrap/issues/15),
   a handoff superseding most of #14.
 
@@ -117,7 +120,7 @@ being verified by another agent in parallel").
   `predicted_env_keys` isn't updated in the same commit (confirmed by
   deliberately reverting only that half and re-running; 1 failure, clear diff,
   0 once both changed together). **Rejected once the provider findings landed
-  post-spike**: `docs/artifacts/2026-08-07-issue15-provider-env-findings.md`
+   post-spike**: `docs/specs/2026-08-10-issue15-provider-env-precedence.md`
   shows `KUBE_CONFIG_PATH` wins over `KUBE_CONFIG_PATHS` when both are set,
   live-confirmed for both `hashicorp/kubernetes` v2.38.0 and
   `hashicorp/helm` v2.17.0. Exporting both unconditionally the instant a
