@@ -600,7 +600,8 @@ def test_create_fresh_root_under_zero_umask_does_not_self_reject(
     write bits regardless of the inherited umask. The fix's own constraint: a
     freshly created root must not be able to fail its own validation.
     """
-    fresh = tmp_path / "fresh-root"
+    fresh_parent = tmp_path / "fresh-parent"
+    fresh = fresh_parent / "fresh-root"
     assert not fresh.exists()
     old_umask = os.umask(0)
     try:
@@ -610,6 +611,8 @@ def test_create_fresh_root_under_zero_umask_does_not_self_reject(
     assert fresh.exists()
     mode = stat.S_IMODE(fresh.stat().st_mode)
     assert mode & (stat.S_IWGRP | stat.S_IWOTH) == 0, oct(mode)
+    parent_mode = stat.S_IMODE(fresh_parent.stat().st_mode)
+    assert parent_mode & (stat.S_IWGRP | stat.S_IWOTH) == 0, oct(parent_mode)
 
 
 def test_create_refuses_symlink_lock_and_preserves_victim(tmp_path: Path) -> None:

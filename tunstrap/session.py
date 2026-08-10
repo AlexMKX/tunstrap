@@ -137,9 +137,18 @@ class SessionDir:
             if not supplied_path.is_absolute():
                 raise SessionError("session dir must be an absolute path")
             root = supplied_path.resolve()
-            # Explicit 0o700 so a freshly minted root can never carry group/other
-            # write bits under a permissive umask and then fail its own check.
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # mkdir(parents=True, mode=...) applies mode to its leaf only; missing
+            # ancestors instead get 0o777 & ~umask. A group-writable ancestor lets
+            # another uid rename or replace root and defeats
+            # _secure_supplied_root's entry-level premise, so mint every missing
+            # component at 0700.
+            missing: list[Path] = []
+            ancestor = root
+            while not ancestor.exists():
+                missing.append(ancestor)
+                ancestor = ancestor.parent
+            for directory in reversed(missing):
+                directory.mkdir(mode=0o700, exist_ok=True)
             cls._secure_supplied_root(root)
             generated = False
 
@@ -222,11 +231,11 @@ class SessionDir:
         a supplied root is the same posture applied where the runner cannot pick
         the initial mode.
 
-        Why only the write bits (``S_IWGRP | S_IWOTH``) are cleared, and why the
-        parent is never inspected: clearing preserves read/exec, so a legitimate
-        0755 root is left at 0755 rather than force-chmodded to 0700. The parent
-        is out of scope -- a root under a 1777 ``/tmp`` with its own mode is
-        safe, and inspecting the parent would break ``mkdtemp``-based tests and
+        Why only the write bits (``S_IWGRP | S_IWOTH``) are cleared, and why
+        *pre-existing* parents are never inspected: clearing preserves read/exec,
+        so a legitimate 0755 root is left at 0755 rather than force-chmodded to
+        0700. A root under a 1777 ``/tmp`` with its own mode is safe, and
+        inspecting pre-existing parents would break ``mkdtemp``-based tests and
         reach outside what the runner owns.
 
         fd-based and TOCTOU-free: the mode is read and set through one fd held
