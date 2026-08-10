@@ -1,10 +1,14 @@
 """Kube mode: parse a remote kubeconfig, choose a TLS server name, patch it.
 
 One kube_target maps to exactly one cluster: the kubeconfig's
-current-context. Other contexts/clusters are ignored and left byte-stable
-in the patched output. The fetched kubeconfig is untrusted input: it is
-parsed in ruamel round-trip/safe mode and parse failures become a typed
-KubeParseError (never a daemon crash).
+current-context. Other contexts are not selected, but their ``cluster``/
+``user`` references are rewritten when they point at the renamed entries, so
+a document in which several contexts share one cluster or user stays
+internally consistent after the rename; everything else in the file is left
+untouched. The fetched kubeconfig is untrusted input: it is parsed in ruamel
+round-trip mode, parse failures become a typed ``KubeParseError``, and a
+generated ``tunstrap-<node>-<target>`` identity that already exists in the
+file is rejected (not uniquified) for the same reason -- never a daemon crash.
 """
 
 from __future__ import annotations
@@ -275,8 +279,22 @@ def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
     """Rename the current-context's cluster/user/context to a deterministic name.
 
     ``tunstrap-<node>-<target>`` is used for cluster, user, and context alike.
-    Other contexts keep their own names, but references to the renamed cluster
-    or user are updated so shared entries remain valid.
+    Other contexts keep their own names, but their ``cluster``/``user``
+    references are rewritten when they point at the renamed entries, so a
+    document in which several contexts share one cluster or user stays
+    internally consistent after the rename (the non-selected contexts are NOT
+    left byte-stable -- only their own ``name`` is preserved).
+
+    The fetched kubeconfig is untrusted input. If it already contains the
+    generated name in any of ``clusters``/``users``/``contexts``, this raises
+    ``KubeParseError`` rather than silently producing a duplicate or
+    uniquifying the name. A collision means the upstream file is using
+    tunstrap's reserved ``tunstrap-<node>-<target>`` namespace -- a
+    misconfiguration or a shadowing attempt -- and renaming around it would
+    hide that. Uniquifying (``-2`` suffixes) is rejected on purpose: the
+    deterministic name is a consumer-facing literal (see
+    ``docs/recipe_terragrunt.md``) and must not become non-deterministic. The
+    check runs before any mutation, so a rejection leaves ``doc`` unchanged.
     """
     new_name = f"tunstrap-{node}-{target}"
     current = doc.get("current-context")
@@ -291,6 +309,22 @@ def rename_identities(doc: dict[str, object], node: str, target: str) -> str:
     old_user = ctx_body["user"]
     assert isinstance(old_cluster, str)
     assert isinstance(old_user, str)
+
+    # Reserved-namespace guard. Runs before any mutation so a rejection leaves
+    # the document untouched. ``_find_named`` returns first-match, which is
+    # exactly the existence probe needed here: ANY entry (the current triple's
+    # own included) bearing the generated name means the untrusted upstream is
+    # already in tunstrap's namespace and must be rejected, not worked around.
+    if (
+        _find_named(doc.get("contexts") or [], new_name) is not None
+        or _find_named(doc.get("clusters") or [], new_name) is not None
+        or _find_named(doc.get("users") or [], new_name) is not None
+    ):
+        raise KubeParseError(
+            f"identity name {new_name!r} already exists in the fetched kubeconfig; "
+            "the upstream file must not use tunstrap's reserved "
+            "'tunstrap-<node>-<target>' namespace"
+        )
 
     ctx_entry["name"] = new_name
     ctx_body["cluster"] = new_name
@@ -377,15 +411,6 @@ async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-ta
                 required_failures.append(name)
             continue
 
-        for ignored in view.ignored_contexts:
-            warnings.append(
-                TunnelWarning(
-                    node=node_name,
-                    error=f"kube_target {name}: ignored context {ignored!r}",
-                    skipped=False,
-                )
-            )
-
         try:
             host, port = _split_host_port(view.server)
         except KubeParseError as exc:
@@ -415,10 +440,36 @@ async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-ta
             await listener.wait_closed()
             continue
 
-        patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
-        assert isinstance(view.doc, dict)
-        new_identity = rename_identities(view.doc, node_name, name)
-        patched = dump_kubeconfig(view)
+        try:
+            patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
+            assert isinstance(view.doc, dict)
+            new_identity = rename_identities(view.doc, node_name, name)
+            patched = dump_kubeconfig(view)
+        except KubeParseError as exc:
+            warnings.append(TunnelWarning(node=node_name, error=f"kube_target {name}: {exc}"))
+            if target.required:
+                required_failures.append(name)
+            listener.close()
+            await listener.wait_closed()
+            continue
+        # Disclosure runs only on the success path: by here ``rename_identities``
+        # has actually rewritten the current-context's cluster/user, so a
+        # non-selected context sharing that cluster/user really did have its
+        # references rewritten. Emitting this earlier (before ``_split_host_port``
+        # / TLS resolution / ``rename_identities``) would assert a rewrite that a
+        # later failure never performed -- issue #20 defect 1.
+        for ignored in view.ignored_contexts:
+            warnings.append(
+                TunnelWarning(
+                    node=node_name,
+                    error=(
+                        f"kube_target {name}: non-selected context {ignored!r}"
+                        " (cluster/user references rewritten when they point at"
+                        " the renamed entries)"
+                    ),
+                    skipped=False,
+                )
+            )
         outputs[name] = KubeTargetOutput(
             cluster_name=new_identity,
             context_name=new_identity,

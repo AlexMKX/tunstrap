@@ -401,12 +401,23 @@ each entry the tool:
 5. Probes the apiserver's TLS certificate SAN to choose a `tls-server-name`.
 6. Rewrites `server:` to `https://127.0.0.1:<local_port>` and injects
    `tls-server-name`. Other clusters in the file are byte-stable.
-7. Returns the patched kubeconfig plus already-extracted fields
+7. Renames the `current-context`'s context, cluster, and user to the
+   deterministic `tunstrap-<node>-<target>` -- the consumer-facing literal
+   documented in `docs/recipe_terragrunt.md`. Non-selected contexts keep
+   their own names; their `cluster`/`user` references are rewritten when they
+   point at the renamed cluster/user. A fetched kubeconfig that already
+   contains `tunstrap-<node>-<target>` in any `clusters`, `users`, or
+   `contexts` entry is rejected: the target fails (subject to `required`)
+   rather than the name being uniquified, because the deterministic name is a
+   contract consumers rely on.
+8. Returns the patched kubeconfig plus already-extracted fields
    (`endpoint`, `certificate_authority_data`, `client_certificate_data`,
    `client_key_data`, `tls_server_name`).
 
-**One cluster per target.** The tool takes the `current-context` and ignores
-all other contexts/clusters in the file. To access two clusters, use two
+**One cluster per target.** Only the `current-context` triple (its context,
+cluster, and user) is selected and renamed; other contexts keep their own
+names, but their `cluster`/`user` references are rewritten when they point at
+the renamed cluster/user. To access two clusters, use two
 `kube_targets` entries. If the kubeconfig contains more than one context, a
 `warnings[]` entry names the ignored contexts.
 

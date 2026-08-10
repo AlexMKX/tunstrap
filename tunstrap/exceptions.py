@@ -70,7 +70,13 @@ class DaemonHandshakeError(DaemonError):
 
 
 class KubeParseError(TunstrapError):
-    """A kubeconfig could not be parsed or lacked a usable current-context."""
+    """A fetched kubeconfig could not be used as-is.
+
+    Raised when a kubeconfig could not be parsed, lacked a usable
+    current-context, or already contained tunstrap's reserved
+    ``tunstrap-<node>-<target>`` name in its ``clusters``/``users``/``contexts``
+    (a reserved-namespace collision that is rejected, not uniquified).
+    """
 
 
 class SessionActive(TunstrapError):
