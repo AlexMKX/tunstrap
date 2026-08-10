@@ -1,6 +1,10 @@
 """Command-line interface. Subcommands are added in later tasks."""
 
-# pylint: disable=too-many-lines  # command registrations intentionally remain together
+# pylint: disable=too-many-lines  # DEBT, not a design decision. 1077 lines vs the 1000-line
+# cap committed to in the #15 cycle; the suppression was added undisclosed in
+# 2a88d02 (#18). Nothing forces one module -- Click commands register on `main` from any
+# module (cf. cli_input.py / envrender.py). Split command bodies out and delete this
+# line. Do not grow this file further.
 
 from __future__ import annotations
 
@@ -238,6 +242,67 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
         sys.exit(code)
 
 
+def _start_recovery_handles(message: object) -> tuple[str, int] | None:
+    """Return usable handles from a success envelope that failed after spawning.
+
+    These fields are read without validating the whole payload because payload
+    validation is itself one of the post-spawn operations that can fail.  A
+    non-string path or non-positive/bool pid is not safe to print as a recovery
+    handle, so a malformed envelope retains the generic error contract.
+    """
+    if not isinstance(message, dict) or message.get("kind") != "success":
+        return None
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    session_dir = payload.get("session_dir")
+    pid = payload.get("pid")
+    if (
+        not isinstance(session_dir, str)
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+    ):
+        return None
+    return session_dir, pid
+
+
+def _report_start_post_spawn_failure(
+    exc: BaseException, message: object, supplied_session_dir: str | None
+) -> None:
+    """Report an output failure without discarding a live daemon's handles.
+
+    ``start`` is detached and does not own teardown. For a success envelope,
+    the worker has already reported the authoritative root, so pre-minting adds
+    nothing here; it would only help on the handshake-failure path, which this
+    change does not address.
+    """
+    details: dict[str, object] = {"type": type(exc).__name__}
+    handles = _start_recovery_handles(message)
+    if handles is not None:
+        session_dir, pid = handles
+        details["session_dir"] = session_dir
+        details["pid"] = pid
+        _warn_preserved(
+            session_dir,
+            f"output failed after daemon start: {type(exc).__name__}: {exc}",
+            None,
+            verb="start",
+        )
+    elif supplied_session_dir is not None:
+        details["session_dir"] = supplied_session_dir
+        _warn_preserved(
+            supplied_session_dir,
+            f"output failed after daemon start: {type(exc).__name__}: {exc}",
+            None,
+            verb="start",
+        )
+    sys.stdout.write(
+        json.dumps(DaemonError("unexpected failure during start", details).to_error_output()) + "\n"
+    )
+    sys.stdout.flush()
+
+
 @main.command("start")
 @click.argument("connection", required=False)
 @click.argument("extra", nargs=-1, type=click.UNPROCESSED)
@@ -250,7 +315,7 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     show_default=True,
 )
 @click.option("--session-dir", "session_dir", default=None)
-def start_command(
+def start_command(  # pylint: disable=too-many-locals
     connection: str | None,
     extra: tuple[str, ...],
     ssh_key: str | None,
@@ -282,7 +347,12 @@ def start_command(
             log_file=log_file,
             output_fmt=output_fmt,
         )
-        _emit_start_result(spawn_daemon(schema, session_dir=session_dir), output_fmt)
+        message = spawn_daemon(schema, session_dir=session_dir)
+        try:
+            _emit_start_result(message, output_fmt)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            _report_start_post_spawn_failure(exc, message, session_dir)
+            sys.exit(4)
     except click.UsageError:
         raise
     except TunstrapError as exc:
@@ -830,7 +900,9 @@ def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | No
         _warn_preserved(session_dir, f"teardown failed: {type(exc).__name__}: {exc}", minted_root)
 
 
-def _warn_preserved(session_dir: str, cause: str, minted_root: str | None) -> None:
+def _warn_preserved(
+    session_dir: str, cause: str, minted_root: str | None, *, verb: str = "run"
+) -> None:
     """Report an unresolved teardown and the command that finishes it by hand.
 
     One wording for both ways teardown can end without a confirmed stop — a
@@ -847,14 +919,14 @@ def _warn_preserved(session_dir: str, cause: str, minted_root: str | None) -> No
 
     ``stop`` removes ``tunnel-data`` but never its own ``--session-dir``
     argument, which is normally the operator's own directory; it cannot tell a
-    run-minted temp root from one somebody cares about. ``run`` can — it minted
-    it — so the disposal note is emitted here, and only for a minted root.
+    caller-minted temp root from one somebody cares about.  The caller that
+    minted a root supplies it here, so the disposal note is emitted only then.
     """
-    recovery = f"run: {cause}; preserving session data. Recover with: "
+    recovery = f"{verb}: {cause}; preserving session data. Recover with: "
     recovery += f"tunstrap stop --session-dir {session_dir}\n"
     if minted_root is not None:
         recovery += (
-            f"run: {minted_root} was created by run and is not removed by that "
+            f"{verb}: {minted_root} was created by {verb} and is not removed by that "
             f"command; delete it once the daemon is dealt with\n"
         )
     _warn(recovery)

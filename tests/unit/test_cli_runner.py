@@ -663,3 +663,117 @@ def test_stdin_payload_output_env_forces_materialize_for_kube_targets(
     forced_materialize = captured["schema"].daemon.materialize is True
     assert forced_materialize, "--output env must force materialize=True for a stdin payload too"
     assert f"export KUBECONFIG='{payload_session_dir / 'tunnel-data' / 'k3s'}'" in res.output
+
+
+def test_start_post_spawn_render_failure_preserves_recovery_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A post-spawn output failure identifies the possibly-live daemon to its operator.
+
+    The returned success payload has an unmaterialized kube target, which makes
+    ``render_kube_env`` raise during ``start --output env``.  The worker is
+    represented by this live test-process PID: the contract under test is that
+    the error still gives the operator its session directory and a command that
+    accepts that directory, rather than whether this test process is stopped.
+    """
+    session_path = str(tmp_path / "session")
+
+    def fake_spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "node": {
+                        "ports": {},
+                        "fetch_files": {},
+                        "kube_targets": {
+                            "k3s": {
+                                "cluster_name": "c",
+                                "context_name": "ctx",
+                                "local_port": 7000,
+                                "endpoint": "https://127.0.0.1:7000",
+                                "tls_server_name": "c",
+                                "certificate_authority_data": "Y2E=",
+                                "client_certificate_data": "Y2VydA==",
+                                "client_key_data": "a2V5",
+                                "content_b64": "a3ViZWNvbmZpZw==",
+                                "path": None,
+                            }
+                        },
+                    }
+                },
+                "pid": os.getpid(),
+                "session_dir": session_path,
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    result = CliRunner().invoke(
+        main,
+        ["start", "u@h", "--target", "db=127.0.0.1:5432", "--output", "env"],
+    )
+
+    assert result.exit_code == 4
+    error = json.loads(result.stdout)
+    assert error["error"] == "DaemonError"
+    assert error["details"]["type"] == "ValueError"
+    assert error["details"]["session_dir"] == session_path
+    assert error["details"]["pid"] == os.getpid()
+    assert f"tunstrap stop --session-dir {session_path}" in result.stderr
+
+
+def test_start_post_spawn_unusable_envelope_preserves_supplied_session_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A malformed success reply still leaves a caller-supplied root recoverable.
+
+    Deleting the fallback to ``session_dir`` in
+    ``_report_start_post_spawn_failure`` makes this fail: the daemon's worker
+    uses the supplied root verbatim, despite not providing a usable reply.
+    """
+    session_path = str(tmp_path / "session")
+
+    def fake_spawn(
+        _schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {"kind": "success", "payload": None}
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "start",
+            "u@h",
+            "--target",
+            "db=127.0.0.1:5432",
+            "--session-dir",
+            session_path,
+        ],
+    )
+
+    assert result.exit_code == 4
+    error = json.loads(
+        next(line for line in result.output.splitlines() if line.startswith('{"error"'))
+    )
+    assert error["details"] == {"type": "ValidationError", "session_dir": session_path}
+    assert f"tunstrap stop --session-dir {session_path}" in result.output
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"kind": "daemon_error", "payload": {"session_dir": "/s", "pid": 7}},
+        {"kind": "success", "payload": None},
+        {"kind": "success", "payload": {"session_dir": 7, "pid": 7}},
+        {"kind": "success", "payload": {"session_dir": "/s", "pid": True}},
+        {"kind": "success", "payload": {"session_dir": "/s", "pid": 0}},
+    ],
+)
+def test_start_recovery_handles_reject_unusable_envelopes(message: object) -> None:
+    """Only a successful envelope with safe scalar handles gets recovery output."""
+    assert cli_mod._start_recovery_handles(message) is None
