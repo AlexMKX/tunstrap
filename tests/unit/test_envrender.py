@@ -3,8 +3,8 @@ import json
 import pytest
 
 from tunstrap.envrender import (
+    RUN_ENV_KEYS,
     format_exports,
-    predicted_env_keys,
     render_kube_env,
     render_output_var,
     render_unified_output,
@@ -194,13 +194,13 @@ def test_format_exports_quotes_safely():
     assert "export B='z'" in txt
 
 
-def test_predicted_env_keys_is_session_scalars_plus_kube_channel() -> None:
-    """predicted_env_keys reserves the scalars and every scrubbed kube name.
+def test_run_env_keys_is_session_scalars_plus_kube_channel() -> None:
+    """RUN_ENV_KEYS reserves the scalars and every scrubbed kube name.
 
     The scrub is unconditional, so the reservation cannot depend on a schema
     declaring kube targets (issue #23).
     """
-    assert predicted_env_keys() == {
+    assert RUN_ENV_KEYS == {
         "TUNSTRAP_SESSION_DIR",
         "TUNSTRAP_PID",
         "TUNSTRAP_OUTPUT_FILE",
@@ -213,7 +213,7 @@ def test_predicted_env_keys_is_session_scalars_plus_kube_channel() -> None:
 def test_predicted_reserved_kube_names_equal_the_unconditional_scrub_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mutation-anchor for issue #23: the kube names ``predicted_env_keys``
+    """Mutation-anchor for issue #23: the kube names ``RUN_ENV_KEYS``
     reserves must be exactly the names ``_build_child_env`` scrubs
     unconditionally. Two independent lists that have to agree is the defect
     class; ``KUBE_ENV_NAMES`` is the single constant both read, and this test
@@ -239,7 +239,7 @@ def test_predicted_reserved_kube_names_equal_the_unconditional_scrub_set(
     )
     actual = _build_child_env(out, output_var=None, input_env=None)
     scrubbed = kube_names - set(actual)
-    reserved = predicted_env_keys() - {
+    reserved = RUN_ENV_KEYS - {
         "TUNSTRAP_SESSION_DIR",
         "TUNSTRAP_PID",
         "TUNSTRAP_OUTPUT_FILE",
@@ -248,12 +248,12 @@ def test_predicted_reserved_kube_names_equal_the_unconditional_scrub_set(
     assert reserved == kube_names, "guard must reserve all three unconditionally"
 
 
-def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink(
+def test_run_env_keys_covers_actual_injected_keys_under_cardinality_shrink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every key ``_build_child_env`` injects must be reserved beforehand.
 
-    Adding an injected key without reserving it in ``predicted_env_keys``
+    Adding an injected key without reserving it in ``RUN_ENV_KEYS``
     reopens issue #23: the pre-spawn collision guard would permit a NAME that
     collides after spawn. The shrink fixture pins ``_kube_channel_keys``' set
     behaviour, while the subset assertion pins injection ⊆ reservation.
@@ -314,7 +314,7 @@ def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink
     assert (declared_kube_target_count, actual_kube_target_count) == (2, 1)
     # Subset, not equality: the static reservation legitimately claims MORE
     # than the exact output export -- that asymmetry is the whole point.
-    assert set(actual) <= predicted_env_keys()
+    assert set(actual) <= RUN_ENV_KEYS
     # One materialized file selects the single-file channel, despite two
     # declared kube targets before the optional node failed.
     assert "KUBE_CONFIG_PATH" in actual

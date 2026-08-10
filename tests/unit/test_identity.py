@@ -113,6 +113,30 @@ def test_acquire_is_mutually_exclusive(tmp_path: Path) -> None:
         release_session_lock(fd, tmp_path)
 
 
+def test_acquire_session_lock_writes_complete_pid_after_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock PID is complete when os.write accepts one byte per call.
+
+    Replacing ``write_all(fd, ...)`` in ``acquire_session_lock`` with a direct
+    ``os.write(fd, ...)`` silently records only the first PID byte. This
+    stand-in makes that real file outcome observable without relying on a
+    naturally occurring short write.
+    """
+    real_write = os.write
+
+    def one_byte_write(fd: int, data: object) -> int:
+        real_write(fd, bytes(data)[:1])  # type: ignore[arg-type]
+        return 1
+
+    monkeypatch.setattr(os, "write", one_byte_write)
+    fd = acquire_session_lock(tmp_path)
+    try:
+        assert (tmp_path / "session.lock").read_bytes() == f"{os.getpid()}\n".encode("ascii")
+    finally:
+        release_session_lock(fd, tmp_path)
+
+
 def test_release_unlinks_lockfile(tmp_path: Path) -> None:
     fd = acquire_session_lock(tmp_path)
     assert (tmp_path / "session.lock").exists()

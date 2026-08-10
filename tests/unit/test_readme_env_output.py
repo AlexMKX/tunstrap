@@ -60,7 +60,7 @@ def _readme_env_variable_names() -> set[str]:
 def test_readme_env_table_matches_every_key_start_output_env_can_emit() -> None:
     """README lists the actual scalar plus conditional kube-channel key union.
 
-    ``predicted_env_keys`` is deliberately not used: it reserves all scrubbed
+    ``RUN_ENV_KEYS`` is deliberately not used: it reserves all scrubbed
     kube names for ``run --output-var`` collisions, while this table documents
     only keys ``start --output env`` can actually emit. The union of zero, one,
     and two materialized kube files covers its cardinality branches. This test

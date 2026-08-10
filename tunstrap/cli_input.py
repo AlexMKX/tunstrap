@@ -1,10 +1,12 @@
 """Build an InputSchema from the CLI's input channels (issue #6).
 
-One module per input channel would be three modules for one concern. The
-three ``build_*`` entry points below are the channels a caller can supply an
+One module per input channel would be three modules for one concern. Its five
+``build_*`` functions support the three channels a caller can supply an
 ``InputSchema`` through — connection flags, stdin JSON, and an environment
-variable — and they share the parsing helpers and the single failure shape
-(``SchemaValidationError``, exit 1) that the CLI contract requires.
+variable. ``build_start_schema`` is instead the ``start`` verb's selector
+between its flags and stdin channels. Schema decoding and validation failures
+raise ``SchemaValidationError`` (exit 1); that selector raises
+``click.UsageError`` (exit 64) for incompatible channel combinations.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+import click
 from pydantic import ValidationError
 
 from tunstrap.exceptions import SchemaValidationError
@@ -78,6 +81,19 @@ def parse_named(items: tuple[str, ...], label: str) -> dict[str, str]:
             raise SchemaValidationError(f"--{label} duplicate name {name!r}", {"value": item})
         out[name] = value
     return out
+
+
+def connection_flags_present(
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+) -> bool:
+    """Detect connection flags before channel selection can cause side effects."""
+    return any([ssh_key, ssh_key_passphrase, ssh_password_stdin, targets, kube, fetch])
 
 
 def build_single_node_schema(
@@ -174,6 +190,59 @@ def build_flag_schema(
         kube=kube,
         fetch=fetch,
         daemon_opts=daemon,
+    )
+
+
+def build_start_schema(
+    connection: str | None,
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+    output_fmt: str,
+) -> InputSchema:
+    """Build ``start`` input from its exclusive flags and stdin channels.
+
+    ``--output env`` requires materialized kube paths in either channel.
+    ``--ssh-password-stdin`` exclusively owns stdin when flag input is used.
+    """
+    if connection is None:
+        if connection_flags_present(
+            ssh_key=ssh_key,
+            ssh_key_passphrase=ssh_key_passphrase,
+            ssh_password_stdin=ssh_password_stdin,
+            targets=targets,
+            kube=kube,
+            fetch=fetch,
+        ):
+            raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
+        schema = build_schema_from_stdin(sys.stdin.read())
+        if output_fmt == "env":
+            schema.daemon.materialize = True
+        return schema
+
+    if not ssh_password_stdin and sys.stdin.read().strip():
+        raise click.UsageError(
+            "cannot combine a connection argument with JSON on stdin; use flags or stdin, not both"
+        )
+    return build_flag_schema(
+        connection,
+        ssh_key=ssh_key,
+        ssh_key_passphrase=ssh_key_passphrase,
+        ssh_password_stdin=ssh_password_stdin,
+        targets=targets,
+        kube=kube,
+        fetch=fetch,
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize,
+        log_file=log_file,
+        force_materialize=(output_fmt == "env"),
     )
 
 

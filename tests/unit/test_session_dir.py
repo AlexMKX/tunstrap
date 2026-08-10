@@ -120,7 +120,7 @@ def test_write_file_rejects_slash_name(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# atomic_write + _write_file: issue #21
+# atomic_write + SessionDir._write_file through fdio.write_all: issue #21
 # (parent dir mode, temp cleanup on failure, short-write loop, no-progress guard)
 # ---------------------------------------------------------------------------
 
@@ -238,7 +238,7 @@ def test_atomic_write_loops_past_short_writes(
     write silently truncated. A short write to a regular file is hard to trigger
     naturally, so this stand-in patches os.write to write one byte per call
     (labelled: it simulates a filesystem handing back partial counts) -- the
-    same hazard ``_worker._write_message`` already loops for on its IPC pipe.
+    same hazard ``fdio.write_all`` handles for IPC pipes and regular files.
     """
     target = tmp_path / "short.json"
     real_write = os.write
@@ -261,7 +261,7 @@ def test_atomic_write_raises_on_zero_progress_write(
     ``os.write`` on a blocking regular-file fd essentially never returns 0 for a
     non-empty buffer, so this guard is defence-in-depth -- but a loop with no
     no-progress guard would spin forever if it ever did, so the guard is
-    load-bearing for robustness. It mirrors ``_worker._write_message``'s own
+    load-bearing for robustness. It exercises ``fdio.write_all``'s shared
     ``if written <= 0`` check.
 
     Mutation signal (why this test exists): if the ``if written <= 0`` guard is
@@ -291,9 +291,9 @@ def test_materialize_loops_past_short_writes(
     writes -- the second unchecked os.write site named in issue #21.
 
     Driven through ``write_identity`` because that is ``_write_file``'s only
-    caller: issue #16 moved both materializers onto the atomic primitive, so
-    routing this through materialization would exercise ``atomic_write``
-    instead and leave ``_write_file``'s loop unpinned.
+    caller. This pins the legacy metadata call path into the shared
+    ``fdio.write_all`` helper; materialization instead reaches that helper
+    through ``atomic_write``.
 
     Same partial-write stand-in as test_atomic_write_loops_past_short_writes.
     """

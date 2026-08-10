@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from tunstrap.activity import ActivityTracker
 from tunstrap.exceptions import DaemonError, SessionActive
+from tunstrap.fdio import ShortWriteError, write_all
 from tunstrap.manager import TunnelManager
 from tunstrap.schemas import ErrorOutput, InputSchema
 from tunstrap.session import SessionDir
@@ -68,11 +69,10 @@ def _read_schema_from_stdin() -> InputSchema:
 def _write_message(fd: int, message: dict[str, Any]) -> None:
     """Finish partial writes so the parent receives a complete IPC frame."""
     payload = (json.dumps(message) + "\n").encode("utf-8")
-    while payload:
-        written = os.write(fd, payload)
-        if written <= 0:
-            raise DaemonError("short write to IPC pipe", {"remaining": len(payload)})
-        payload = payload[written:]
+    try:
+        write_all(fd, payload)
+    except ShortWriteError as exc:
+        raise DaemonError("short write to IPC pipe", {"remaining": exc.remaining}) from exc
 
 
 def _report_pre_run_failure(ipc_fd: int, exc: BaseException) -> None:

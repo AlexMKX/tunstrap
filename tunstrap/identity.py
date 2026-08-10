@@ -14,6 +14,8 @@ import os
 import stat
 from pathlib import Path
 
+from tunstrap.fdio import write_all
+
 _LOCK_NAME = "session.lock"
 
 
@@ -74,7 +76,7 @@ def acquire_session_lock(session_dir: str | Path) -> int:
     # Truncate + write only AFTER winning the lock, so a losing racer's open()
     # can never clobber the winner's recorded pid.
     os.ftruncate(fd, 0)
-    os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+    write_all(fd, f"{os.getpid()}\n".encode("ascii"))
     os.fsync(fd)
     return fd
 

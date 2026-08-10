@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from tunstrap.exceptions import SessionActive
+from tunstrap.fdio import write_all
 from tunstrap.identity import (
     IdentityCheckResult,
     acquire_session_lock,
@@ -30,24 +31,6 @@ from tunstrap.identity import (
 )
 
 _TUNNEL_DATA = "tunnel-data"
-
-
-def _write_all(fd: int, content: bytes) -> None:
-    """Write all of ``content`` to ``fd``, looping past short writes.
-
-    ``os.write`` is permitted to return fewer bytes than requested (a "short
-    write"); ignoring the count silently truncates the file. This mirrors the
-    loop in ``_worker._write_message`` so the two raw-fd writers in this
-    codebase agree, including the ``written <= 0`` no-progress guard (a 0
-    return would otherwise spin forever). A ``memoryview`` avoids copying the
-    tail on each slice.
-    """
-    view = memoryview(content)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("os.write made no progress; cannot complete write")
-        view = view[written:]
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -87,7 +70,7 @@ def atomic_write(path: Path, content: bytes) -> None:
     tmp_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
     fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600)
     try:
-        _write_all(fd, content)
+        write_all(fd, content)
         os.replace(tmp_path, path)
     except BaseException:
         # Orphaning the temp would make O_EXCL reject every later same-pid
@@ -323,7 +306,7 @@ class SessionDir:
         path = self._validated_path(name)
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:
-            _write_all(fd, content)
+            write_all(fd, content)
         finally:
             os.close(fd)
         return str(path)

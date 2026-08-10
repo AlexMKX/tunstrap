@@ -1,11 +1,5 @@
 """Command-line interface. Subcommands are added in later tasks."""
 
-# pylint: disable=too-many-lines  # DEBT, not a design decision. 1060 lines vs the 1000-line
-# cap committed to in the #15 cycle; the suppression was added undisclosed in
-# 2a88d02 (#18). Nothing forces one module -- Click commands register on `main` from any
-# module (cf. cli_input.py / envrender.py). Split command bodies out and delete this
-# line. Do not grow this file further.
-
 from __future__ import annotations
 
 import json
@@ -23,14 +17,15 @@ import click
 from tunstrap.cli_input import (
     build_flag_schema,
     build_schema_from_env,
-    build_schema_from_stdin,
+    build_start_schema,
+    connection_flags_present,
 )
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
     KUBE_ENV_NAMES,
+    RUN_ENV_KEYS,
     format_exports,
     materialized_output_path,
-    predicted_env_keys,
     render_kube_env,
     render_output_var,
     render_start_json,
@@ -43,7 +38,7 @@ from tunstrap.exceptions import (
     exit_code_for,
 )
 from tunstrap.identity import IdentityCheckResult, verify_session
-from tunstrap.schemas import InputSchema, OutputSchema
+from tunstrap.schemas import OutputSchema
 from tunstrap.session import (
     SessionDir,
     SessionError,
@@ -132,81 +127,6 @@ def _connection_options(func: _FC) -> _FC:
     for dec in reversed(decorators):
         func = dec(func)
     return func
-
-
-def _conn_flags_present(
-    *,
-    ssh_key: str | None,
-    ssh_key_passphrase: str | None,
-    ssh_password_stdin: bool,
-    targets: tuple[str, ...],
-    kube: tuple[str, ...],
-    fetch: tuple[str, ...],
-) -> bool:
-    """Detect forbidden connection flags before env input can cause side effects."""
-    return any([ssh_key, ssh_key_passphrase, ssh_password_stdin, targets, kube, fetch])
-
-
-def _start_schema(
-    connection: str | None,
-    *,
-    ssh_key: str | None,
-    ssh_key_passphrase: str | None,
-    ssh_password_stdin: bool,
-    targets: tuple[str, ...],
-    kube: tuple[str, ...],
-    fetch: tuple[str, ...],
-    auto_stop_idle_seconds: int | None,
-    materialize: bool,
-    log_file: str | None,
-    output_fmt: str,
-) -> InputSchema:
-    """Pick ``start``'s input channel and assemble the schema from it.
-
-    The two channels are mutually exclusive and the guards that enforce that
-    belong here, with the assembly: a connection argument forbids JSON on
-    stdin, and connection flags require a connection argument. Stdin is not
-    consumed under ``--ssh-password-stdin`` — the password read owns it.
-
-    ``--output env`` forces materialization (``render_kube_env`` needs a
-    kubeconfig on disk) in both channels: flag mode via ``force_materialize``,
-    and a stdin payload here, overriding its own ``daemon.materialize`` --
-    otherwise a ``materialize: false`` stdin payload with ``kube_targets``
-    would hit the unconditional ``render_kube_env`` with an unmaterialized
-    path and raise a bare ``ValueError``.
-    """
-    if connection is None:
-        if _conn_flags_present(
-            ssh_key=ssh_key,
-            ssh_key_passphrase=ssh_key_passphrase,
-            ssh_password_stdin=ssh_password_stdin,
-            targets=targets,
-            kube=kube,
-            fetch=fetch,
-        ):
-            raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
-        schema = build_schema_from_stdin(sys.stdin.read())
-        if output_fmt == "env":
-            schema.daemon.materialize = True
-        return schema
-
-    if not ssh_password_stdin and sys.stdin.read().strip():
-        raise click.UsageError(
-            "cannot combine a connection argument with JSON on stdin; use flags or stdin, not both"
-        )
-    return build_flag_schema(
-        connection,
-        ssh_key=ssh_key,
-        ssh_key_passphrase=ssh_key_passphrase,
-        ssh_password_stdin=ssh_password_stdin,
-        targets=targets,
-        kube=kube,
-        fetch=fetch,
-        auto_stop_idle_seconds=auto_stop_idle_seconds,
-        materialize=materialize,
-        log_file=log_file,
-        force_materialize=(output_fmt == "env"),
-    )
 
 
 def _session_scalars(out: OutputSchema) -> dict[str, str]:
@@ -336,7 +256,7 @@ def start_command(  # pylint: disable=too-many-locals
     try:
         if extra:
             raise click.UsageError("`--` invokes a child command; use `tunstrap run ... -- CMD`")
-        schema = _start_schema(
+        schema = build_start_schema(
             connection,
             ssh_key=ssh_key,
             ssh_key_passphrase=ssh_key_passphrase,
@@ -416,7 +336,7 @@ def _validate_output_var(name: str) -> None:
     """
     if not _ENV_NAME_RE.match(name):
         raise click.UsageError(f"--output-var NAME must match [A-Za-z_][A-Za-z0-9_]*; got {name!r}")
-    if name in predicted_env_keys():
+    if name in RUN_ENV_KEYS:
         raise click.UsageError(
             f"--output-var {name} collides with an environment key run already injects"
         )
@@ -435,8 +355,8 @@ def _reject_flags_under_input_env(
     Rejected rather than given a precedence order: the payload's ``daemon``
     block is complete and authoritative, so there must be exactly one place to
     look when a tunnel misbehaves. The daemon flags need their own rule
-    because ``_connection_options`` attaches them but ``_conn_flags_present``
-    deliberately excludes them.
+    because ``_connection_options`` attaches them but
+    ``cli_input.connection_flags_present`` deliberately excludes them.
     """
     if conn_flags:
         raise click.UsageError(
@@ -745,7 +665,7 @@ def _run_command(  # pylint: disable=too-many-locals,too-many-statements
     try:
         if input_env is not None:
             _reject_flags_under_input_env(
-                conn_flags=_conn_flags_present(
+                conn_flags=connection_flags_present(
                     ssh_key=ssh_key,
                     ssh_key_passphrase=ssh_key_passphrase,
                     ssh_password_stdin=ssh_password_stdin,

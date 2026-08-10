@@ -5,7 +5,7 @@
 ``render_unified_output``/``render_output_var`` build the node-qualified
 structure -- keyed by node, with kube credentials removed -- that ``run``
 materializes to ``tunnel-data/output.json`` and optionally also exports under
-``--output-var``. ``predicted_env_keys`` returns every key ``run`` injects or
+``--output-var``. ``RUN_ENV_KEYS`` contains every key ``run`` injects or
 scrubs, for the pre-spawn ``--output-var`` collision check.
 """
 
@@ -32,7 +32,7 @@ KUBE_ENV_NAMES: frozenset[str] = frozenset({"KUBECONFIG", "KUBE_CONFIG_PATH", "K
 operator ``KUBECONFIG``/``KUBE_CONFIG_PATH``/``KUBE_CONFIG_PATHS`` can never
 leak into or override the channel (the e2e tier asserts ``KUBECONFIG`` is
 absent from ``tofu``'s env). Because the scrub is unconditional,
-``predicted_env_keys`` must reserve the same set *unconditionally* too, or a
+``RUN_ENV_KEYS`` must reserve the same set *unconditionally* too, or a
 ``--output-var KUBECONFIG`` would pass the pre-spawn collision guard and then
 have the inherited value clobbered (issue #23).
 
@@ -43,6 +43,11 @@ cardinality-dependent (1 file -> ``KUBECONFIG`` + ``KUBE_CONFIG_PATH``;
 always covers all three. One constant for both the guard and the scrubber is
 what keeps that asymmetry from drifting back into two lists that must agree.
 """
+
+RUN_ENV_KEYS: frozenset[str] = (
+    frozenset({"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE"}) | KUBE_ENV_NAMES
+)
+"""Every environment key ``run`` injects or reserves by scrubbing."""
 
 
 def _kube_channel_keys(count: int) -> set[str]:
@@ -163,30 +168,6 @@ def write_materialized_output(output: OutputSchema) -> None:
     atomic_write(
         Path(materialized_output_path(output.session_dir)), render_output_var(output).encode()
     )
-
-
-def predicted_env_keys() -> set[str]:
-    """Env keys ``run`` will inject or scrub.
-
-    The three session scalars are always injected. The three kube names in
-    ``KUBE_ENV_NAMES`` are always *scrubbed* from the inherited environment
-    (unconditionally, regardless of schema -- see ``_build_child_env``), so
-    they are reserved here unconditionally too: a ``--output-var`` named for
-    one of them must be rejected pre-spawn or the scrubber would delete the
-    operator's inherited value and the output-var assignment would write the
-    unified JSON under it (issue #23). ``KUBE_ENV_NAMES`` is the shared
-    constant, so this reservation cannot drift from the scrub it mirrors.
-
-    The cardinality of what ``render_kube_env`` actually *sets* (1 file ->
-    ``KUBE_CONFIG_PATH``; >=2 -> ``KUBE_CONFIG_PATHS``) is irrelevant to this
-    function: it returns what must be *protected*, not what will be *set*.
-    Input cardinality can shrink by output time (an optional node/target can
-    fail without failing the run), so every kube name remains reserved. The
-    cardinality-shrink invariant has a dedicated unit-test guard. Used
-    pre-spawn to reject a colliding
-    --output-var NAME before a daemon exists.
-    """
-    return {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE"} | KUBE_ENV_NAMES
 
 
 def format_exports(env: dict[str, str]) -> str:
