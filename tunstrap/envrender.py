@@ -103,6 +103,35 @@ def render_unified_output(output: OutputSchema) -> dict[str, Any]:
     return {"session": session, "nodes": nodes}
 
 
+def render_start_json(output: OutputSchema) -> dict[str, Any]:
+    """Build ``start --output json`` data without redundant materialized content.
+
+    ``path is not None`` is the discriminator, not ``daemon.materialize``:
+    materialized kube and fetched-file entries use the same allow-lists as
+    ``run``; unmaterialized entries retain ``content_b64`` as stdout is their
+    only delivery channel. The two discriminators are equivalent today because
+    a session is bound once per daemon from ``schema.daemon.materialize``.
+    """
+    payload: dict[str, Any] = output.model_dump(mode="json")
+    connections = payload["connections"]
+    for node_name, node in output.connections.items():
+        rendered_targets = connections[node_name]["kube_targets"]
+        for target_name, target in node.kube_targets.items():
+            if target.path is None:
+                continue
+            rendered_targets[target_name] = UnifiedKubeRef(
+                path=target.path, context=target.context_name, endpoint=target.endpoint
+            ).model_dump(exclude_none=True)
+        rendered_fetch_files = connections[node_name]["fetch_files"]
+        for fetch_name, fetched_file in node.fetch_files.items():
+            if fetched_file.path is None:
+                continue
+            rendered_fetch_files[fetch_name] = UnifiedFetchRef(
+                path=fetched_file.path, size=fetched_file.size, sha256=fetched_file.sha256
+            ).model_dump(exclude_none=True)
+    return payload
+
+
 def materialized_output_path(session_dir: str) -> str:
     """The deterministic path the materialization writer writes to; shared so
     _build_child_env's TUNSTRAP_OUTPUT_FILE and the actual writer never

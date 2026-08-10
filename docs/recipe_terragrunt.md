@@ -374,18 +374,21 @@ inline provider configuration rather than `config_path` reads
 `tls_server_name`, and its own client credentials from that file directly —
 only `path`, `context` and `endpoint` travel through `TF_VAR_tunstrap` itself.
 
-`tunstrap start` is **not** affected: it writes the complete envelope to
-stdout, a pipe consumed directly by the caller who already supplied the input,
-and without `--materialize` its `content_b64` is the only way to obtain the
-kubeconfig at all.
+`tunstrap start --output json` projects every materialized kube target through
+the same `path` / `context` / `endpoint` allow-list and every materialized
+fetched file through `{path, size, sha256}`. Without `--materialize`, each
+entry's `content_b64` is its only delivery channel, so that entry instead
+retains the complete envelope on stdout. Treat this unmaterialized mode's stdout
+as credential material; do not place it in CI logs or durable shell captures.
 
 ### Fetched files are materialized, not carried in the envelope
 
-The projection above (kube) and this one (`fetch_files`) follow the same
-rule: `run` materializes content to disk under the session dir's
-`tunnel-data/`, mode `0600`, and the consumer-facing envelope carries only a
-reference to it. Each `fetch_files` entry becomes `{path, size, sha256}` on
-success, `{error}` on failure — never `content_b64`.
+The projection above (kube) and this one (`fetch_files`) follow the same rule:
+`run` and materialized `tunstrap start --output json` materialize content to
+disk under the session dir's `tunnel-data/`, mode `0600`, and their
+consumer-facing envelope carries only a reference to it. Each `fetch_files`
+entry becomes `{path, size, sha256}` on success, `{error}` on failure — never
+`content_b64`.
 
 `FetchedFile` **has a `path`** (`schemas.py`, extended for this ticket), so
 the lossless on-disk alternative exists, the same way it already existed for

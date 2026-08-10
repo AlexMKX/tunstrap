@@ -4,8 +4,8 @@ Validates: start with a kube_target produces a patched kubeconfig whose
 server points at the local forwarded port and whose tls-server-name is the
 probed SAN; materialize writes the file; stop cleans up the session dir.
 Code: tunstrap kube mode (kube.py, manager.py, _worker.py, cli.py)
-Assertion: output.connections[node].kube_targets.k3s.endpoint is local;
-tls_server_name == 'dev-kube-1'; materialized path exists then is removed.
+Assertion: output.connections[node].kube_targets.k3s.endpoint is local; the
+materialized kubeconfig has tls-server-name == 'dev-kube-1'; path exists then is removed.
 Method: drive `tunstrap start`/`stop` subprocesses against compose.
 """
 
@@ -87,11 +87,12 @@ def test_kube_target_end_to_end(
     out = json.loads(result.stdout)
     kt = out["connections"]["node"]["kube_targets"]["k3s"]
     assert kt["endpoint"].startswith("https://127.0.0.1:"), kt
-    assert kt["tls_server_name"] == "dev-kube-1", kt
-    patched = base64.b64decode(kt["content_b64"]).decode()
+    assert kt["context"] == "tunstrap-node-k3s", kt
+    assert kt["path"] is not None and Path(kt["path"]).is_file(), kt
+    patched = Path(kt["path"]).read_text()
     assert "127.0.0.1" in patched
     assert "tls-server-name: dev-kube-1" in patched
-    assert kt["path"] is not None and Path(kt["path"]).is_file(), kt
+    assert set(kt) == {"path", "context", "endpoint"}, kt
 
     # Stop cleans up the session dir's tunnel-data.
     stop = subprocess.run(

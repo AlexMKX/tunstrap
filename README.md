@@ -97,6 +97,20 @@ tunstrap stop --session-dir "$SESSION_DIR"
 rm -f "$KUBECONFIG_FILE"
 ```
 
+### `start` JSON output and credential-bearing entries
+
+With the default `daemon.materialize: false`, `start --output json` carries
+`content_b64` on stdout because it is the only delivery channel for the patched
+kubeconfig or fetched file. These values can include operator-chosen secrets.
+Treat this mode's stdout as secret material: do not send it to CI logs or durable
+shell captures.
+
+Set `daemon.materialize: true` (or pass `--materialize` in flag mode) when the
+session directory is an acceptable credential location. Each patched kubeconfig
+and fetched file is then written mode `0600` under `tunnel-data/`. Materialized
+kube targets contain only `{path, context, endpoint}`; materialized fetched
+files contain only `{path, size, sha256}`. Neither form carries inline content.
+
 The `daemon.auto_stop_idle_seconds: 600` setting makes the daemon shut
 itself down after 10 minutes with no client connections. Useful for
 ephemeral CI runs that may abort before reaching `tunstrap stop`.
@@ -115,6 +129,10 @@ sed -i "s|server: https://127.0.0.1:6443|server: https://127.0.0.1:${PORT}|" \
     "$KUBECONFIG_FILE"
 tunstrap stop --session-dir "$SESSION_DIR"
 ```
+
+With `daemon.materialize: true` (or `--materialize` in flag mode), read the
+fetched file from `fetch_files.kubeconfig.path` instead; see [`start` JSON
+output and credential-bearing entries](#start-json-output-and-credential-bearing-entries).
 
 ## CLI run modes (flag input, `--output env`, `run`)
 
@@ -265,8 +283,9 @@ drops `client_key_data`, `client_certificate_data` and `content_b64`. The
 documented consumer binds `NAME` to a Terraform variable, and OpenTofu
 persists root-module variable values in the plan file — which pipelines
 archive. Nothing is lost: `run` always materializes, so `path` is a real
-on-disk kubeconfig containing everything that was removed. `tunstrap start`
-is unaffected and still emits the complete envelope on stdout.
+on-disk kubeconfig containing everything that was removed. `tunstrap start --output
+json` also projects materialized kube and fetched-file entries. Only an
+unmaterialized `start` envelope is complete on stdout.
 
 ```bash
 tunstrap run --input-env TUNSTRAP_INPUT --output-var TF_VAR_tunstrap \
@@ -424,16 +443,20 @@ explicit `tls_server_name` is set:
 
 | Field | Description |
 |---|---|
-| `cluster_name` | Cluster name from the kubeconfig |
-| `context_name` | `current-context` value |
-| `local_port` | OS-assigned local forwarded port |
+| `cluster_name` | Cluster name from the kubeconfig (unmaterialized only) |
+| `context_name` | `current-context` value (unmaterialized only) |
+| `local_port` | OS-assigned local forwarded port (unmaterialized only) |
 | `endpoint` | `https://127.0.0.1:<local_port>` |
-| `tls_server_name` | Chosen TLS server name, or `null` on insecure fallback |
-| `certificate_authority_data` | Base64 CA cert, or `""` on insecure fallback |
-| `client_certificate_data` | Base64 client cert |
-| `client_key_data` | Base64 client private key |
-| `content_b64` | Full patched kubeconfig (always present) |
+| `tls_server_name` | Chosen TLS server name, or `null` on insecure fallback (unmaterialized only) |
+| `certificate_authority_data` | Base64 CA cert, or `""` on insecure fallback (unmaterialized only) |
+| `client_certificate_data` | Base64 client cert (unmaterialized only) |
+| `client_key_data` | Base64 client private key (unmaterialized only) |
+| `content_b64` | Full patched kubeconfig (unmaterialized only) |
 | `path` | Absolute path to the materialized file, or `null` if `daemon.materialize=false` |
+
+Materialized `start --output json` targets use the projected form `{path,
+context, endpoint}`. The projected `context` field is renamed from the raw
+envelope's `context_name`.
 
 ## Output reference
 

@@ -1,5 +1,7 @@
 """Command-line interface. Subcommands are added in later tasks."""
 
+# pylint: disable=too-many-lines  # command registrations intentionally remain together
+
 from __future__ import annotations
 
 import json
@@ -26,6 +28,7 @@ from tunstrap.envrender import (
     predicted_env_keys,
     render_kube_env,
     render_output_var,
+    render_start_json,
     write_materialized_output,
 )
 from tunstrap.exceptions import (
@@ -210,13 +213,11 @@ def _session_scalars(out: OutputSchema) -> dict[str, str]:
 
 def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     """Write ``start``'s envelope to stdout, then exit with the mapped code.
-
-    Success under ``--output env`` is the only combination rendered as shell
-    exports; everything else is the raw JSON payload. A ``success`` kind (or an
-    unrecognised one) returns instead of exiting, leaving Click to exit 0 —
-    the same fall-through the original if-chain had. ``--output env`` also
-    materializes ``output.json`` under the session dir, same as ``run``, so a
-    consumer reading ``TUNSTRAP_OUTPUT_FILE`` sees the same contract either way.
+    Only ``--output env`` renders shell exports; ``write_materialized_output``
+    writes ``output.json``. ``TUNSTRAP_OUTPUT_FILE`` has ``run``'s contract;
+    JSON projects on ``path is not None``. One session per daemon makes this
+    match ``daemon.materialize``; unmaterialized retain ``content_b64``;
+    success and unrecognised kinds return, so Click exits 0.
     """
     kind = message["kind"]
     if kind == "success" and output_fmt == "env":
@@ -225,6 +226,9 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
         env = _session_scalars(out)
         env.update(render_kube_env(out))
         sys.stdout.write(format_exports(env))
+    elif kind == "success":
+        out = OutputSchema.model_validate(message["payload"])
+        sys.stdout.write(json.dumps(render_start_json(out)) + "\n")
     else:
         sys.stdout.write(json.dumps(message["payload"]) + "\n")
     sys.stdout.flush()

@@ -245,10 +245,11 @@ def test_tunnel_carries_real_kube_api_traffic(kube_rig: dict[str, Any], tmp_path
     - `started.returncode == 0`: fires if the forwarding drop-in is missing or
       the service is off kind's network, because the SAN probe itself traverses
       the forward during `start` and is refused `administratively prohibited`.
-    - `warnings == []` and `tls_server_name == CONTROL_PLANE`: pin the clean,
-      exact-SAN-match branch. A silent downgrade to insecure-skip-tls-verify
-      would still let kubectl succeed, so without these the test would pass
-      while the security property it exists to prove had regressed.
+    - `warnings == []` and the materialized kubeconfig's `tls-server-name`:
+      pin the clean, exact-SAN-match branch. A silent downgrade to
+      insecure-skip-tls-verify would still let kubectl succeed, so without
+      these the test would pass while the security property it exists to prove
+      had regressed.
     - `endpoint` is a local https URL and `path` is not None: materialization
       and patching. `run` forces materialize, `start` does not, hence the
       explicit materialize=True here.
@@ -276,10 +277,11 @@ def test_tunnel_carries_real_kube_api_traffic(kube_rig: dict[str, Any], tmp_path
     try:
         assert envelope["warnings"] == []
         target = envelope["connections"]["node"]["kube_targets"]["k3s"]
-        assert target["tls_server_name"] == CONTROL_PLANE
         assert target["endpoint"].startswith("https://127.0.0.1:")
         kubeconfig = target["path"]
         assert kubeconfig is not None, "materialize=True must yield a path"
+        assert f"tls-server-name: {CONTROL_PLANE}" in Path(kubeconfig).read_text()
+        assert set(target) == {"path", "context", "endpoint"}
 
         probe = subprocess.run(
             ["kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name"],

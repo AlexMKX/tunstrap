@@ -75,9 +75,9 @@ def test_stdout_only_carrier_of_content(
 ) -> None:
     """Fetched content_b64 appears on start's raw stdout envelope, never on stderr.
 
-    Unaffected by R16/#15: `start`'s default JSON stdout is the untouched
-    "complete envelope" channel, for kube and fetch_files alike. The stronger
-    claim -- that fetched content never rides the consumer-facing
+    This test sends the default unmaterialized payload, for which start's JSON
+    stdout retains the complete envelope. The stronger claim -- that fetched
+    content never rides the consumer-facing
     --output-var/materialized channels -- is
     test_output_var_and_materialized_output_never_carry_fetched_content, below.
     """

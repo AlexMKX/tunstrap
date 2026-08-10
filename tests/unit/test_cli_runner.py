@@ -33,6 +33,7 @@ def _patch_spawn_success(monkeypatch: pytest.MonkeyPatch) -> None:
             "payload": {
                 "connections": {},
                 "pid": 4242,
+                "session_dir": "/tmp/session",
                 "started_at": "2026-05-20T00:00:00Z",
                 "warnings": [],
             },
@@ -400,6 +401,202 @@ def test_start_output_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert "KUBECONFIG" not in res.output, "no kube_targets in this payload"
     assert materialized.exists()
     assert stat.S_IMODE(materialized.stat().st_mode) == 0o600
+
+
+def test_start_json_materialized_kubeconfig_never_prints_credential_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Materialized start JSON exposes only the kube reference, never its content."""
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
+    kube_path = payload_session_dir / "tunnel-data" / "kube-node-k3s"
+
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "node": {
+                        "ports": {},
+                        "fetch_files": {},
+                        "kube_targets": {
+                            "k3s": {
+                                "cluster_name": "cluster",
+                                "context_name": "context",
+                                "local_port": 7000,
+                                "endpoint": "https://127.0.0.1:7000",
+                                "tls_server_name": "tls-name",
+                                "certificate_authority_data": "CA-MARKER",
+                                "client_certificate_data": "CERTIFICATE-MARKER",
+                                "client_key_data": "PRIVATE-KEY-MARKER",
+                                "content_b64": "FULL-KUBECONFIG-MARKER",
+                                "path": str(kube_path),
+                            }
+                        },
+                    }
+                },
+                "pid": 7,
+                "session_dir": str(payload_session_dir),
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
+
+    assert res.exit_code == 0, res.output
+    for secret in (
+        "CA-MARKER",
+        "CERTIFICATE-MARKER",
+        "PRIVATE-KEY-MARKER",
+        "FULL-KUBECONFIG-MARKER",
+    ):
+        assert secret not in res.output
+    target = json.loads(res.output)["connections"]["node"]["kube_targets"]["k3s"]
+    assert target == {
+        "path": str(kube_path),
+        "context": "context",
+        "endpoint": "https://127.0.0.1:7000",
+    }
+
+
+def test_start_json_unmaterialized_kubeconfig_keeps_stdout_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unmaterialized kubeconfig remains available through start JSON."""
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
+
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "node": {
+                        "ports": {},
+                        "fetch_files": {},
+                        "kube_targets": {
+                            "k3s": {
+                                "cluster_name": "cluster",
+                                "context_name": "context",
+                                "local_port": 7000,
+                                "endpoint": "https://127.0.0.1:7000",
+                                "tls_server_name": "tls-name",
+                                "certificate_authority_data": "CA-MARKER",
+                                "client_certificate_data": "CERTIFICATE-MARKER",
+                                "client_key_data": "PRIVATE-KEY-MARKER",
+                                "content_b64": "FULL-KUBECONFIG-MARKER",
+                                "path": None,
+                            }
+                        },
+                    }
+                },
+                "pid": 7,
+                "session_dir": str(payload_session_dir),
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
+
+    assert res.exit_code == 0, res.output
+    target = json.loads(res.output)["connections"]["node"]["kube_targets"]["k3s"]
+    assert target["content_b64"] == "FULL-KUBECONFIG-MARKER"
+    assert target["path"] is None
+
+
+def test_start_json_materialized_fetch_file_never_prints_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A materialized fetched file exposes only its on-disk reference."""
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
+    fetch_path = payload_session_dir / "tunnel-data" / "fetch-node-kubeconfig"
+
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "node": {
+                        "ports": {},
+                        "fetch_files": {
+                            "kubeconfig": {
+                                "content_b64": "FETCHED-SECRET-MARKER",
+                                "path": str(fetch_path),
+                                "size": 21,
+                                "sha256": "a" * 64,
+                            }
+                        },
+                        "kube_targets": {},
+                    }
+                },
+                "pid": 7,
+                "session_dir": str(payload_session_dir),
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
+
+    assert res.exit_code == 0, res.output
+    assert "FETCHED-SECRET-MARKER" not in res.output
+    fetched = json.loads(res.output)["connections"]["node"]["fetch_files"]["kubeconfig"]
+    assert fetched == {"path": str(fetch_path), "size": 21, "sha256": "a" * 64}
+
+
+def test_start_json_unmaterialized_fetch_file_keeps_stdout_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unmaterialized fetched file remains available through start JSON."""
+    payload_session_dir = tmp_path / "s"
+    payload_session_dir.mkdir()
+
+    def fake_spawn(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "kind": "success",
+            "payload": {
+                "connections": {
+                    "node": {
+                        "ports": {},
+                        "fetch_files": {
+                            "kubeconfig": {
+                                "content_b64": "FETCHED-SECRET-MARKER",
+                                "path": None,
+                                "size": 21,
+                                "sha256": "a" * 64,
+                            }
+                        },
+                        "kube_targets": {},
+                    }
+                },
+                "pid": 7,
+                "session_dir": str(payload_session_dir),
+                "started_at": "now",
+            },
+        }
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+
+    res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
+
+    assert res.exit_code == 0, res.output
+    fetched = json.loads(res.output)["connections"]["node"]["fetch_files"]["kubeconfig"]
+    assert fetched["content_b64"] == "FETCHED-SECRET-MARKER"
+    assert fetched["path"] is None
 
 
 def test_stdin_payload_output_env_forces_materialize_for_kube_targets(
