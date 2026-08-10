@@ -48,7 +48,7 @@ what keeps that asymmetry from drifting back into two lists that must agree.
 def _kube_channel_keys(count: int) -> set[str]:
     """Names of the kube-channel env keys the conditional contract exports.
 
-    0 files: nothing. Exactly 1: KUBECONFIG + KUBE_CONFIG_PATH. >=2:
+    Precondition: ``count >= 1``. Exactly 1: KUBECONFIG + KUBE_CONFIG_PATH. >=2:
     KUBECONFIG + KUBE_CONFIG_PATHS. KUBE_CONFIG_PATH and KUBE_CONFIG_PATHS are
     never both present -- KUBE_CONFIG_PATH wins over KUBE_CONFIG_PATHS per the
     measured OpenTofu kubernetes/helm provider precedence (docs/artifacts/
@@ -57,8 +57,6 @@ def _kube_channel_keys(count: int) -> set[str]:
     union of every branch is ``KUBE_ENV_NAMES``; this function picks the
     cardinality-correct subset to *set*, while the scrub reserves them all.
     """
-    if count == 0:
-        return set()
     if count == 1:
         return {"KUBECONFIG", "KUBE_CONFIG_PATH"}
     return {"KUBECONFIG", "KUBE_CONFIG_PATHS"}

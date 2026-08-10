@@ -74,7 +74,7 @@ def test_stop_stdout_is_byte_identical(
     """
     monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _grace, *, force: outcome)
     result = CliRunner().invoke(main, ["stop", "--session-dir", "/s"])
-    assert result.exit_code == 0
+    assert result.exit_code == (0 if cli_mod._stop_resolved(outcome) else 1)
     assert result.stdout == expected
 
 
@@ -109,7 +109,7 @@ def test_stop_warns_on_stderr_exactly_when_it_preserves(
     """
     monkeypatch.setattr(cli_mod, "stop_session", lambda _sd, _pid, _grace, *, force: outcome)
     result = CliRunner().invoke(main, ["stop", "--session-dir", "/s"])
-    assert result.exit_code == 0
+    assert result.exit_code == (0 if cli_mod._stop_resolved(outcome) else 1)
     if warns:
         assert "session data preserved under /s" in result.stderr
         assert str(outcome.reason) in result.stderr
@@ -153,7 +153,7 @@ def test_stop_identity_failure_envelope_is_byte_exact(
     monkeypatch.setattr(cli_mod.SessionDir, "read_identity", staticmethod(_boom))
     monkeypatch.setattr(cli_mod.SessionDir, "cleanup_path", classmethod(lambda _cls, _sd: []))
     result = CliRunner().invoke(main, ["stop", "--session-dir", "/s"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert result.stdout == (
         '{"stopped": false, "reason": "cannot read identity from /s/tunnel-data: nope",'
         ' "preserved": true}\n'
@@ -210,7 +210,7 @@ def test_stop_keeps_the_identity_on_an_unresolved_outcome(
 
     result = CliRunner().invoke(main, ["stop", "--session-dir", str(tmp_path)])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     ate_the_handle = "stop deleted the identity of a daemon it could not stop"
     assert data.exists() and identity.read_text() == "4242\n", ate_the_handle
 
@@ -244,7 +244,7 @@ def test_stop_deletes_nothing_when_it_cannot_read_the_identity(tmp_path: Path, s
 
     result = CliRunner().invoke(main, ["stop", "--session-dir", str(tmp_path)])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert json.loads(result.stdout)["stopped"] is False
     assert (data / "materialized.kubeconfig").exists(), "stop deleted state it could not assess"
     # The envelope must carry the signal that matches what just happened on
@@ -284,7 +284,7 @@ def test_stop_with_a_non_positive_pid_through_the_cli_never_signals(
 
     result = CliRunner().invoke(main, ["stop", "--session-dir", str(tmp_path)])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert sent == [], f"os.kill was called with a non-positive pid: {sent}"
     body = json.loads(result.stdout)
     assert body["stopped"] is False

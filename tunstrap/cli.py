@@ -1,6 +1,6 @@
 """Command-line interface. Subcommands are added in later tasks."""
 
-# pylint: disable=too-many-lines  # DEBT, not a design decision. 1077 lines vs the 1000-line
+# pylint: disable=too-many-lines  # DEBT, not a design decision. 1060 lines vs the 1000-line
 # cap committed to in the #15 cycle; the suppression was added undisclosed in
 # 2a88d02 (#18). Nothing forces one module -- Click commands register on `main` from any
 # module (cf. cli_input.py / envrender.py). Split command bodies out and delete this
@@ -67,6 +67,7 @@ class _UsageExit64(click.Group):
     """
 
     def main(self, *args: object, **kwargs: object) -> object:  # type: ignore[override]
+        """Force usage errors through the CLI's documented sysexits-compatible path."""
         kwargs["standalone_mode"] = False
         try:
             return super().main(*args, **kwargs)  # type: ignore[call-overload]
@@ -142,6 +143,7 @@ def _conn_flags_present(
     kube: tuple[str, ...],
     fetch: tuple[str, ...],
 ) -> bool:
+    """Detect forbidden connection flags before env input can cause side effects."""
     return any([ssh_key, ssh_key_passphrase, ssh_password_stdin, targets, kube, fetch])
 
 
@@ -593,6 +595,7 @@ def _run_child(
         return 127
 
     def _forward(signum: int, _frame: object) -> None:
+        """Forward termination to the child so its process semantics remain visible."""
         try:
             proc.send_signal(signum)
         except ProcessLookupError:
@@ -679,7 +682,56 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
     session_dir: str | None,
     grace_seconds: int,
     args: tuple[str, ...],
-    suppress_kubeconfig: bool = False,
+) -> None:
+    """Open a tunnel, run CMD with TUNSTRAP_*/KUBECONFIG injected, then tear down.
+
+    The Click command owns only CLI-shaped arguments. Keeping the operational
+    implementation plain lets programmatic callers share its checks and
+    cleanup without treating Click's callback attribute as an internal API.
+    """
+    context = click.get_current_context(silent=True)
+    grace_seconds_set = (
+        context is not None
+        and context.get_parameter_source("grace_seconds") != click.core.ParameterSource.DEFAULT
+    )
+    _run_command(
+        ssh_key=ssh_key,
+        ssh_key_passphrase=ssh_key_passphrase,
+        ssh_password_stdin=ssh_password_stdin,
+        targets=targets,
+        kube=kube,
+        fetch=fetch,
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize,
+        log_file=log_file,
+        input_env=input_env,
+        output_var=output_var,
+        session_dir=session_dir,
+        grace_seconds=grace_seconds,
+        grace_seconds_set=grace_seconds_set,
+        args=args,
+        suppress_kubeconfig=False,
+    )
+
+
+def _run_command(  # pylint: disable=too-many-locals,too-many-statements
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+    input_env: str | None,
+    output_var: str | None,
+    session_dir: str | None,
+    grace_seconds: int,
+    grace_seconds_set: bool,
+    args: tuple[str, ...],
+    *,
+    suppress_kubeconfig: bool,
 ) -> None:
     """Open a tunnel, run CMD with TUNSTRAP_*/KUBECONFIG injected, then tear down.
 
@@ -689,11 +741,6 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
     `-`.
     """
     connection, cmd = _split_run_args(args, input_env=input_env)
-    context = click.get_current_context(silent=True)
-    grace_seconds_set = (
-        context is not None
-        and context.get_parameter_source("grace_seconds") != click.core.ParameterSource.DEFAULT
-    )
     try:
         if input_env is not None:
             _reject_flags_under_input_env(
@@ -807,72 +854,6 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
         _report_unexpected(exc)
         returncode = 4
     sys.exit(returncode)
-
-
-def run_via_env_input(
-    input_env: str,
-    output_var: str,
-    child_cmd: list[str],
-    *,
-    suppress_kubeconfig: bool = False,
-) -> None:
-    """Invoke ``run``'s env-input mode programmatically, without re-parsing.
-
-    A programmatic caller (the ``tunstrap_tofu`` console entry) already knows
-    its input/output variable names and child command and does not need Click's
-    argv parser. This delegates to ``run_command``'s callback so every pre-spawn
-    check, the whole spawn window, and the teardown path are shared with the CLI
-    entry — not duplicated. ``run_command`` always exits; the trailing
-    ``sys.exit`` is the unreachable safety net for readers and type checkers.
-
-    No ``grace_seconds`` parameter: ``run_command`` overwrites it from
-    ``schema.daemon.shutdown_grace_seconds`` before use, same as ``--input-env``.
-
-    Generic on purpose: this helper carries no Terraform vocabulary, only the
-    variables and flags a programmatic ``run`` caller supplies. The Terraform-
-    specific decisions (``TUNSTRAP_INPUT``, ``TF_VAR_tunstrap``, ``tofu``) live
-    in the proxy module.
-
-    ``run_command`` is invoked via ``.callback``, outside Click's group, so the
-    ``_UsageExit64`` wrapper that turns a ``click.UsageError`` into exit 64 does
-    not apply here. A ``UsageError`` from ``run``'s pre-spawn validation
-    (e.g. an ``--output-var`` name that collides with an injected key) is caught
-    and rendered with Click's own formatter, then exits 64 — preserving the
-    group's contract rather than surfacing as a raw traceback.
-    """
-    run = run_command.callback
-    if run is None:
-        # Unreachable in practice: Click always sets `.callback` on a
-        # decorated command. It must not be an `assert` though - that is an
-        # AssertionError, which is outside TunstrapError and so escapes the
-        # CLI's handler as a traceback, and `python -O` erases the check
-        # altogether, leaving a TypeError on the next line instead.
-        raise TunstrapError("run_command has no callback; Click wiring is broken", {})
-    try:
-        run(
-            ssh_key=None,
-            ssh_key_passphrase=None,
-            ssh_password_stdin=False,
-            targets=(),
-            kube=(),
-            fetch=(),
-            auto_stop_idle_seconds=None,
-            materialize=False,
-            log_file=None,
-            input_env=input_env,
-            output_var=output_var,
-            session_dir=None,
-            # run_command's own default (cli.py:578); overwritten before use.
-            grace_seconds=10,
-            args=tuple(child_cmd),
-            suppress_kubeconfig=suppress_kubeconfig,
-        )
-    except click.UsageError as exc:
-        # Mirror _UsageExit64 (cli.py:53-59): render Click's usage message and
-        # exit 64, never a raw traceback. Fires pre-spawn, so no daemon to clean.
-        exc.show()
-        sys.exit(64)
-    sys.exit(0)  # pragma: no cover — run_command.callback always exits
 
 
 def _teardown_run(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
@@ -1049,13 +1030,15 @@ def stop_command(session_dir: str, grace_seconds: int) -> None:
         # ``SessionIdentityUnreadable`` decides whether to delete, while here
         # nothing is deleted either way.
         _emit_stop_outcome(StopOutcome(False, str(exc)), session_dir)
-        sys.exit(0)
+        sys.exit(1)
     outcome = stop_session(session_dir, pid, grace_seconds, force=True)
     _emit_stop_outcome(outcome, session_dir)
     if _stop_resolved(outcome):
         # Deleting on an unresolved outcome would make the recovery command
         # ``run`` prints destroy the identity file it was invoked to recover.
         SessionDir.cleanup_path(session_dir)
+        return
+    sys.exit(1)
 
 
 @main.command("status")

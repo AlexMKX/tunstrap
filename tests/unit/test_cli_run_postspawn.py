@@ -506,7 +506,7 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     assert argv[0] == "tunstrap", f"the recovery command must invoke tunstrap: {argv}"
     recovery = CliRunner().invoke(main, argv[1:])
 
-    assert recovery.exit_code == 0, (
+    assert recovery.exit_code == 1, (
         f"tunstrap cannot parse the command it told the operator to run: "
         f"{argv} -> exit {recovery.exit_code}\n{recovery.output}"
     )
@@ -560,7 +560,7 @@ def test_the_printed_recovery_command_does_not_eat_what_it_recovers(
     argv = _recovery_command(result.stderr)
     recovery = CliRunner().invoke(main, argv[1:])
 
-    assert recovery.exit_code == 0
+    assert recovery.exit_code == 1
     assert json.loads(recovery.stdout)["stopped"] is False, "the daemon was not stopped"
     ate_the_handle = "the recovery command deleted the identity it was supposed to recover"
     assert identity.read_text() == "4242\n", ate_the_handle

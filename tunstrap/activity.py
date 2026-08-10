@@ -33,6 +33,7 @@ class _IdleConnectionTracker(asyncssh.SSHPortForwardTracker):
     """
 
     def __init__(self, aggregate: ActivityTracker) -> None:
+        """Bind each AsyncSSH tracker to its shared idle accounting state."""
         self._aggregate = aggregate
         self._opened = False
         self._closed = False
@@ -69,6 +70,7 @@ class ActivityTracker:
     """
 
     def __init__(self) -> None:
+        """Start idle accounting at construction so an unused daemon can expire."""
         self._active_count = 0
         self._last_activity_at = time.monotonic()
 

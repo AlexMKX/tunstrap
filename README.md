@@ -214,6 +214,13 @@ data in place, adds `"preserved": true` to its JSON line and explains itself on
 stderr. That includes the cases where it cannot read
 `tunnel-data/daemon.pid` at all — missing, unreadable or malformed: `stop`
 deletes nothing on any of them, so all three report `"preserved": true` too.
+`stop` exits 0 only for the three outcomes that clean `tunnel-data`: stopped,
+forced, and `not found`. It exits 1 for every preserved outcome: identity
+mismatch, identity check unavailable, still alive, identity changed during
+grace, and the three identity-read failures (missing, unreadable, or malformed
+`daemon.pid`). Repeating an unresolved recovery command keeps returning 1 until
+the session is resolved by hand; the loop's behaviour is unchanged, only its
+status, and repetition could never resolve a preserved session on its own.
 `"preserved"` is therefore present on exactly the outcomes that kept data, and
 absent on exactly those that cleaned it; the three cleaning shapes
 (`{"stopped": true}`, `{"stopped": true, "forced": true}` and

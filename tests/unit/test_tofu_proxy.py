@@ -30,7 +30,7 @@ import pytest
 import tunstrap.tofu_proxy as proxy
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
-from tunstrap.exceptions import TunstrapError
+from tunstrap.run_invocation import run_via_env_input
 
 pytestmark = pytest.mark.unit
 
@@ -292,25 +292,24 @@ def test_tunnel_decision_runs_tofu_in_process(
 
 
 def test_tunnelled_invokes_run_with_input_env_and_output_var(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    capturing_execvp: list[list[str]],
+    spawn: list[Any],
+    tmp_path: Path,
 ) -> None:
-    """The tunnelled branch calls run with the proxy's fixed variable names."""
-    seen_kwargs: dict[str, Any] = {}
-    original = cli_mod.run_command.callback
+    """The proxy works even if Click's callback attribute is unavailable.
 
-    def _capture(**kwargs: Any) -> Any:
-        seen_kwargs.update(kwargs)
-        return original(**kwargs)  # type: ignore[misc]
-
-    monkeypatch.setattr(cli_mod.run_command, "callback", _capture)
+    The proxy is a programmatic caller, not a Click extension: it must use the
+    plain run implementation directly rather than smuggling a private control
+    flag through ``run_command.callback``. Replacing the callback with ``None``
+    is the mutation this test rejects.
+    """
+    monkeypatch.setattr(cli_mod.run_command, "callback", None)
     monkeypatch.setenv(VAR, _payload())
     spawn[0](_success({"node": _conn(db=5432)}, session_dir=str(tmp_path)))
     with pytest.raises(SystemExit):
         _run_main(["plan"])
-    assert seen_kwargs["input_env"] == "TUNSTRAP_INPUT"
-    assert seen_kwargs["output_var"] == "TF_VAR_tunstrap"
-    assert seen_kwargs["suppress_kubeconfig"] is True
-    assert seen_kwargs["args"] == ("tofu", "plan")
+    assert capturing_execvp == []
 
 
 def test_tunnelled_suppresses_kubeconfig_in_child_env(
@@ -442,7 +441,7 @@ def test_run_via_env_input_preserves_the_exit_64_usage_contract(
 ) -> None:
     """A ``click.UsageError`` from ``run`` surfaces as exit 64, not a traceback.
 
-    ``run_via_env_input`` calls ``run_command.callback`` outside Click's group,
+    ``run_via_env_input`` calls the plain run implementation outside Click's group,
     so the ``_UsageExit64`` wrapper that normally turns a ``UsageError`` into
     exit 64 does not apply. Without an explicit guard the error propagates as a
     raw traceback. Triggered here with an ``--output-var`` name that collides
@@ -458,7 +457,7 @@ def test_run_via_env_input_preserves_the_exit_64_usage_contract(
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn_must_not_run)
     with pytest.raises(SystemExit) as excinfo:
-        cli_mod.run_via_env_input(VAR, "KUBECONFIG", ["true"])  # KUBECONFIG collides
+        run_via_env_input(VAR, "KUBECONFIG", ["true"])  # KUBECONFIG collides
     assert excinfo.value.code == 64
 
 
@@ -531,26 +530,3 @@ def test_exec_tofu_missing_binary_exits_127_without_stdout(
     assert excinfo.value.code == 127
     assert captured.out == ""
     assert captured.err == "tunstrap_tofu: cannot execute tofu: tofu not found\n"
-
-
-# --------------------------------------------------------------------------- #
-# run_via_env_input's own internal guard (cli.py) - reached through the
-# tunnelled branch above, but exercised directly here.
-# --------------------------------------------------------------------------- #
-
-
-def test_run_via_env_input_missing_callback_is_a_tunstrap_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The replaced ``assert``: a real TunstrapError, kept alive under -O.
-
-    ``assert run is not None`` was an AssertionError - outside the
-    TunstrapError hierarchy, so it would have escaped the CLI's handler as a
-    bare traceback - and ``python -O`` erases ``assert`` entirely, leaving a
-    ``TypeError: 'NoneType' object is not callable`` on the next line
-    instead. Click always sets ``.callback`` on a decorated command, so this
-    is only reachable by breaking that invariant directly.
-    """
-    monkeypatch.setattr(cli_mod.run_command, "callback", None)
-    with pytest.raises(TunstrapError, match="run_command has no callback"):
-        cli_mod.run_via_env_input("TUNSTRAP_INPUT", "TF_VAR_tunstrap", ["tofu", "plan"])

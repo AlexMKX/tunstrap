@@ -164,8 +164,8 @@ def test_status_unknown_session_dir_reports_not_alive(tmp_path: Path) -> None:
     assert out == {"alive": False}
 
 
-def test_stop_session_error_reports_and_exits_zero(tmp_path: Path) -> None:
-    """stop --session-dir <nonexistent> returns structured JSON + exit 0.
+def test_stop_session_error_reports_and_exits_one(tmp_path: Path) -> None:
+    """stop --session-dir <nonexistent> returns structured JSON + exit 1.
 
     Reads ``result.stdout``, not ``result.output``: click 8.4's CliRunner
     interleaves stderr into ``.output``, so once this outcome grew its
@@ -177,7 +177,7 @@ def test_stop_session_error_reports_and_exits_zero(tmp_path: Path) -> None:
     runner = CliRunner()
     missing = tmp_path / "no-such-session"
     result = runner.invoke(cli_main, ["stop", "--session-dir", str(missing)])
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["stopped"] is False
     assert (

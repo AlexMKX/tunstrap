@@ -63,6 +63,7 @@ async def _fetch_one(sftp: asyncssh.SFTPClient, spec: FileSpec, timeout: float) 
     try:
 
         async def _read_remote_file() -> bytes | str:
+            """Keep stat and read in one timeout so metadata cannot hang startup."""
             stat = await sftp.stat(spec.path)
             if stat.size is not None and stat.size > _MAX_FETCH_BYTES:
                 raise _CapExceeded

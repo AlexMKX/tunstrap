@@ -2,14 +2,11 @@
 
 `.github/workflows/test.yml` installs a kubectl whose version must match the
 kindest/node image pinned as ``NODE_IMAGE`` in tests/e2e/rig.py - the workflow
-comment at the kubectl step says so explicitly. Nothing enforced the coupling:
-the kubectl pin carries a ``# renovate:`` annotation but the node image does
-not, and even if it did, ``kubernetes/kubernetes`` and ``kindest/node`` are
-different Renovate datasources that bump independently, so annotations cannot
-make the two move together. The annotations are inert today anyway: this repo
-is outside the organization's Renovate autodiscovery scope, so nothing acts on
-the ``# renovate:`` comments here regardless of how carefully they are kept
-in sync.
+ comment at the kubectl step says so explicitly. Nothing enforced the coupling:
+ the pins originate from separate release streams, and Renovate annotations
+ cannot make distinct datasources move together. This repository is outside the
+ organization's Renovate autodiscovery scope, so the inert annotations were
+ removed rather than implying automated upkeep.
 
 A test is therefore the only enforcement that works regardless of enrolment.
 Lives in the unit tier (not e2e) on purpose: the e2e job ``needs: unit``, so a

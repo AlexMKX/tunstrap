@@ -130,6 +130,7 @@ class FileSpec(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_absolute(cls, value: str) -> str:
+        """Reject shell-expanded paths because the daemon must address an exact remote file."""
         if value.startswith("~"):
             raise ValueError("path must be literal (no '~' expansion)")
         if not value.startswith("/"):
@@ -165,6 +166,7 @@ class KubeTarget(BaseModel):
     @field_validator("kubeconfig_path")
     @classmethod
     def _validate_absolute(cls, value: str) -> str:
+        """Reject shorthand paths before a remote kubeconfig request is constructed."""
         if value.startswith("~"):
             raise ValueError("kubeconfig_path must be literal (no '~' expansion)")
         if not value.startswith("/"):
@@ -208,6 +210,7 @@ class NodeInput(BaseModel):
     @field_validator("remote_targets", mode="before")
     @classmethod
     def _validate_remote_targets(cls, value: object) -> dict[str, RemoteTarget]:
+        """Normalize legacy strings at the boundary so workers see one target shape."""
         if value is None:
             return {}
         if not isinstance(value, dict):
@@ -251,6 +254,7 @@ class NodeInput(BaseModel):
     @field_validator("fetch_files")
     @classmethod
     def _validate_fetch_files(cls, value: dict[str, FileSpec] | None) -> dict[str, FileSpec] | None:
+        """Reject ambiguous or unbounded fetch maps before they reach one SFTP channel."""
         if value is None:
             return None
         if len(value) == 0:
@@ -266,6 +270,7 @@ class NodeInput(BaseModel):
     def _validate_kube_targets(
         cls, value: dict[str, KubeTarget] | None
     ) -> dict[str, KubeTarget] | None:
+        """Keep kube names safe for their later materialized-file namespace."""
         if value is None:
             return None
         if len(value) == 0:
@@ -278,6 +283,7 @@ class NodeInput(BaseModel):
 
     @model_validator(mode="after")
     def _validate_node_does_something(self) -> NodeInput:
+        """Reject inert SSH sessions that would consume a daemon without output."""
         if not self.remote_targets and not self.kube_targets and not self.fetch_files:
             raise ValueError(
                 "node must define at least one of remote_targets, kube_targets, fetch_files"
@@ -296,6 +302,7 @@ class InputSchema(BaseModel):
     @field_validator("nodes")
     @classmethod
     def _validate_auth(cls, value: dict[str, NodeInput]) -> dict[str, NodeInput]:
+        """Fail validation before a worker discovers it has no SSH credential source."""
         for name, node in value.items():
             _validate_identifier_key("node", name)
             if not node.ssh_pkey and not node.ssh_password:
@@ -351,6 +358,7 @@ class FetchedFile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_xor(self) -> FetchedFile:
+        """Preserve an unambiguous success-or-error envelope for optional fetches."""
         has_success = self.content_b64 is not None
         has_error = self.error is not None
         if has_success and has_error:

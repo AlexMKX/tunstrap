@@ -132,6 +132,7 @@ class SessionDir:
     """Owns session.lock + the tunnel-data/ subdir for one daemon instance."""
 
     def __init__(self, *, session_dir: Path, generated: bool, lock_fd: int) -> None:
+        """Retain lock and ownership metadata needed for later cleanup."""
         self.session_dir = str(session_dir)
         self._root = session_dir
         self._generated = generated
@@ -299,6 +300,7 @@ class SessionDir:
         return str(path)
 
     def _validated_path(self, name: str) -> Path:
+        """Confine materialized names despite separator and symlink tricks."""
         # ``path.resolve().parent != self._data.resolve()`` is a no-op when
         # ``tunnel-data`` itself is the symlink -- both sides resolve through
         # the attacker's link and compare equal. The explicit ``is_symlink``
@@ -317,6 +319,7 @@ class SessionDir:
         return path
 
     def _write_file(self, name: str, content: bytes) -> str:
+        """Write legacy session metadata only after applying containment checks."""
         path = self._validated_path(name)
         fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         try:

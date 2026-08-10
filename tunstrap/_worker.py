@@ -29,6 +29,7 @@ _SCHEMA_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB is more than enough for any sane in
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse worker-only arguments so the public CLI remains the user interface."""
     parser = argparse.ArgumentParser(prog="tunstrap._worker", add_help=False)
     parser.add_argument("--ipc-fd", type=int, required=True)
     parser.add_argument("--session-dir", default=None)
@@ -65,6 +66,7 @@ def _read_schema_from_stdin() -> InputSchema:
 
 
 def _write_message(fd: int, message: dict[str, Any]) -> None:
+    """Finish partial writes so the parent receives a complete IPC frame."""
     payload = (json.dumps(message) + "\n").encode("utf-8")
     while payload:
         written = os.write(fd, payload)
@@ -87,6 +89,7 @@ def _report_pre_run_failure(ipc_fd: int, exc: BaseException) -> None:
 
 
 async def _run(args: argparse.Namespace, session: SessionDir) -> int:
+    """Run the detached daemon and return a status the parent can map reliably."""
     try:
         schema = _read_schema_from_stdin()
     except (DaemonError, ValidationError, UnicodeDecodeError, json.JSONDecodeError) as exc:

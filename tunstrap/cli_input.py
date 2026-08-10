@@ -30,6 +30,7 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, int]:
 
 
 def _split_host_port(hostpart: str, original: str) -> tuple[str, int]:
+    """Split literals before validation can report IPv6 and port errors precisely."""
     if hostpart.startswith("["):  # IPv6 literal: [addr] or [addr]:port
         end = hostpart.find("]")
         if end == -1:
@@ -52,6 +53,7 @@ def _split_host_port(hostpart: str, original: str) -> tuple[str, int]:
 
 
 def _parse_port(raw: str, original: str) -> int:
+    """Reject invalid ports before SSH receives an unusable endpoint."""
     try:
         port = int(raw)
     except ValueError as exc:

@@ -77,6 +77,7 @@ class KubeconfigView:
 
 
 def _yaml() -> YAML:
+    """Use round-trip YAML so patching a fetched config preserves safe syntax."""
     y = YAML(typ="rt")
     y.preserve_quotes = True
     return y
@@ -637,6 +638,7 @@ async def default_san_probe(host: str, port: int) -> bytes:
     """
 
     def _connect() -> bytes:
+        """Isolate blocking certificate inspection from the daemon's event loop."""
         ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE

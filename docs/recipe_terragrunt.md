@@ -37,6 +37,14 @@ is dealt with. A caller-supplied session dir must be owned by the invoking user;
 tunstrap clears its group/other write bits on use, because it stores 0600
 credentials (`tunnel-data/`) there — no pre-`chmod` is required.
 
+`stop` exits 0 only when it clears `tunnel-data`: stopped, forced, or `not
+found`. It exits 1 for every outcome that preserves data: identity mismatch,
+identity check unavailable, still alive, identity changed during grace, and the
+three identity-read failures (missing, unreadable, or malformed `daemon.pid`).
+Repeating an unresolved recovery command keeps returning 1 until the session is
+resolved by hand; the loop's behaviour is unchanged, only its status, and a
+preserved session was never recoverable through repetition alone.
+
 ## Prerequisites
 
 - `tunstrap_tofu` on `PATH` (the installed proxy entry point — see Installation

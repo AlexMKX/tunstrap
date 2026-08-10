@@ -160,7 +160,7 @@ def _run_tunnelled(argv: list[str]) -> None:
     """
     # Lazy on purpose: importing tunstrap.cli on the pass-through paths would
     # cost ~180 ms (click/pydantic/asyncssh), defeating the entry point.
-    from tunstrap.cli import run_via_env_input  # pylint: disable=import-outside-toplevel
+    from tunstrap.run_invocation import run_via_env_input  # pylint: disable=import-outside-toplevel
 
     run_via_env_input(
         _INPUT_ENV,
