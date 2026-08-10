@@ -188,45 +188,6 @@ def test_render_kube_env_multi_node_not_materialized_raises() -> None:
         render_kube_env(out)
 
 
-def test_predicted_env_keys_reserves_all_three_for_one_kube_target() -> None:
-    """Reserve every conditional kube-channel key whenever kube targets exist."""
-    schema = InputSchema.model_validate(
-        {
-            "nodes": {
-                "node": {
-                    "host": "h.example.net",
-                    "user": "u",
-                    "ssh_password": "p",
-                    "kube_targets": {"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}},
-                }
-            }
-        }
-    )
-    keys = predicted_env_keys(schema)
-    assert {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"} <= keys
-
-
-def test_predicted_env_keys_reserves_all_three_for_two_kube_targets_one_node() -> None:
-    """Reserve every conditional kube-channel key for multiple declared targets."""
-    schema = InputSchema.model_validate(
-        {
-            "nodes": {
-                "node": {
-                    "host": "h.example.net",
-                    "user": "u",
-                    "ssh_password": "p",
-                    "kube_targets": {
-                        "a": {"kubeconfig_path": "/etc/a.yaml"},
-                        "b": {"kubeconfig_path": "/etc/b.yaml"},
-                    },
-                }
-            }
-        }
-    )
-    keys = predicted_env_keys(schema)
-    assert {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"} <= keys
-
-
 def test_format_exports_quotes_safely():
     txt = format_exports({"A": "x'y", "B": "z"})
     assert "export A='x'\\''y'" in txt
@@ -234,29 +195,12 @@ def test_format_exports_quotes_safely():
 
 
 def test_predicted_env_keys_is_session_scalars_plus_kube_channel() -> None:
-    """predicted_env_keys collapses to the three survivors + the CONSERVATIVE
-    kube channel (all three names, not just the branch this input's exact
-    declared cardinality would hit) -- there is no other injected key left,
-    and the formula does not vary by exact count."""
-    schema = InputSchema.model_validate(
-        {
-            "nodes": {
-                "a": {
-                    "host": "h",
-                    "user": "u",
-                    "ssh_password": "p",
-                    "kube_targets": {"k3s": {"kubeconfig_path": "/etc/k3s.yaml"}},
-                },
-                "b": {
-                    "host": "h2",
-                    "user": "u",
-                    "ssh_password": "p",
-                    "kube_targets": {"k4s": {"kubeconfig_path": "/etc/k4s.yaml"}},
-                },
-            }
-        }
-    )
-    assert predicted_env_keys(schema) == {
+    """predicted_env_keys reserves the scalars and every scrubbed kube name.
+
+    The scrub is unconditional, so the reservation cannot depend on a schema
+    declaring kube targets (issue #23).
+    """
+    assert predicted_env_keys() == {
         "TUNSTRAP_SESSION_DIR",
         "TUNSTRAP_PID",
         "TUNSTRAP_OUTPUT_FILE",
@@ -266,36 +210,54 @@ def test_predicted_env_keys_is_session_scalars_plus_kube_channel() -> None:
     }
 
 
-def test_predicted_env_keys_no_kube_is_just_the_three_survivors() -> None:
-    schema = InputSchema.model_validate(
-        {
-            "nodes": {
-                "a": {
-                    "host": "h",
-                    "user": "u",
-                    "ssh_password": "p",
-                    "remote_targets": {"db": "127.0.0.1:1"},
-                }
-            }
-        }
+def test_predicted_reserved_kube_names_equal_the_unconditional_scrub_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation-anchor for issue #23: the kube names ``predicted_env_keys``
+    reserves must be exactly the names ``_build_child_env`` scrubs
+    unconditionally. Two independent lists that have to agree is the defect
+    class; ``KUBE_ENV_NAMES`` is the single constant both read, and this test
+    fails the moment either side stops using it -- delete the reservation and
+    ``reserved`` shrinks; delete the scrub and ``scrubbed`` shrinks. Built on a
+    zero-kube-target schema (the input where the old conditional reservation
+    under-reserved) and an isolated ``os.environ`` so the only scrubbable names
+    are the three under test."""
+    from tunstrap import cli as cli_mod
+    from tunstrap.cli import _build_child_env
+    from tunstrap.envrender import KUBE_ENV_NAMES
+
+    kube_names = {"KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"}
+    # The constant is itself the pinned source of truth.
+    assert KUBE_ENV_NAMES == kube_names
+
+    monkeypatch.setattr(cli_mod.os, "environ", {name: "inherited" for name in kube_names})
+    out = OutputSchema(
+        connections={"a": NodeOutput(ports={"db": 1}, kube_targets={}, fetch_files={})},
+        pid=1,
+        session_dir="/s",
+        started_at="now",
     )
-    assert predicted_env_keys(schema) == {
+    actual = _build_child_env(out, output_var=None, input_env=None)
+    scrubbed = kube_names - set(actual)
+    reserved = predicted_env_keys() - {
         "TUNSTRAP_SESSION_DIR",
         "TUNSTRAP_PID",
         "TUNSTRAP_OUTPUT_FILE",
     }
+    assert scrubbed == kube_names, "scrubber must remove all three unconditionally"
+    assert reserved == kube_names, "guard must reserve all three unconditionally"
 
 
 def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Safety-envelope half of the two-part anti-drift guard: predicted must be
-    a superset of actual, driven by the exact scenario that falsifies a
-    predictor that got the conservatism backwards -- two kube targets
-    DECLARED (one on an optional node that fails), only ONE materializes. A
-    NAME colliding with a key _build_child_env actually injects, but which
-    predicted_env_keys failed to reserve, would sail through the pre-spawn
-    collision check and then genuinely collide post-spawn."""
+    """Every key ``_build_child_env`` injects must be reserved beforehand.
+
+    Adding an injected key without reserving it in ``predicted_env_keys``
+    reopens issue #23: the pre-spawn collision guard would permit a NAME that
+    collides after spawn. The shrink fixture pins ``_kube_channel_keys``' set
+    behaviour, while the subset assertion pins injection ⊆ reservation.
+    """
     from tunstrap import cli as cli_mod
     from tunstrap.cli import _build_child_env
 
@@ -311,7 +273,7 @@ def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink
     monkeypatch.setattr(cli_mod.os, "environ", {})
 
     # Input: two kube targets declared, on two nodes -- one optional and about
-    # to fail. predicted_env_keys sees only this schema.
+    # to fail. The static reservation must still cover the output's exact keys.
     schema = InputSchema.model_validate(
         {
             "nodes": {
@@ -346,13 +308,13 @@ def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink
         warnings=[TunnelWarning(node="b", error="optional node refused the forward")],
     )
     actual = _build_child_env(out, output_var=None, input_env=None)
-    # Subset, not equality: predicted (conservative, computed from input
-    # cardinality 2) legitimately claims MORE than actual (exact, computed
-    # from output cardinality 1) -- that asymmetry is the whole point.
-    assert set(actual) <= predicted_env_keys(schema)
-    # Anti-vacuity: KUBE_CONFIG_PATHS specifically must be in the prediction
-    # even though it is NOT in the actual export (the >=2 branch never fires
-    # here) -- this is the exact key an exact-cardinality predictor would
-    # have wrongly omitted.
-    assert "KUBE_CONFIG_PATHS" in predicted_env_keys(schema)
+    declared_kube_target_count = sum(len(node.kube_targets or {}) for node in schema.nodes.values())
+    actual_kube_target_count = sum(len(node.kube_targets) for node in out.connections.values())
+    assert (declared_kube_target_count, actual_kube_target_count) == (2, 1)
+    # Subset, not equality: the static reservation legitimately claims MORE
+    # than the exact output export -- that asymmetry is the whole point.
+    assert set(actual) <= predicted_env_keys()
+    # One materialized file selects the single-file channel, despite two
+    # declared kube targets before the optional node failed.
+    assert "KUBE_CONFIG_PATH" in actual
     assert "KUBE_CONFIG_PATHS" not in actual

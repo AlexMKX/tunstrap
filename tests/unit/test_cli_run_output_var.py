@@ -162,6 +162,26 @@ def test_collision_with_kubeconfig_is_usage_error(
     assert len(spawn) == 1, "a usage error must not spawn a daemon"
 
 
+@pytest.mark.parametrize("name", ["KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"])
+def test_collision_with_kube_names_is_usage_error_even_without_kube_targets(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path, name: str
+) -> None:
+    """``run`` scrubs the three kube names from the inherited environment
+    *unconditionally* -- regardless of schema -- so they collide with
+    ``--output-var`` even for a payload that declares zero kube targets
+    (issue #23). Without this guard the scrubber would delete the operator's
+    inherited value and the output-var assignment would write the unified JSON
+    under it, silently clobbering it."""
+    spawn[0](_success({"node": _conn(db=5432)}, session_dir=str(tmp_path)))
+    monkeypatch.setenv(VAR, _payload())  # _node() declares no kube_targets
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", name, "--", "true"]
+    )
+    assert result.exit_code == 64
+    assert name in result.output
+    assert len(spawn) == 1, "a usage error must not spawn a daemon"
+
+
 def test_tunstrap_prefixed_output_var_name_is_accepted(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:

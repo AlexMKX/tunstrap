@@ -192,9 +192,14 @@ Variables emitted (no node segment; names upper-cased, non-alphanumerics → `_`
 
 ### `run` (foreground wrapper with guaranteed teardown)
 
-`run` opens the tunnel, injects the same `TUNSTRAP_*` / `KUBECONFIG`
-environment into a child command, waits for it, and then **always attempts
-teardown** (even if the child crashes or fails to launch). Teardown normally
+`run` opens the tunnel and injects the same `TUNSTRAP_*` / `KUBECONFIG`
+environment into a child command. It always removes inherited `KUBECONFIG`,
+`KUBE_CONFIG_PATH`, and `KUBE_CONFIG_PATHS` before starting the child, even
+when the input has no kube targets. A direct `tunstrap run host -- kubectl ...`
+therefore does not retain an unrelated operator kube configuration.
+
+`run` waits for the child and then **always attempts teardown** (even if the
+child crashes or fails to launch). Teardown normally
 stops the daemon and removes the session data. When it cannot confirm the stop
 — the stop reports a failure, raises, or the recorded identity is unreadable —
 it **keeps** the session data instead and prints the `tunstrap stop
@@ -314,7 +319,8 @@ the spec's "Out of scope".
   plugin, `external` data source and `local-exec` provisioner.
 
 - `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`, else exit `64`.
-- `NAME` may not collide with a variable `run` itself injects, else exit `64`.
+- `NAME` may not collide with a variable `run` itself injects or scrubs, else
+  exit `64`.
   Collision with an unrelated inherited variable is a documented overwrite.
 - **One node:** scalars and `KUBECONFIG` as usual, plus `NAME` if given.
 - **More than one node:** `NAME` only — no `TUNSTRAP_*` scalars, because

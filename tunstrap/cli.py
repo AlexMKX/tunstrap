@@ -23,6 +23,7 @@ from tunstrap.cli_input import (
 )
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
+    KUBE_ENV_NAMES,
     format_exports,
     materialized_output_path,
     predicted_env_keys,
@@ -333,17 +334,17 @@ def _split_run_args(
     return connection, cmd
 
 
-def _validate_output_var(name: str, schema: InputSchema) -> None:
+def _validate_output_var(name: str) -> None:
     """Reject an ``--output-var`` NAME that is invalid or would collide.
 
-    Evaluated pre-spawn against the *input* schema, because the output schema
-    does not exist yet and a usage error must never be able to orphan a
-    daemon. Collision with an unrelated inherited variable is a documented
-    overwrite; only the keys ``run`` itself injects are protected.
+    Evaluated pre-spawn, because the output schema does not exist yet and a
+    usage error must never be able to orphan a daemon. Collision with an
+    unrelated inherited variable is a documented overwrite; only the keys
+    ``run`` itself injects or scrubs are protected.
     """
     if not _ENV_NAME_RE.match(name):
         raise click.UsageError(f"--output-var NAME must match [A-Za-z_][A-Za-z0-9_]*; got {name!r}")
-    if name in predicted_env_keys(schema):
+    if name in predicted_env_keys():
         raise click.UsageError(
             f"--output-var {name} collides with an environment key run already injects"
         )
@@ -418,7 +419,7 @@ def _build_child_env(
     child_env = dict(os.environ)
     if input_env is not None:
         child_env.pop(input_env, None)
-    for key in ("KUBECONFIG", "KUBE_CONFIG_PATH", "KUBE_CONFIG_PATHS"):
+    for key in KUBE_ENV_NAMES:
         child_env.pop(key, None)
     child_env.update(_session_scalars(output))
     child_env.update(render_kube_env(output))
@@ -665,7 +666,7 @@ def run_command(  # pylint: disable=too-many-locals,too-many-statements
         else:  # pragma: no cover - _split_run_args already rejected this arity
             raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
         if output_var is not None:
-            _validate_output_var(output_var, schema)
+            _validate_output_var(output_var)
     except TunstrapError as exc:
         # The validation window: nothing has been minted and nothing spawned,
         # so there is nothing to clean up. A click.UsageError is unrelated to
