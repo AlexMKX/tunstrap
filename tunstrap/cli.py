@@ -506,7 +506,8 @@ def _mint_session_dir(session_dir: str | None) -> tuple[str, str | None]:
     """Return (the session path to use, the root ``run`` minted, or ``None``).
 
     ``run`` must know the session path **before** spawning. When the caller
-    supplies none, the worker generates it (``session.py:53-56``), so the
+    supplies none, the worker generates it
+    (``tunstrap/session.py::SessionDir``), so the
     parent could only recover the path by parsing the success envelope — which
     makes cleanup depend on the very object whose validation can fail. Minting
     it here makes the path a precondition of spawning.
@@ -544,7 +545,7 @@ def _fail_before_child(exc: TunstrapError) -> NoReturn:
 def _report_unexpected(exc: BaseException) -> None:
     """Report an unexpected post-spawn failure as DaemonError JSON on stderr.
 
-    Mirrors ``start``'s top-level guard (``cli.py:241-254``) except for the
+    Mirrors ``start``'s top-level guard (``tunstrap/cli.py::start_command``) except for the
     channel: under the tofu-proxy pattern fd 1 belongs to the child, so ``run``
     never writes a diagnostic to stdout.
     """

@@ -21,8 +21,9 @@ Both survive a reading of the code that concludes they are redundant:
    the *message* a caller sees for an input with more than one defect. Callers
    surface that message as the `kube_target` warning text.
 
-Code: tunstrap/kube.py::parse_kubeconfig, ::_cluster_section, ::_user_section,
-::_string_field
+Code: tunstrap/kube.py::parse_kubeconfig,
+tunstrap/kube.py::_cluster_section, tunstrap/kube.py::_user_section,
+tunstrap/kube.py::_string_field
 Assertion: names the current context resolves to are plain `str` while the
 scalars copied straight out of the document are not; and for an input with two
 defects, the *first* check in source order is the one that reports. Both use

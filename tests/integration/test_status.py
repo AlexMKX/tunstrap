@@ -2,7 +2,7 @@
 
 Validates: alive-then-dead status transitions keyed off --session-dir
 through the real CLI binary.
-Code: tunstrap/cli.py::status
+Code: tunstrap/cli.py::status_command
 """
 
 from __future__ import annotations

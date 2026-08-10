@@ -107,10 +107,10 @@ def test_include_input_false_is_load_bearing_for_a_non_dict_secret(
     just a string inside a list it copies verbatim. ``include_input=False`` is
     then the only thing standing between the PEM and stderr.
 
-    Fails with the PEM in the rendered envelope if the guard at
-    ``cli_input.py:159`` is dropped. The same shape would isolate the other
-    three call sites (``cli_input.py:124``, ``schemas.py:217``,
-    ``cli.py:217``); this pins the one whose docstring makes the claim.
+    Fails with the PEM in the rendered envelope if
+    ``tunstrap/cli_input.py::build_single_node_schema`` drops its guard. The
+    same shape would isolate the other error-rendering call sites; this pins
+    the one whose docstring makes the claim.
     """
     secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nDEADBEEF\n"
     monkeypatch.setenv(

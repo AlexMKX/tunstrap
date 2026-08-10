@@ -486,7 +486,8 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     operator holding preserved session data — the entire point of preserving
     it — follows the instruction and gets a usage error. ``stop`` accepts only
     ``--session-dir`` and ``--grace-seconds``; it already forces
-    unconditionally (``cli.py:894``), so there is no ``--force`` to pass.
+    unconditionally (``tunstrap/cli.py::stop_command``), so there is no
+    ``--force`` to pass.
 
     The command is extracted from what ``run`` actually printed and fed to the
     real CLI, so this cannot drift from the message: any flag ``stop`` does not
@@ -701,7 +702,7 @@ def test_minted_root_is_discarded_when_the_worker_reports_the_failure(
     This is the narrower of the two spawn-failure classes. A plain
     ``DaemonError`` is what the worker itself authored: it reached its own
     guard, released the session lock and removed its session dir before
-    reporting (``_worker.py:169-190``), then exited. Nothing is running, so
+    reporting (``tunstrap/_worker.py::main``), then exited. Nothing is running, so
     ``teardowns == []`` is right *here* — but it is right because of who
     failed, not because "spawn raised". The sibling test below covers the case
     where that inference does not hold.
@@ -996,7 +997,7 @@ def test_lone_optional_node_failure_still_succeeds_with_only_a_warning(
     """A required:false node that failed is an expected outcome, not an internal error.
 
     manager.py builds ``connections`` from successful nodes only
-    (``manager.py:99-107``), so a lone optional node that never came up yields
+    (``tunstrap/manager.py::TunnelManager``), so a lone optional node that never came up yields
     a *success* envelope with ``connections == {}`` and a warning.
     ``_build_child_env`` no longer branches on connection count -- the
     unconditional session scalars and materialization apply regardless of

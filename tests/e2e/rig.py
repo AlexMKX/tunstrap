@@ -240,7 +240,8 @@ def write_tofu_recorder(bin_dir: Path, dump_dir: Path) -> Path:
     For `init` invocations the dumped environment carries `TUNSTRAP_INPUT`,
     i.e. the generated (test-only) SSH private key, so `dump_dir` and the
     dumps written into it are locked to owner-only - matching the 0700/0600
-    the production session paths already use (session.py:76,115) rather than
+    the production session paths already use
+    (``tunstrap/session.py::atomic_write``) rather than
     the default umask.
     """
     real = shutil.which("tofu")

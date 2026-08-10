@@ -442,7 +442,8 @@ def _has_exited(pid: int) -> bool:
     """True once ``pid`` has terminated, reaping it first when it is our child.
 
     ``os.kill(pid, 0)`` alone is not a liveness probe for a process we spawned.
-    ``run`` starts the daemon with ``subprocess.Popen`` (daemon.py:41) and never
+    ``run`` starts the daemon with ``subprocess.Popen``
+    (``tunstrap/daemon.py::spawn_daemon``) and never
     waits on it, so the daemon is a *child* of the CLI: when it exits it becomes
     a zombie, and the pid stays allocated — and keeps answering signal 0 — until
     somebody reaps it. The grace poll below therefore ran to its full deadline on

@@ -181,9 +181,9 @@ def predicted_env_keys() -> set[str]:
     ``KUBE_CONFIG_PATH``; >=2 -> ``KUBE_CONFIG_PATHS``) is irrelevant to this
     function: it returns what must be *protected*, not what will be *set*.
     Input cardinality can shrink by output time (an optional node/target can
-    fail without failing the run), so every kube name remains reserved. See the
-    "Anti-drift guard" section for the cardinality-shrink case this
-    conservative stance guards against. Used pre-spawn to reject a colliding
+    fail without failing the run), so every kube name remains reserved. The
+    cardinality-shrink invariant has a dedicated unit-test guard. Used
+    pre-spawn to reject a colliding
     --output-var NAME before a daemon exists.
     """
     return {"TUNSTRAP_SESSION_DIR", "TUNSTRAP_PID", "TUNSTRAP_OUTPUT_FILE"} | KUBE_ENV_NAMES

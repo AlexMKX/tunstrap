@@ -261,7 +261,8 @@ def test_predicted_env_keys_covers_actual_injected_keys_under_cardinality_shrink
     from tunstrap import cli as cli_mod
     from tunstrap.cli import _build_child_env
 
-    # _build_child_env starts from dict(os.environ) (cli.py:394), so without
+    # _build_child_env starts from dict(os.environ)
+    # (tunstrap/cli.py::_build_child_env), so without
     # isolating it first, `set(actual)` is the whole ambient environment
     # (PATH, HOME, ...) and any comparison against it is meaningless in any
     # real process. Isolate BEFORE calling it, not after: subtracting

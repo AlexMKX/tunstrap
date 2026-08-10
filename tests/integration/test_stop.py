@@ -2,7 +2,7 @@
 
 Validates: stop terminates an alive daemon, refuses on wrong identity,
 and reports not-found on a non-existent PID.
-Code: tunstrap/cli.py::stop
+Code: tunstrap/cli.py::stop_command
 """
 
 from __future__ import annotations

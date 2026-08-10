@@ -103,7 +103,7 @@ def test_chdir_init_passes_through_the_fixed_gap(e2e_preflight: None, tmp_path: 
     built a needless tunnel for ``-chdir`` inits. The proxy parses argv past
     global flags, so ``init`` is correctly identified as the subcommand. This is
     the e2e expression of the fix; the bypass set is pinned exhaustively in
-    tests/unit/test_tofu_proxy.py::test_should_bypass_*.
+    tests/unit/test_tofu_proxy.py::test_should_bypass_returns_true_for_the_pinned_bypass_set.
     """
     del e2e_preflight
     bin_dir = tmp_path / "bin"
