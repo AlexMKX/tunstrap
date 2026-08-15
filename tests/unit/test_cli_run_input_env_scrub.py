@@ -12,7 +12,9 @@ PEM bytes* appear under no key at all — paired with a positive check that the
 environment is still a real inherited one, so a fix that handed the child an
 empty environment could not pass.
 Method: CliRunner with spawn_daemon, subprocess.Popen and _teardown_run
-monkeypatched; the child env is captured off the fake Popen.
+monkeypatched; the child env is captured off the fake Popen. The one
+exception is the reused-NAME case, which ``run`` now rejects outright, so it
+calls ``_build_child_env`` directly — see that test's own docstring.
 """
 
 from __future__ import annotations
@@ -163,20 +165,30 @@ def test_scrub_is_narrow_and_leaves_the_rest_of_the_environment_alone(
 
 
 def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
-    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--input-env X --output-var X` yields the output, never the input secret.
+    """`_build_child_env` pops ``input_env`` before assigning ``output_var``,
+    so reusing one NAME for both never restores the input secret under it.
 
-    Nothing rejects reusing one name for both flags (``_validate_output_var``
-    only guards the keys ``run`` injects), so the ordering inside
-    ``_build_child_env`` is what decides this: the scrub happens first, then
-    the projected output is written. The reverse order would delete the output
-    and leave the child with neither — or, worse, leave the secret in place.
+    ``run`` itself can no longer produce ``--input-env X --output-var X`` --
+    ``_validate_output_var`` rejects the combination as a usage error
+    (issue #31) -- so this exercises ``_build_child_env`` directly at unit
+    level, which is the only place left that combination can still be
+    constructed. The scrub happens first, then the projected output is
+    written; the reverse order would delete the output and leave the child
+    with neither -- or, worse, leave the secret in place.
     """
-    env = _run(monkeypatch, spawn, tmp_path, "--output-var", VAR)
+    from tunstrap.cli import _build_child_env
+    from tunstrap.schemas import OutputSchema
+
+    monkeypatch.setenv(VAR, INPUT_PAYLOAD)
+    out = OutputSchema.model_validate(_success_payload("/s"))
+    env = _build_child_env(out, output_var=VAR, input_env=VAR)
 
     assert VAR in env, "the output variable should have been written under the reused name"
-    assert SSH_PKEY_PEM not in env[VAR], "the input secret survived under the reused name"
+    assert SSH_PKEY_PEM not in "\n".join(
+        env.values()
+    ), "the input secret survived somewhere in the child environment"
     assert json.loads(env[VAR])["session"]["pid"] == 99, "the value must be the output envelope"
 
 

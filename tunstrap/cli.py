@@ -326,13 +326,17 @@ def _split_run_args(
     return connection, cmd
 
 
-def _validate_output_var(name: str) -> None:
+def _validate_output_var(name: str, *, input_env: str | None) -> None:
     """Reject an ``--output-var`` NAME that is invalid or would collide.
 
     Evaluated pre-spawn, because the output schema does not exist yet and a
     usage error must never be able to orphan a daemon. Collision with an
     unrelated inherited variable is a documented overwrite; only the keys
-    ``run`` itself injects or scrubs are protected.
+    ``run`` itself injects or scrubs, plus ``--input-env``'s own NAME, are
+    protected. ``_build_child_env`` pops ``input_env`` before assigning
+    ``output_var``, so the two sharing a NAME is harmless today -- but that
+    is an ordering property, not a contract, and reusing one NAME for both
+    is almost certainly an operator mistake regardless.
     """
     if not _ENV_NAME_RE.match(name):
         raise click.UsageError(f"--output-var NAME must match [A-Za-z_][A-Za-z0-9_]*; got {name!r}")
@@ -340,6 +344,8 @@ def _validate_output_var(name: str) -> None:
         raise click.UsageError(
             f"--output-var {name} collides with an environment key run already injects"
         )
+    if name == input_env:
+        raise click.UsageError(f"--output-var {name} collides with --input-env {name}")
 
 
 def _reject_flags_under_input_env(
@@ -704,7 +710,7 @@ def _run_command(  # pylint: disable=too-many-locals,too-many-statements
         else:  # pragma: no cover - _split_run_args already rejected this arity
             raise click.UsageError("run requires USER@HOST[:PORT] or --input-env VAR")
         if output_var is not None:
-            _validate_output_var(output_var)
+            _validate_output_var(output_var, input_env=input_env)
     except TunstrapError as exc:
         # The validation window: nothing has been minted and nothing spawned,
         # so there is nothing to clean up. A click.UsageError is unrelated to

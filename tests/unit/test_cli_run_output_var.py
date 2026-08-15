@@ -182,6 +182,28 @@ def test_collision_with_kube_names_is_usage_error_even_without_kube_targets(
     assert len(spawn) == 1, "a usage error must not spawn a daemon"
 
 
+def test_collision_with_input_env_is_usage_error(
+    monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
+) -> None:
+    """``--output-var X --input-env X`` must be rejected (issue #31).
+
+    ``_build_child_env`` pops ``input_env`` before assigning ``output_var``,
+    so today the child receives the projected output and never the input
+    payload -- but nothing pins that ordering at the validation layer, so a
+    future reordering would turn a silent oddity into a private-key
+    disclosure. The two flags naming the same variable is almost certainly a
+    mistake regardless, so it is rejected pre-spawn like the other
+    collisions."""
+    spawn[0](_success({"node": _conn()}, session_dir=str(tmp_path)))
+    monkeypatch.setenv(VAR, _payload())
+    result = CliRunner().invoke(
+        main, ["run", "--input-env", VAR, "--output-var", VAR, "--", "true"]
+    )
+    assert result.exit_code == 64
+    assert VAR in result.output
+    assert len(spawn) == 1, "a usage error must not spawn a daemon"
+
+
 def test_tunstrap_prefixed_output_var_name_is_accepted(
     monkeypatch: pytest.MonkeyPatch, spawn: list[Any], tmp_path: Path
 ) -> None:
