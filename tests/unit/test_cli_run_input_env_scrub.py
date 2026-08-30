@@ -186,9 +186,8 @@ def test_scrub_runs_before_injection_so_a_reused_name_is_not_restored(
     env = _build_child_env(out, output_var=VAR, input_env=VAR)
 
     assert VAR in env, "the output variable should have been written under the reused name"
-    assert SSH_PKEY_PEM not in "\n".join(
-        env.values()
-    ), "the input secret survived somewhere in the child environment"
+    child_values = "\n".join(env.values())
+    assert SSH_PKEY_PEM not in child_values, "the input secret survived in the child environment"
     assert json.loads(env[VAR])["session"]["pid"] == 99, "the value must be the output envelope"
 
 
