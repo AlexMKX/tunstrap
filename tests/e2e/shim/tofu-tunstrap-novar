@@ -1,0 +1,24 @@
+#!/bin/sh
+# NEGATIVE CONTROL - test-only, never shipped to a consumer.
+#
+# Runs `tunstrap run` WITHOUT --output-var, so var.tunstrap keeps its "" default,
+# local.kubepath is "", and the providers take their inert branch - so an apply
+# through this control MUST fail. If it succeeds, something other than the
+# decoded config_path is reaching the cluster and every positive assertion in
+# this tier is worthless. That is why `env -u KUBECONFIG` is still here: the
+# main proxy removes KUBECONFIG in-process (suppress_kubeconfig); this control
+# drives `tunstrap run` directly (no --output-var to suppress), so it scrubs
+# KUBECONFIG on the child command line for the same reason - a broken chain must
+# fail, not silently reach the cluster through the injected KUBECONFIG.
+#
+# This is the --output-var negative control. It is independent of the main
+# tunstrap_tofu proxy (which always sets --output-var) and stays regardless of
+# the proxy migration. There is no longer a "main" shell shim to be
+# byte-identical to; the proxy is the shipped tunstrap_tofu entry point.
+
+[ -n "$TUNSTRAP_INPUT" ] || exec tofu "$@"
+
+case "$1" in init|-version) exec tofu "$@" ;; esac
+
+exec tunstrap run --input-env TUNSTRAP_INPUT \
+  -- env -u KUBECONFIG tofu "$@"

@@ -11,11 +11,11 @@ import pytest
 
 from tunstrap.exceptions import (
     DaemonError,
-    SessionActive,
-    TunstrapError,
     RequiredTunnelFailure,
     SchemaValidationError,
+    SessionActive,
     TunnelStartupError,
+    TunstrapError,
     exit_code_for,
 )
 
@@ -53,6 +53,27 @@ def test_to_error_output_does_not_leak_secrets() -> None:
     assert out["error"] == "SchemaValidationError"
     assert out["message"] == "bad"
     assert "ssh_pkey" not in out["details"]
+
+
+def test_to_error_output_recursively_scrubs_secrets() -> None:
+    """Nested validation details cannot retain SSH credentials."""
+    err = SchemaValidationError(
+        "bad",
+        {
+            "nested": {"ssh_password": "nested-password", "safe": "value"},
+            "errors": [
+                {"input": {"ssh_pkey": "nested-key", "safe": "still-here"}},
+                {"ssh_pkey_passphrase": "nested-passphrase"},
+            ],
+            "nested_lists": [[{"ssh_password": "list-password", "safe": "list-safe"}]],
+        },
+    )
+
+    assert err.to_error_output()["details"] == {
+        "nested": {"safe": "value"},
+        "errors": [{"input": {"safe": "still-here"}}, {}],
+        "nested_lists": [[{"safe": "list-safe"}]],
+    }
 
 
 def test_session_active_exit_code_is_3() -> None:

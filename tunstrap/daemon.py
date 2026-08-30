@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
+import time
 from typing import IO, Any
 
-from tunstrap.exceptions import DaemonError
+from tunstrap.exceptions import DaemonHandshakeError, DaemonHandshakeTimeoutError
 from tunstrap.schemas import InputSchema
 
 
@@ -22,23 +24,61 @@ def _open_log_target(path: str | None) -> int | IO[bytes]:
     """
     if path is None:
         return subprocess.DEVNULL
-    return open(path, "ab", buffering=0)  # noqa: SIM115  # closed by caller
+    return open(path, "ab", buffering=0)  # closed by caller
 
 
-def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[str, Any]:
+def _worker_env(input_env: str | None) -> dict[str, str]:
+    """Copy the parent environment minus the one variable known to be secret-bearing.
+
+    ``input_env`` is the name ``--input-env`` was actually given, not a
+    literal: the option takes an arbitrary name, so a scrub keyed on
+    ``TUNSTRAP_INPUT`` would leave the SSH private key PEM in the environment
+    of a long-lived detached process for every other name. Mirrors
+    ``cli._build_child_env``, which scrubs the same name from ``tofu``'s
+    environment — one rule, both children.
+
+    **Deliberately a filtered copy, not a minimal environment.** The worker
+    receives its schema over stdin and needs nothing else *from tunstrap*, but
+    it is still an ordinary process in the operator's session: it resolves
+    imports through ``PYTHONPATH``, may authenticate through ``SSH_AUTH_SOCK``,
+    and reaches the network under the operator's proxy and CA-bundle settings.
+    Handing it a minimal environment would trade a bounded, demonstrated leak
+    for an unbounded set of setups that silently stop working. It would also
+    buy no privilege boundary: worker and parent run as the same uid, and
+    ``/proc/<pid>/environ`` is owner-readable, so anyone who can read the
+    worker's environment can already read the parent's. The named variable is
+    different in kind — it is tunstrap's own injected secret, and tunstrap is
+    the only component that knows it is secret-bearing.
+    """
+    env = dict(os.environ)
+    if input_env is not None:
+        env.pop(input_env, None)
+    return env
+
+
+def spawn_daemon(
+    schema: InputSchema, session_dir: str | None = None, *, input_env: str | None = None
+) -> dict[str, Any]:
     """Spawn the worker, send the schema, read the IPC response, return it.
 
-    Returns the structured IPC message for any of the three worker outcomes:
-    ``success``, ``required_failure``, ``daemon_error``. Callers dispatch on
-    ``message["kind"]`` and map to CLI exit codes.
+    Returns the structured IPC message for any of the four worker outcomes:
+    ``success``, ``required_failure``, ``daemon_error``, ``session_active``.
+    Callers dispatch on ``message["kind"]`` and map to CLI exit codes. Those
+    are worker-authored: the worker cleaned up after itself before writing the
+    frame, so no daemon of ours survives them.
 
-    Raises ``DaemonError`` only when the parent itself cannot complete the
-    handshake (empty pipe, malformed JSON, unknown kind).
+    **This function is not atomic, and the seam is ``Popen``.** Before it, no
+    worker exists and a failure leaves nothing behind. After it, the worker is
+    launched and detached — so every failure from there on is *parent-side* and
+    raises ``DaemonHandshakeError``, telling the caller a daemon may be running
+    and must be stopped rather than abandoned. Callers that treat any spawn
+    failure as "no daemon exists" orphan the worker on exactly those paths.
     """
+    worker_env = _worker_env(input_env)
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
     try:
-        proc = subprocess.Popen(  # noqa: SIM115  # pylint: disable=consider-using-with  # detached; never wait()ed
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with  # detached; never wait()ed
             [
                 sys.executable,
                 "-m",
@@ -52,6 +92,7 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
             pass_fds=[ipc_write_fd],
             start_new_session=True,
             close_fds=True,
+            env=worker_env,
         )
     finally:
         os.close(ipc_write_fd)
@@ -61,7 +102,15 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
         else:
             log_target.close()
 
-    assert proc.stdin is not None
+    # Everything below this line runs with a detached worker already alive.
+    if proc.stdin is None:
+        # Unreachable with stdin=PIPE, but it must not be an `assert`: that is
+        # an AssertionError, which is outside TunstrapError and so escapes the
+        # CLI's handler as a traceback, and `python -O` erases the check
+        # altogether, leaving an AttributeError on the next line instead.
+        os.close(ipc_read_fd)
+        raise DaemonHandshakeError("worker stdin pipe unavailable", {})
+
     try:
         proc.stdin.write(schema.model_dump_json().encode("utf-8"))
         proc.stdin.close()
@@ -71,26 +120,107 @@ def spawn_daemon(schema: InputSchema, session_dir: str | None = None) -> dict[st
         proc.stdin = None
         _ = exc  # discarded; we surface via the IPC read path below
 
-    return _read_ipc_response(ipc_read_fd)
+    return _read_ipc_response(
+        ipc_read_fd,
+        proc,
+        timeout=schema.daemon.startup_timeout_seconds,
+        reap_timeout=schema.daemon.shutdown_grace_seconds,
+    )
 
 
-def _read_ipc_response(read_fd: int) -> dict[str, Any]:
-    """Block on the IPC pipe until EOF, parse, and return the message."""
+def _kill_timed_out_worker(proc: subprocess.Popen[bytes], reap_timeout: int) -> bool:
+    """Escalate a timed-out termination to SIGKILL without leaking OSError."""
+    if proc.pid <= 0 or proc.poll() is not None:
+        return proc.poll() is not None
     try:
-        with os.fdopen(read_fd, "rb") as reader:
-            raw = reader.read()
+        proc.kill()
+        try:
+            proc.wait(timeout=reap_timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+    except OSError:
+        return proc.poll() is not None
+
+
+def _reap_timed_out_worker(proc: subprocess.Popen[bytes], reap_timeout: int) -> bool:
+    """Terminate a live worker from Popen, escalating once, and report reaping.
+
+    ``Popen`` is the verified owner handle created in this process. Its positive
+    pid is checked before either signal so malformed stand-ins cannot target a
+    process group or a non-positive pid. Each wait is bounded by the configured
+    shutdown grace, keeping the parent-side startup failure bounded even if the
+    worker ignores both signals.
+    """
+    if proc.pid <= 0 or proc.poll() is not None:
+        return proc.poll() is not None
+    try:
+        proc.terminate()
+        proc.wait(timeout=reap_timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        return _kill_timed_out_worker(proc, reap_timeout)
+    except OSError:
+        return proc.poll() is not None
+
+
+def _read_ipc_response(
+    read_fd: int,
+    proc: subprocess.Popen[bytes],
+    *,
+    timeout: int,
+    reap_timeout: int,
+) -> dict[str, Any]:
+    """Read one worker IPC frame through EOF before the startup deadline.
+
+    Called only after ``Popen`` has detached the worker, so every failure here
+    is parent-side by construction and raises ``DaemonHandshakeError``. A
+    truncated or unparsable frame is precisely the case where we cannot tell
+    whether a worker is live, which is why the caller must assume one is. On a
+    deadline expiry the parent owns the verified ``Popen`` handle, terminates
+    that worker, and waits for it before surfacing the distinct timeout error.
+    """
+    deadline = time.monotonic() + timeout
+    try:
+        raw_parts: list[bytes] = []
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            readable, _, _ = select.select([read_fd], [], [], remaining)
+            if not readable:
+                raise TimeoutError
+            chunk = os.read(read_fd, 8192)
+            if not chunk:
+                break
+            raw_parts.append(chunk)
+    except TimeoutError as exc:
+        reaped = _reap_timed_out_worker(proc, reap_timeout)
+        raise DaemonHandshakeTimeoutError(
+            "worker IPC startup response timed out",
+            {"timeout_seconds": timeout, "worker_reaped": reaped, "pid": proc.pid},
+        ) from exc
     except OSError as exc:
-        raise DaemonError("failed to read worker IPC pipe", {"errno": exc.errno}) from exc
+        raise DaemonHandshakeError("failed to read worker IPC pipe", {"errno": exc.errno}) from exc
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    raw = b"".join(raw_parts)
 
     if not raw:
-        raise DaemonError("worker IPC pipe closed without a message", {})
+        raise DaemonHandshakeError("worker IPC pipe closed without a message", {})
 
     try:
         message: dict[str, Any] = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
-        raise DaemonError("worker IPC produced invalid JSON", {"position": exc.pos}) from exc
+        raise DaemonHandshakeError(
+            "worker IPC produced invalid JSON", {"position": exc.pos}
+        ) from exc
 
     kind = message.get("kind")
     if kind in {"success", "required_failure", "daemon_error", "session_active"}:
         return message
-    raise DaemonError("unexpected IPC message kind", {"kind": str(kind)})
+    raise DaemonHandshakeError("unexpected IPC message kind", {"kind": str(kind)})

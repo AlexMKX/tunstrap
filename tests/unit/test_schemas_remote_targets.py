@@ -13,6 +13,8 @@ from tunstrap.schemas import (
     _parse_host_port,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestParseHostPort:
     """Coverage of the host:port parser."""

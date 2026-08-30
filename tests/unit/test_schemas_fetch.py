@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from tunstrap.schemas import FileSpec, InputSchema, NodeInput
 from tests.unit.conftest import make_node
+from tunstrap.schemas import FileSpec, InputSchema, NodeInput
 
 pytestmark = pytest.mark.unit
 

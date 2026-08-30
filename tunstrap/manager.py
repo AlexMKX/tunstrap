@@ -21,6 +21,7 @@ from tunstrap.schemas import (
     NodeOutput,
     OutputSchema,
     TunnelWarning,
+    materialized_file_name,
 )
 from tunstrap.session import SessionDir
 from tunstrap.ssh import close_transport, open_connection, open_local_forwards
@@ -151,7 +152,11 @@ class TunnelManager:
 
         if node.fetch_files:
             try:
-                fetched, required_failures = await fetch_files(runtime.conn, node.fetch_files)
+                fetched, required_failures = await fetch_files(
+                    runtime.conn,
+                    node.fetch_files,
+                    timeout=node.ssh_options.connect_timeout,
+                )
             except _NODE_STARTUP_ERRORS as exc:
                 runtime.error = str(exc)
                 await close_transport(runtime.conn, runtime.listeners)
@@ -159,6 +164,8 @@ class TunnelManager:
                 runtime.listeners = []
                 return runtime
             runtime.fetched_files = fetched
+            if self._session is not None:
+                self._materialize_fetch_files(self._session, name, runtime.fetched_files)
             if required_failures:
                 runtime.error = f"required fetch_files failed: {required_failures}"
                 await close_transport(runtime.conn, runtime.listeners)
@@ -184,11 +191,7 @@ class TunnelManager:
             runtime.kube_targets = kube_out
             runtime.kube_warnings = kube_warn
             if self._session is not None:
-                for kname, kout in kube_out.items():
-                    path = self._session.materialize(
-                        f"{name}-{kname}", base64.b64decode(kout.content_b64)
-                    )
-                    runtime.kube_targets[kname] = kout.model_copy(update={"path": path})
+                self._materialize_kube_targets(self._session, name, runtime.kube_targets)
             if kube_required:
                 runtime.error = f"required kube_targets failed: {kube_required}"
                 await close_transport(runtime.conn, runtime.listeners)
@@ -199,3 +202,25 @@ class TunnelManager:
         runtime.success = True
         self._runtimes.append(runtime)
         return runtime
+
+    def _materialize_kube_targets(
+        self, session: SessionDir, node_name: str, kube_out: dict[str, KubeTargetOutput]
+    ) -> None:
+        """Atomically write each patched kubeconfig to its leaf and set ``.path``."""
+        for kname, kout in kube_out.items():
+            path = session.materialize_atomic(
+                materialized_file_name("kube", node_name, kname), base64.b64decode(kout.content_b64)
+            )
+            kube_out[kname] = kout.model_copy(update={"path": path})
+
+    def _materialize_fetch_files(
+        self, session: SessionDir, node_name: str, fetched: dict[str, FetchedFile]
+    ) -> None:
+        """Atomically write each successful fetched file to its leaf and set ``.path``."""
+        for fname, ff in fetched.items():
+            if ff.error is not None or ff.content_b64 is None:
+                continue
+            path = session.materialize_atomic(
+                materialized_file_name("fetch", node_name, fname), base64.b64decode(ff.content_b64)
+            )
+            fetched[fname] = ff.model_copy(update={"path": path})

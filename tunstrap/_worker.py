@@ -21,14 +21,16 @@ from pydantic import ValidationError
 
 from tunstrap.activity import ActivityTracker
 from tunstrap.exceptions import DaemonError, SessionActive
+from tunstrap.fdio import ShortWriteError, write_all
 from tunstrap.manager import TunnelManager
-from tunstrap.schemas import ErrorOutput, InputSchema, OutputSchema
+from tunstrap.schemas import ErrorOutput, InputSchema
 from tunstrap.session import SessionDir
 
 _SCHEMA_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB is more than enough for any sane input
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse worker-only arguments so the public CLI remains the user interface."""
     parser = argparse.ArgumentParser(prog="tunstrap._worker", add_help=False)
     parser.add_argument("--ipc-fd", type=int, required=True)
     parser.add_argument("--session-dir", default=None)
@@ -65,12 +67,12 @@ def _read_schema_from_stdin() -> InputSchema:
 
 
 def _write_message(fd: int, message: dict[str, Any]) -> None:
+    """Finish partial writes so the parent receives a complete IPC frame."""
     payload = (json.dumps(message) + "\n").encode("utf-8")
-    while payload:
-        written = os.write(fd, payload)
-        if written <= 0:
-            raise DaemonError("short write to IPC pipe", {"remaining": len(payload)})
-        payload = payload[written:]
+    try:
+        write_all(fd, payload)
+    except ShortWriteError as exc:
+        raise DaemonError("short write to IPC pipe", {"remaining": exc.remaining}) from exc
 
 
 def _report_pre_run_failure(ipc_fd: int, exc: BaseException) -> None:
@@ -87,6 +89,7 @@ def _report_pre_run_failure(ipc_fd: int, exc: BaseException) -> None:
 
 
 async def _run(args: argparse.Namespace, session: SessionDir) -> int:
+    """Run the detached daemon and return a status the parent can map reliably."""
     try:
         schema = _read_schema_from_stdin()
     except (DaemonError, ValidationError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -127,7 +130,9 @@ async def _run(args: argparse.Namespace, session: SessionDir) -> int:
         session.cleanup()
         return 2
 
-    assert isinstance(result, OutputSchema)
+    # result is OutputSchema here: start_all_and_build_output returns
+    # OutputSchema | ErrorOutput, and the ErrorOutput branch above returns 2,
+    # so mypy narrows the union to OutputSchema without a runtime check.
     _write_message(
         args.ipc_fd,
         {"kind": "success", "payload": result.model_dump(mode="json")},

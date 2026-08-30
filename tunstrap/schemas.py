@@ -22,6 +22,15 @@ def _validate_identifier_key(kind: str, name: str) -> None:
         raise ValueError(f"{kind} key {name!r}: must match ^[a-zA-Z_][a-zA-Z0-9_-]*$")
 
 
+def materialized_file_name(kind: str, node_name: str, item_name: str) -> str:
+    """Render a materialized-file leaf name for validated item kind and names.
+
+    The kind prefix makes names collision-free across kinds. Within-kind
+    uniqueness relies on the InputSchema validator failing closed.
+    """
+    return f"{kind}-{node_name}-{item_name}"
+
+
 def _parse_host_port(value: str) -> tuple[str, int]:
     """Parse 'host:port' or '[ipv6]:port' into (host, port).
 
@@ -67,12 +76,21 @@ class SSHOptions(BaseModel):
 
 
 class DaemonOptions(BaseModel):
-    """Daemon-side knobs: log file, shutdown grace, idle auto-stop."""
+    """Daemon-side knobs: log file, startup/shutdown deadlines, idle auto-stop."""
 
     model_config = ConfigDict(extra="forbid")
 
     log_file: str | None = None
     shutdown_grace_seconds: int = 10
+    startup_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum time the parent waits for the worker's startup IPC response. "
+            "On expiry the parent terminates the worker and waits up to "
+            "shutdown_grace_seconds before killing it."
+        ),
+    )
     auto_stop_idle_seconds: int | None = Field(
         default=None,
         ge=1,
@@ -112,6 +130,7 @@ class FileSpec(BaseModel):
     @field_validator("path")
     @classmethod
     def _validate_absolute(cls, value: str) -> str:
+        """Reject shell-expanded paths because the daemon must address an exact remote file."""
         if value.startswith("~"):
             raise ValueError("path must be literal (no '~' expansion)")
         if not value.startswith("/"):
@@ -147,6 +166,7 @@ class KubeTarget(BaseModel):
     @field_validator("kubeconfig_path")
     @classmethod
     def _validate_absolute(cls, value: str) -> str:
+        """Reject shorthand paths before a remote kubeconfig request is constructed."""
         if value.startswith("~"):
             raise ValueError("kubeconfig_path must be literal (no '~' expansion)")
         if not value.startswith("/"):
@@ -190,6 +210,7 @@ class NodeInput(BaseModel):
     @field_validator("remote_targets", mode="before")
     @classmethod
     def _validate_remote_targets(cls, value: object) -> dict[str, RemoteTarget]:
+        """Normalize legacy strings at the boundary so workers see one target shape."""
         if value is None:
             return {}
         if not isinstance(value, dict):
@@ -211,8 +232,14 @@ class NodeInput(BaseModel):
                 try:
                     parsed[handle] = RemoteTarget.model_validate(raw)
                 except ValidationError as exc:
+                    messages = "; ".join(
+                        error["msg"]
+                        for error in exc.errors(
+                            include_input=False, include_url=False, include_context=False
+                        )
+                    )
                     raise ValueError(
-                        f"remote_targets[{handle!r}]: invalid dict form: {exc}"
+                        f"remote_targets[{handle!r}]: invalid dict form: {messages}"
                     ) from exc
                 continue
             if not isinstance(raw, str):
@@ -227,6 +254,7 @@ class NodeInput(BaseModel):
     @field_validator("fetch_files")
     @classmethod
     def _validate_fetch_files(cls, value: dict[str, FileSpec] | None) -> dict[str, FileSpec] | None:
+        """Reject ambiguous or unbounded fetch maps before they reach one SFTP channel."""
         if value is None:
             return None
         if len(value) == 0:
@@ -242,6 +270,7 @@ class NodeInput(BaseModel):
     def _validate_kube_targets(
         cls, value: dict[str, KubeTarget] | None
     ) -> dict[str, KubeTarget] | None:
+        """Keep kube names safe for their later materialized-file namespace."""
         if value is None:
             return None
         if len(value) == 0:
@@ -253,7 +282,8 @@ class NodeInput(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_node_does_something(self) -> "NodeInput":
+    def _validate_node_does_something(self) -> NodeInput:
+        """Reject inert SSH sessions that would consume a daemon without output."""
         if not self.remote_targets and not self.kube_targets and not self.fetch_files:
             raise ValueError(
                 "node must define at least one of remote_targets, kube_targets, fetch_files"
@@ -272,6 +302,7 @@ class InputSchema(BaseModel):
     @field_validator("nodes")
     @classmethod
     def _validate_auth(cls, value: dict[str, NodeInput]) -> dict[str, NodeInput]:
+        """Fail validation before a worker discovers it has no SSH credential source."""
         for name, node in value.items():
             _validate_identifier_key("node", name)
             if not node.ssh_pkey and not node.ssh_password:
@@ -282,6 +313,37 @@ class InputSchema(BaseModel):
                     )
         return value
 
+    @model_validator(mode="after")
+    def _validate_kube_identity_names_are_unique(self) -> InputSchema:
+        """Reject colliding kube identities and materialized-file leaf names."""
+        identity_seen: dict[str, tuple[str, str]] = {}
+        for node_name, node in self.nodes.items():
+            for target_name in node.kube_targets or {}:
+                joined = f"tunstrap-{node_name}-{target_name}"
+                if joined in identity_seen:
+                    other_node, other_target = identity_seen[joined]
+                    raise ValueError(
+                        f"kube identity name collision: ({node_name!r}, {target_name!r}) "
+                        f"and ({other_node!r}, {other_target!r}) both render {joined!r}"
+                    )
+                identity_seen[joined] = (node_name, target_name)
+
+        materialized_seen: dict[str, tuple[str, str, str]] = {}
+        for node_name, node in self.nodes.items():
+            for kind, items in (("kube", node.kube_targets), ("fetch", node.fetch_files)):
+                for item_name in items or {}:
+                    leaf = materialized_file_name(kind, node_name, item_name)
+                    if leaf in materialized_seen:
+                        other_kind, other_node, other_item = materialized_seen[leaf]
+                        raise ValueError(
+                            "materialized file name collision: "
+                            f"({kind!r}, {node_name!r}, {item_name!r}) and "
+                            f"({other_kind!r}, {other_node!r}, {other_item!r}) "
+                            f"both render {leaf!r}"
+                        )
+                    materialized_seen[leaf] = (kind, node_name, item_name)
+        return self
+
 
 class FetchedFile(BaseModel):
     """Either a successful read (content_b64+size+sha256) or an error string."""
@@ -289,12 +351,14 @@ class FetchedFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content_b64: str | None = None
+    path: str | None = None
     size: int | None = None
     sha256: str | None = None
     error: str | None = None
 
     @model_validator(mode="after")
-    def _validate_xor(self) -> "FetchedFile":
+    def _validate_xor(self) -> FetchedFile:
+        """Preserve an unambiguous success-or-error envelope for optional fetches."""
         has_success = self.content_b64 is not None
         has_error = self.error is not None
         if has_success and has_error:
@@ -360,6 +424,57 @@ class OutputSchema(BaseModel):
     session_dir: str
     started_at: str
     warnings: list[TunnelWarning] = Field(default_factory=list)
+
+
+class UnifiedKubeRef(BaseModel):
+    """Kube reference in the unified output: never credentials, never content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None
+    context: str
+    endpoint: str
+
+
+class UnifiedSession(BaseModel):
+    """Session metadata block of the unified output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_dir: str
+    pid: int
+    started_at: str
+    warnings: list[TunnelWarning] = Field(default_factory=list)
+
+
+class UnifiedFetchRef(BaseModel):
+    """Fetched-file reference in the unified output: never content_b64."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str | None = None
+    size: int | None = None
+    sha256: str | None = None
+    error: str | None = None
+
+
+class UnifiedNode(BaseModel):
+    """One node's body in the unified output: ports, kube refs, fetch_files."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ports: dict[str, str] = Field(default_factory=dict)
+    kube: dict[str, UnifiedKubeRef] = Field(default_factory=dict)
+    fetch_files: dict[str, UnifiedFetchRef] = Field(default_factory=dict)
+
+
+class UnifiedOutput(BaseModel):
+    """The entire consumer-facing output: two reserved top-level keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session: UnifiedSession
+    nodes: dict[str, UnifiedNode]
 
 
 class ErrorOutput(BaseModel):

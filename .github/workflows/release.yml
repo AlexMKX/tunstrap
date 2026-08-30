@@ -27,11 +27,10 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip build
       - run: pip install -e ".[dev]"
-      - run: black --check .
       - run: ruff format --check .
       - run: ruff check .
       - run: pylint tunstrap/
-      - run: vulture tunstrap/ vulture_whitelist.py
+      - run: vulture tunstrap/
       - run: mypy --strict tunstrap
       - name: combined unit + integration coverage gate
         run: |

@@ -8,6 +8,8 @@ Code: tunstrap/manager.py
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,6 +25,7 @@ from tunstrap.schemas import (
     NodeOutput,
     OutputSchema,
 )
+from tunstrap.session import SessionDir
 
 pytestmark = pytest.mark.unit
 
@@ -69,7 +72,9 @@ async def test_no_fetch_files_skips_fetcher(monkeypatch: pytest.MonkeyPatch) -> 
     """When fetch_files is None the fetcher is never invoked."""
     called: list[Any] = []
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         called.append((conn, specs))
         return {}, []
 
@@ -85,21 +90,28 @@ async def test_no_fetch_files_skips_fetcher(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_fetch_files_results_populate_node_output(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Fetcher results land in NodeOutput.fetch_files unchanged."""
+    """Fetcher results are materialized to their fetch-prefixed leaf, path set."""
     fake_result = {"kubeconfig": FetchedFile(content_b64="YQ==", size=1, sha256="ca97")}
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return fake_result, []
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
     _patch_transport(monkeypatch, _FakeConn())
 
-    mgr = TunnelManager(_input(fetch={"kubeconfig": FileSpec(path="/k")}))
-    out = await mgr.start_all_and_build_output(pid=1, session_dir="/tmp/x")
+    session = SessionDir.create(supplied=None, base=tmp_path)
+    mgr = TunnelManager(_input(fetch={"kubeconfig": FileSpec(path="/k")}), session=session)
+    out = await mgr.start_all_and_build_output(pid=1, session_dir=session.session_dir)
     assert isinstance(out, OutputSchema)
-    assert out.connections["a"].fetch_files == fake_result
+    materialized = out.connections["a"].fetch_files["kubeconfig"]
+    expected_path = str(Path(session.session_dir) / "tunnel-data" / "fetch-a-kubeconfig")
+    assert materialized.path == expected_path
+    assert Path(expected_path).read_bytes() == base64.b64decode("YQ==")
+    assert materialized.content_b64 == "YQ=="
 
 
 @pytest.mark.asyncio
@@ -107,7 +119,9 @@ async def test_required_file_failure_aborts(monkeypatch: pytest.MonkeyPatch) -> 
     """A required-file failure aborts the node and closes its connection."""
     fake_conn = _FakeConn()
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return {"k": FetchedFile(error="SSH_FX_NO_SUCH_FILE")}, ["k"]
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
@@ -123,7 +137,9 @@ async def test_required_file_failure_aborts(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_soft_fail_file_keeps_node_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """An optional-file error keeps the node in OutputSchema."""
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         return {"k": FetchedFile(error="SSH_FX_NO_SUCH_FILE")}, []
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)
@@ -142,7 +158,9 @@ async def test_fetch_skipped_when_forward_fails(monkeypatch: pytest.MonkeyPatch)
     fake_conn = _FakeConn()
     fetch_called: list[bool] = []
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         fetch_called.append(True)
         return {}, []
 
@@ -173,7 +191,9 @@ async def test_fetch_transport_failure_stops_forwarder_and_aborts(
     """A transport-level failure in the fetcher aborts and closes resources."""
     fake_conn = _FakeConn()
 
-    async def fake_fetch_files(conn: Any, specs: Any) -> tuple[dict[str, FetchedFile], list[str]]:
+    async def fake_fetch_files(
+        conn: Any, specs: Any, *, timeout: float
+    ) -> tuple[dict[str, FetchedFile], list[str]]:
         raise ConnectionResetError("peer closed mid-fetch")
 
     monkeypatch.setattr(manager_mod, "fetch_files", fake_fetch_files)

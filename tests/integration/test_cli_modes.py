@@ -2,8 +2,9 @@
 
 Validates against the same Docker SSH fixtures as the other integration tests:
 - `start USER@HOST:PORT --ssh-key <file> --target NAME=... --output env` emits
-  shell `export` lines; the advertised TUNSTRAP_<NAME>_PORT accepts a TCP
-  connection (proves the forward is live); `stop --session-dir` cleans up.
+  shell `export` lines for the three session survivors; the port materialized
+  under TUNSTRAP_OUTPUT_FILE accepts a TCP connection (proves the forward is
+  live); `stop --session-dir` cleans up.
 - `run USER@HOST ... -- CMD` injects TUNSTRAP_*/KUBECONFIG, runs the child,
   tears the session down afterwards, and propagates the child's exit code.
 
@@ -20,6 +21,7 @@ tunstrap/cli_input.py, tunstrap/envrender.py.
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -27,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 
 pytestmark = pytest.mark.integration
 
@@ -109,10 +110,13 @@ def test_start_output_env_live_forward(
     env = _parse_exports(result.stdout)
     started_daemons.append(str(session_dir))
 
-    assert "TUNSTRAP_WEB_PORT" in env, env
-    port = int(env["TUNSTRAP_WEB_PORT"])
-    assert env["TUNSTRAP_WEB_ENDPOINT"] == f"127.0.0.1:{port}", env
+    assert "TUNSTRAP_WEB_PORT" not in env, env
     assert env["TUNSTRAP_SESSION_DIR"] == str(session_dir), env
+    assert "TUNSTRAP_OUTPUT_FILE" in env, env
+    with open(env["TUNSTRAP_OUTPUT_FILE"], encoding="utf-8") as materialized_file:
+        materialized = json.load(materialized_file)
+    endpoint = materialized["nodes"]["node"]["ports"]["web"]
+    port = int(endpoint.rsplit(":", 1)[1])
     assert _tcp_connect_ok(port), f"TCP connect to forwarded port {port} failed"
 
     stop = subprocess.run(
@@ -133,10 +137,13 @@ def test_run_success_and_teardown(
     session_dir = tmp_path / "session"
     connection = _connection(ssh_test_cluster)
 
-    # Child probes the injected TUNSTRAP_WEB_PORT via a host-side TCP connect.
+    # Child probes the materialized web port via a host-side TCP connect.
     probe = (
-        "import os, socket; "
-        "socket.create_connection(('127.0.0.1', int(os.environ['TUNSTRAP_WEB_PORT'])), 5).close()"
+        "import json, os, socket; "
+        "m = json.load(open(os.environ['TUNSTRAP_OUTPUT_FILE'])); "
+        "endpoint = m['nodes']['node']['ports']['web']; "
+        "port = int(endpoint.rsplit(':', 1)[1]); "
+        "socket.create_connection(('127.0.0.1', port), 5).close()"
     )
     result = subprocess.run(
         [

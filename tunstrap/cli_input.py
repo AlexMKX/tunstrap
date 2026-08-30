@@ -1,10 +1,22 @@
-"""Build a single-node InputSchema from CLI flags (issue #6)."""
+"""Build an InputSchema from the CLI's input channels (issue #6).
+
+One module per input channel would be three modules for one concern. Its five
+``build_*`` functions support the three channels a caller can supply an
+``InputSchema`` through — connection flags, stdin JSON, and an environment
+variable. ``build_start_schema`` is instead the ``start`` verb's selector
+between its flags and stdin channels. Schema decoding and validation failures
+raise ``SchemaValidationError`` (exit 1); that selector raises
+``click.UsageError`` (exit 64) for incompatible channel combinations.
+"""
 
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
+import click
 from pydantic import ValidationError
 
 from tunstrap.exceptions import SchemaValidationError
@@ -21,6 +33,7 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, int]:
 
 
 def _split_host_port(hostpart: str, original: str) -> tuple[str, int]:
+    """Split literals before validation can report IPv6 and port errors precisely."""
     if hostpart.startswith("["):  # IPv6 literal: [addr] or [addr]:port
         end = hostpart.find("]")
         if end == -1:
@@ -43,6 +56,7 @@ def _split_host_port(hostpart: str, original: str) -> tuple[str, int]:
 
 
 def _parse_port(raw: str, original: str) -> int:
+    """Reject invalid ports before SSH receives an unusable endpoint."""
     try:
         port = int(raw)
     except ValueError as exc:
@@ -67,6 +81,19 @@ def parse_named(items: tuple[str, ...], label: str) -> dict[str, str]:
             raise SchemaValidationError(f"--{label} duplicate name {name!r}", {"value": item})
         out[name] = value
     return out
+
+
+def connection_flags_present(
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+) -> bool:
+    """Detect connection flags before channel selection can cause side effects."""
+    return any([ssh_key, ssh_key_passphrase, ssh_password_stdin, targets, kube, fetch])
 
 
 def build_single_node_schema(
@@ -119,5 +146,160 @@ def build_single_node_schema(
         )
     except ValidationError as exc:
         raise SchemaValidationError(
-            "CLI input does not satisfy the schema", {"errors": json.loads(exc.json())}
+            "CLI input does not satisfy the schema",
+            {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
+        ) from exc
+
+
+def build_flag_schema(
+    connection: str,
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+    force_materialize: bool = False,
+) -> InputSchema:
+    """Assemble the flag-mode ``InputSchema`` straight from Click's parameters.
+
+    ``--ssh-password-stdin`` is read here rather than by the caller because the
+    password is one of the assembled fields, and reading it anywhere else would
+    put a second consumer on the same stdin the conflict guard inspects.
+    ``force_materialize`` is the verb-level override (``run`` always, ``start
+    --output env``); it can only turn materialization on, never off.
+    """
+    ssh_password: str | None = None
+    if ssh_password_stdin:
+        ssh_password = sys.stdin.readline().rstrip("\n")
+    daemon = DaemonOptions(
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize or force_materialize,
+        log_file=log_file,
+    )
+    return build_single_node_schema(
+        connection=connection,
+        ssh_key=ssh_key,
+        ssh_key_passphrase=ssh_key_passphrase,
+        ssh_password=ssh_password,
+        targets=targets,
+        kube=kube,
+        fetch=fetch,
+        daemon_opts=daemon,
+    )
+
+
+def build_start_schema(
+    connection: str | None,
+    *,
+    ssh_key: str | None,
+    ssh_key_passphrase: str | None,
+    ssh_password_stdin: bool,
+    targets: tuple[str, ...],
+    kube: tuple[str, ...],
+    fetch: tuple[str, ...],
+    auto_stop_idle_seconds: int | None,
+    materialize: bool,
+    log_file: str | None,
+    output_fmt: str,
+) -> InputSchema:
+    """Build ``start`` input from its exclusive flags and stdin channels.
+
+    ``--output env`` requires materialized kube paths in either channel.
+    ``--ssh-password-stdin`` exclusively owns stdin when flag input is used.
+    """
+    if connection is None:
+        if connection_flags_present(
+            ssh_key=ssh_key,
+            ssh_key_passphrase=ssh_key_passphrase,
+            ssh_password_stdin=ssh_password_stdin,
+            targets=targets,
+            kube=kube,
+            fetch=fetch,
+        ):
+            raise click.UsageError("connection flags require a USER@HOST[:PORT] argument")
+        schema = build_schema_from_stdin(sys.stdin.read())
+        if output_fmt == "env":
+            schema.daemon.materialize = True
+        return schema
+
+    if not ssh_password_stdin and sys.stdin.read().strip():
+        raise click.UsageError(
+            "cannot combine a connection argument with JSON on stdin; use flags or stdin, not both"
+        )
+    return build_flag_schema(
+        connection,
+        ssh_key=ssh_key,
+        ssh_key_passphrase=ssh_key_passphrase,
+        ssh_password_stdin=ssh_password_stdin,
+        targets=targets,
+        kube=kube,
+        fetch=fetch,
+        auto_stop_idle_seconds=auto_stop_idle_seconds,
+        materialize=materialize,
+        log_file=log_file,
+        force_materialize=(output_fmt == "env"),
+    )
+
+
+def build_schema_from_stdin(raw: str) -> InputSchema:
+    """Decode and validate an ``InputSchema`` from ``start``'s stdin payload.
+
+    The stdin twin of :func:`build_schema_from_env`, with the same three
+    failure shapes (absent, undecodable, contract violation) and the same
+    mandatory ``include_input=False`` scrub — a malformed node's offending
+    ``input`` is the ``ssh_pkey`` PEM itself.
+    """
+    if not raw.strip():
+        raise SchemaValidationError("no input: provide USER@HOST[:PORT] or JSON on stdin", {})
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaValidationError("stdin is not valid JSON", {"position": exc.pos}) from exc
+    try:
+        return InputSchema.model_validate(payload)
+    except ValidationError as exc:
+        raise SchemaValidationError(
+            "input does not satisfy the InputSchema contract",
+            {"errors": exc.errors(include_input=False, include_url=False, include_context=False)},
+        ) from exc
+
+
+def build_schema_from_env(var_name: str) -> InputSchema:
+    """Read, JSON-decode and validate an ``InputSchema`` from ``os.environ[var_name]``.
+
+    ``run`` owns a child that inherits stdin, so stdin is unavailable to it as
+    a control channel; the environment is the remaining out-of-band input a
+    parent has. Every failure is a ``SchemaValidationError`` (exit 1) with the
+    same three shapes ``start``'s stdin path produces.
+
+    ``exc.errors(include_input=False, ...)`` is mandatory: pydantic v2 error
+    entries embed the offending ``input``, which for a malformed node is the
+    ``ssh_pkey`` PEM itself, and ``TunstrapError._scrub`` cannot reach it.
+    """
+    raw = os.environ.get(var_name, "")
+    if not raw.strip():
+        raise SchemaValidationError(
+            f"environment variable {var_name} is unset or empty", {"var": var_name}
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SchemaValidationError(
+            f"environment variable {var_name} is not valid JSON",
+            {"var": var_name, "position": exc.pos},
+        ) from exc
+    try:
+        return InputSchema.model_validate(payload)
+    except ValidationError as exc:
+        raise SchemaValidationError(
+            "input does not satisfy the InputSchema contract",
+            {
+                "var": var_name,
+                "errors": exc.errors(include_input=False, include_url=False, include_context=False),
+            },
         ) from exc

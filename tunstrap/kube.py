@@ -1,10 +1,14 @@
 """Kube mode: parse a remote kubeconfig, choose a TLS server name, patch it.
 
 One kube_target maps to exactly one cluster: the kubeconfig's
-current-context. Other contexts/clusters are ignored and left byte-stable
-in the patched output. The fetched kubeconfig is untrusted input: it is
-parsed in ruamel round-trip/safe mode and parse failures become a typed
-KubeParseError (never a daemon crash).
+current-context. Other contexts are not selected, but their ``cluster``/
+``user`` references are rewritten when they point at the renamed entries, so
+a document in which several contexts share one cluster or user stays
+internally consistent after the rename; everything else in the file is left
+untouched. The fetched kubeconfig is untrusted input: it is parsed in ruamel
+round-trip mode, parse failures become a typed ``KubeParseError``, and a
+generated ``tunstrap-<node>-<target>`` identity that already exists in the
+file is rejected (not uniquified) for the same reason -- never a daemon crash.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ __all__ = [
     "dump_kubeconfig",
     "parse_kubeconfig",
     "patch_view",
+    "rename_identities",
     "run_kube_targets",
     "sans_from_cert",
 ]
@@ -49,11 +54,18 @@ class KubeconfigView:
     """Extracted current-context view plus the live parsed document.
 
     `doc` is the round-trip ruamel document used later for in-place patching
-    (comments/key order preserved). The scalar fields are the extracted
+    (comments/key order preserved). It is always a mapping: ``_load_root``
+    rejects a non-mapping root as a ``KubeParseError`` before a view is ever
+    built, so callers (and the type checker) can rely on that without a runtime
+    re-check. ``cluster_body`` is the live cluster mapping the current context
+    resolves to (the same object ``patch_view`` rewrites in place); carrying it
+    avoids re-resolving the cluster by name and re-checking what
+    ``_cluster_section`` already validated. The scalar fields are the extracted
     current-context cluster/user material.
     """
 
-    doc: object
+    doc: dict[str, object]
+    cluster_body: dict[str, object]
     context_name: str
     cluster_name: str
     user_name: str
@@ -65,6 +77,7 @@ class KubeconfigView:
 
 
 def _yaml() -> YAML:
+    """Use round-trip YAML so patching a fetched config preserves safe syntax."""
     y = YAML(typ="rt")
     y.preserve_quotes = True
     return y
@@ -76,55 +89,27 @@ def parse_kubeconfig(raw: bytes) -> KubeconfigView:
     Raises KubeParseError on malformed YAML, missing current-context, or an
     unresolvable cluster/user reference.
     """
-    try:
-        doc = _yaml().load(io.BytesIO(raw))
-    except YAMLError as exc:
-        raise KubeParseError(f"kubeconfig is not valid YAML: {exc}") from exc
-    if not isinstance(doc, dict):
-        raise KubeParseError("kubeconfig root is not a mapping")
+    doc = _load_root(raw)
 
     current = doc.get("current-context")
     if not current or not isinstance(current, str):
         raise KubeParseError("kubeconfig has no current-context")
 
-    contexts = doc.get("contexts") or []
-    ctx = _find_named(contexts, current)
-    if ctx is None:
-        raise KubeParseError(f"current-context {current!r} not found in contexts")
-    _ctx_body_raw = ctx.get("context")
-    ctx_body: dict[str, object] = _ctx_body_raw if isinstance(_ctx_body_raw, dict) else {}
-    _cluster_name_raw = ctx_body.get("cluster")
-    _user_name_raw = ctx_body.get("user")
-    if not _cluster_name_raw or not _user_name_raw:
-        raise KubeParseError(f"context {current!r} missing cluster or user")
-    if not isinstance(_cluster_name_raw, str) or not isinstance(_user_name_raw, str):
-        raise KubeParseError(f"context {current!r} cluster or user is not a string")
-    cluster_name: str = _cluster_name_raw
-    user_name: str = _user_name_raw
+    # Equivalent to the former `doc.get("contexts") or []`: a truthy non-list
+    # (mapping, string, ...) never survived anyway, because _find_named below
+    # returns None for it and that raises. Narrowing here instead lets
+    # _ignored_contexts take a real list without re-guarding the type.
+    _contexts_raw = doc.get("contexts")
+    contexts: list[object] = _contexts_raw if isinstance(_contexts_raw, list) else []
 
-    cluster = _find_named(doc.get("clusters") or [], cluster_name)
-    if cluster is None:
-        raise KubeParseError(f"cluster {cluster_name!r} not found")
-    _cluster_body_raw = cluster.get("cluster")
-    cluster_body: dict[str, object] = (
-        _cluster_body_raw if isinstance(_cluster_body_raw, dict) else {}
-    )
-    server = cluster_body.get("server")
-    if not server or not isinstance(server, str):
-        raise KubeParseError(f"cluster {cluster_name!r} has no server")
-
-    user = _find_named(doc.get("users") or [], user_name)
-    if user is None:
-        raise KubeParseError(f"user {user_name!r} not found")
-    _user_body_raw = user.get("user")
-    user_body: dict[str, object] = _user_body_raw if isinstance(_user_body_raw, dict) else {}
-
-    ignored = [
-        str(c.get("name")) for c in contexts if isinstance(c, dict) and c.get("name") != current
-    ]
+    cluster_name, user_name = _context_refs(contexts, current)
+    cluster_body, server = _cluster_section(doc, cluster_name)
+    user_body = _user_section(doc, user_name)
+    ignored = _ignored_contexts(contexts, current)
 
     return KubeconfigView(
         doc=doc,
+        cluster_body=cluster_body,
         context_name=current,
         cluster_name=str(cluster_name),
         user_name=str(user_name),
@@ -136,6 +121,80 @@ def parse_kubeconfig(raw: bytes) -> KubeconfigView:
         client_key_data=_string_field(user_body, "client-key-data", user_name),
         ignored_contexts=ignored,
     )
+
+
+def _load_root(raw: bytes) -> dict[str, object]:
+    """Load raw kubeconfig bytes as a round-trip YAML mapping.
+
+    The returned document is the live ruamel object later patched in place, so
+    it must stay the round-trip type (comments, quoting and key order intact).
+    """
+    try:
+        doc = _yaml().load(io.BytesIO(raw))
+    except YAMLError as exc:
+        raise KubeParseError(f"kubeconfig is not valid YAML: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise KubeParseError("kubeconfig root is not a mapping")
+    return doc
+
+
+def _context_refs(contexts: list[object], current: str) -> tuple[str, str]:
+    """Resolve the current context to the (cluster, user) names it references.
+
+    A context body that is absent or not a mapping is treated as empty, which
+    then fails the missing-cluster-or-user check.
+    """
+    ctx = _find_named(contexts, current)
+    if ctx is None:
+        raise KubeParseError(f"current-context {current!r} not found in contexts")
+    _ctx_body_raw = ctx.get("context")
+    ctx_body: dict[str, object] = _ctx_body_raw if isinstance(_ctx_body_raw, dict) else {}
+    _cluster_name_raw = ctx_body.get("cluster")
+    _user_name_raw = ctx_body.get("user")
+    if not _cluster_name_raw or not _user_name_raw:
+        raise KubeParseError(f"context {current!r} missing cluster or user")
+    if not isinstance(_cluster_name_raw, str) or not isinstance(_user_name_raw, str):
+        raise KubeParseError(f"context {current!r} cluster or user is not a string")
+    return _cluster_name_raw, _user_name_raw
+
+
+def _cluster_section(doc: dict[str, object], cluster_name: str) -> tuple[dict[str, object], str]:
+    """Return the named cluster's body and its `server` URL.
+
+    A cluster body that is absent or not a mapping is treated as empty, which
+    then fails the missing-server check.
+    """
+    cluster = _find_named(doc.get("clusters") or [], cluster_name)
+    if cluster is None:
+        raise KubeParseError(f"cluster {cluster_name!r} not found")
+    _cluster_body_raw = cluster.get("cluster")
+    cluster_body: dict[str, object] = (
+        _cluster_body_raw if isinstance(_cluster_body_raw, dict) else {}
+    )
+    server = cluster_body.get("server")
+    if not server or not isinstance(server, str):
+        raise KubeParseError(f"cluster {cluster_name!r} has no server")
+    return cluster_body, server
+
+
+def _user_section(doc: dict[str, object], user_name: str) -> dict[str, object]:
+    """Return the named user's body, or an empty mapping if it is not one.
+
+    Unlike cluster/context, an empty user body is legitimate: every credential
+    field is optional (token/exec-plugin kubeconfigs carry none of them).
+    """
+    user = _find_named(doc.get("users") or [], user_name)
+    if user is None:
+        raise KubeParseError(f"user {user_name!r} not found")
+    _user_body_raw = user.get("user")
+    return _user_body_raw if isinstance(_user_body_raw, dict) else {}
+
+
+def _ignored_contexts(contexts: list[object], current: str) -> list[str]:
+    """Names of every context in the file other than the current one."""
+    return [
+        str(c.get("name")) for c in contexts if isinstance(c, dict) and c.get("name") != current
+    ]
 
 
 def _find_named(items: object, name: str) -> dict[str, object] | None:
@@ -207,14 +266,13 @@ def patch_view(
     Rewrites `server:` to the local forwarded endpoint. On secure patch sets
     `tls-server-name`. On insecure patch sets `insecure-skip-tls-verify: true`
     and removes `certificate-authority-data`. Other clusters are untouched.
+
+    The cluster body mutated here is the live ruamel object ``parse_kubeconfig``
+    already resolved and validated (it has a ``server`` and is a mapping), so no
+    re-resolution or re-validation is needed -- the ``KubeconfigView`` carries
+    that object as ``cluster_body``.
     """
-    doc = view.doc
-    assert isinstance(doc, dict)
-    cluster = _find_named(doc.get("clusters") or [], view.cluster_name)
-    assert cluster is not None  # parse_kubeconfig guaranteed this
-    body_raw = cluster["cluster"]
-    assert isinstance(body_raw, dict), "parse_kubeconfig guaranteed cluster.cluster is a dict"
-    body: dict[str, object] = body_raw
+    body = view.cluster_body
     body["server"] = f"https://127.0.0.1:{local_port}"
     if insecure:
         body["insecure-skip-tls-verify"] = True
@@ -223,6 +281,145 @@ def patch_view(
     else:
         if tls_server_name is not None:
             body["tls-server-name"] = tls_server_name
+
+
+def _sweep_shared_refs(
+    contexts: list[object],
+    ctx_entry: dict[str, object],
+    old_cluster: str,
+    old_user: str,
+    new_name: str,
+) -> None:
+    """Repoint ``cluster``/``user`` on non-selected contexts that shared them.
+
+    The current-context's own entry (``ctx_entry``) has already been renamed in
+    place; every OTHER context whose ``cluster``/``user`` pointed at the same
+    entry is repointed at ``new_name`` so a multi-context document that shares
+    one cluster or user stays internally consistent after the rename. Entries
+    that are not mappings, or whose ``context`` body is not a mapping, are
+    skipped: the active context was already validated by the caller, and these
+    foreign/stale entries are left untouched on purpose.
+    """
+    for entry in contexts:
+        if entry is ctx_entry or not isinstance(entry, dict):
+            continue
+        other_body = entry.get("context")
+        if not isinstance(other_body, dict):
+            continue
+        if other_body.get("cluster") == old_cluster:
+            other_body["cluster"] = new_name
+        if other_body.get("user") == old_user:
+            other_body["user"] = new_name
+
+
+def rename_identities(
+    doc: dict[str, object],
+    node: str,
+    target: str,
+) -> str:
+    """Rename the current-context's cluster/user/context to a deterministic name.
+
+    ``tunstrap-<node>-<target>`` is used for cluster, user, and context alike.
+    Other contexts keep their own names, but their ``cluster``/``user``
+    references are rewritten when they point at the renamed entries, so a
+    document in which several contexts share one cluster or user stays
+    internally consistent after the rename (the non-selected contexts are NOT
+    left byte-stable -- only their own ``name`` is preserved).
+
+    The fetched kubeconfig is untrusted input. Every structural defect -- a
+    non-string current-context, a current-context absent from ``contexts``, a
+    non-mapping context body, cluster/user references that are not strings or
+    that name entries missing from ``clusters``/``users`` -- raises
+    ``KubeParseError``, as does a reserved-namespace collision where the file
+    already contains the generated ``tunstrap-<node>-<target>`` name in any of
+    ``clusters``/``users``/``contexts``. These are typed raises rather than
+    ``assert``: this function is public (exported via ``__all__``), so its
+    contract must hold for direct callers and ``python -O`` cannot be allowed
+    to erase the check. For the only in-tree caller the seven structural guards
+    are defence-in-depth: ``run_kube_targets`` always runs ``parse_kubeconfig``
+    on the same document first, and that dominates every structural case here
+    -- both functions narrow ``contexts`` with the same ``isinstance`` check,
+    resolve names with the same first-match ``_find_named``, and nothing
+    mutates ``current-context``/``contexts``/``clusters``/``users`` between the
+    two calls (``patch_view`` only rewrites the live cluster body's
+    server/TLS fields). The sole raise reachable from ``run_kube_targets`` is
+    therefore the reserved-namespace collision. All rejections run before any
+    mutation, so a rejection leaves ``doc`` unchanged.
+
+    A collision means the upstream file is using tunstrap's reserved
+    ``tunstrap-<node>-<target>`` namespace -- a misconfiguration or a shadowing
+    attempt -- and renaming around it would hide that. Uniquifying (``-2``
+    suffixes) is rejected on purpose: the deterministic name is a
+    consumer-facing literal (see ``docs/recipe_terragrunt.md``) and must not
+    become non-deterministic.
+    """
+    new_name = f"tunstrap-{node}-{target}"
+    current = doc.get("current-context")
+    if not isinstance(current, str):
+        raise KubeParseError(
+            f"kubeconfig current-context is not a string, got {type(current).__name__}"
+        )
+    contexts_raw = doc.get("contexts")
+    contexts: list[object] = contexts_raw if isinstance(contexts_raw, list) else []
+    ctx_entry = _find_named(contexts, current)
+    if ctx_entry is None:
+        raise KubeParseError(f"current-context {current!r} not found in contexts")
+    ctx_body_raw = ctx_entry.get("context")
+    if not isinstance(ctx_body_raw, dict):
+        raise KubeParseError(f"context {current!r} body is not a mapping")
+    old_cluster = ctx_body_raw.get("cluster")
+    old_user = ctx_body_raw.get("user")
+    if not isinstance(old_cluster, str):
+        raise KubeParseError(
+            f"context {current!r} cluster reference is not a string, "
+            f"got {type(old_cluster).__name__}"
+        )
+    if not isinstance(old_user, str):
+        raise KubeParseError(
+            f"context {current!r} user reference is not a string, got {type(old_user).__name__}"
+        )
+
+    # Reserved-namespace guard. Runs before any mutation so a rejection leaves
+    # the document untouched. ``_find_named`` returns first-match, which is
+    # exactly the existence probe needed here: ANY entry (the current triple's
+    # own included) bearing the generated name means the untrusted upstream is
+    # already in tunstrap's namespace and must be rejected, not worked around.
+    if (
+        _find_named(doc.get("contexts") or [], new_name) is not None
+        or _find_named(doc.get("clusters") or [], new_name) is not None
+        or _find_named(doc.get("users") or [], new_name) is not None
+    ):
+        raise KubeParseError(
+            f"identity name {new_name!r} already exists in the fetched kubeconfig; "
+            "the upstream file must not use tunstrap's reserved "
+            "'tunstrap-<node>-<target>' namespace"
+        )
+
+    # Resolve the cluster/user entries the current context names. These lookups
+    # run before any mutation for the same reason as the collision guard above:
+    # a half-renamed document on rejection would be worse than the original.
+    cluster_entry = _find_named(doc.get("clusters") or [], old_cluster)
+    if cluster_entry is None:
+        raise KubeParseError(
+            f"context {current!r} references cluster {old_cluster!r} not present in clusters"
+        )
+    user_entry = _find_named(doc.get("users") or [], old_user)
+    if user_entry is None:
+        raise KubeParseError(
+            f"context {current!r} references user {old_user!r} not present in users"
+        )
+
+    ctx_entry["name"] = new_name
+    ctx_body_raw["cluster"] = new_name
+    ctx_body_raw["user"] = new_name
+    cluster_entry["name"] = new_name
+    user_entry["name"] = new_name
+
+    doc["current-context"] = new_name
+
+    _sweep_shared_refs(contexts, ctx_entry, old_cluster, old_user, new_name)
+
+    return new_name
 
 
 def dump_kubeconfig(view: KubeconfigView) -> bytes:
@@ -249,8 +446,8 @@ def _string_field(body: dict[str, object], field_name: str, owner: str) -> str:
 ProbeFn = Callable[[str, int], Awaitable[bytes]]
 
 
-async def run_kube_targets(  # pylint: disable=too-many-locals,too-many-branches  # reason: per-target try/except/warning fan-out
-    conn: "asyncssh.SSHClientConnection",
+async def run_kube_targets(  # pylint: disable=too-many-locals  # reason: per-target try/except/warning fan-out
+    conn: asyncssh.SSHClientConnection,
     kube_targets: dict[str, KubeTarget],
     *,
     connect_timeout: int,
@@ -282,15 +479,6 @@ async def run_kube_targets(  # pylint: disable=too-many-locals,too-many-branches
                 required_failures.append(name)
             continue
 
-        for ignored in view.ignored_contexts:
-            warnings.append(
-                TunnelWarning(
-                    node=node_name,
-                    error=f"kube_target {name}: ignored context {ignored!r}",
-                    skipped=False,
-                )
-            )
-
         try:
             host, port = _split_host_port(view.server)
         except KubeParseError as exc:
@@ -320,11 +508,38 @@ async def run_kube_targets(  # pylint: disable=too-many-locals,too-many-branches
             await listener.wait_closed()
             continue
 
-        patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
-        patched = dump_kubeconfig(view)
+        try:
+            patch_view(view, local_port=local_port, tls_server_name=tls_name, insecure=insecure)
+            new_identity = rename_identities(view.doc, node_name, name)
+            patched = dump_kubeconfig(view)
+        except KubeParseError as exc:
+            warnings.append(TunnelWarning(node=node_name, error=f"kube_target {name}: {exc}"))
+            if target.required:
+                required_failures.append(name)
+            listener.close()
+            await listener.wait_closed()
+            continue
+        # Disclosure runs only on the success path: by here ``rename_identities``
+        # has actually rewritten the current-context's cluster/user, so a
+        # non-selected context sharing that cluster/user really did have its
+        # references rewritten. Emitting this earlier (before ``_split_host_port``
+        # / TLS resolution / ``rename_identities``) would assert a rewrite that a
+        # later failure never performed -- issue #20 defect 1.
+        for ignored in view.ignored_contexts:
+            warnings.append(
+                TunnelWarning(
+                    node=node_name,
+                    error=(
+                        f"kube_target {name}: non-selected context {ignored!r}"
+                        " (cluster/user references rewritten when they point at"
+                        " the renamed entries)"
+                    ),
+                    skipped=False,
+                )
+            )
         outputs[name] = KubeTargetOutput(
-            cluster_name=view.cluster_name,
-            context_name=view.context_name,
+            cluster_name=new_identity,
+            context_name=new_identity,
             local_port=local_port,
             endpoint=f"https://127.0.0.1:{local_port}",
             tls_server_name=None if insecure else tls_name,
@@ -360,7 +575,7 @@ def _split_host_port(server: str) -> tuple[str, int]:
     return host, port if port is not None else 443
 
 
-async def _fetch_one(conn: "asyncssh.SSHClientConnection", path: str) -> bytes:
+async def _fetch_one(conn: asyncssh.SSHClientConnection, path: str) -> bytes:
     """Read a single small file over SFTP (1 MiB cap), return raw bytes."""
     async with conn.start_sftp_client() as sftp:
         stat = await sftp.stat(path)
@@ -423,6 +638,7 @@ async def default_san_probe(host: str, port: int) -> bytes:
     """
 
     def _connect() -> bytes:
+        """Isolate blocking certificate inspection from the daemon's event loop."""
         ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE

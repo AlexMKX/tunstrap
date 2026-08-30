@@ -7,9 +7,13 @@ from typing import Any
 _SECRET_KEYS = frozenset({"ssh_pkey", "ssh_password", "ssh_pkey_passphrase"})
 
 
-def _scrub(details: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of details with secret keys (ssh_pkey/etc) removed."""
-    return {k: v for k, v in details.items() if k not in _SECRET_KEYS}
+def _scrub(value: Any) -> Any:
+    """Return a copy of values with SSH secret keys removed at every depth."""
+    if isinstance(value, dict):
+        return {key: _scrub(nested) for key, nested in value.items() if key not in _SECRET_KEYS}
+    if isinstance(value, list):
+        return [_scrub(nested) for nested in value]
+    return value
 
 
 class TunstrapError(Exception):
@@ -46,8 +50,37 @@ class DaemonError(TunstrapError):
     """Generic daemon-side failure surfaced via the IPC handshake."""
 
 
+class DaemonHandshakeError(DaemonError):
+    """The *parent* could not complete the handshake with a worker it launched.
+
+    The distinction from ``DaemonError`` is **who failed**, and it decides
+    whether a daemon is left running. A ``daemon_error`` IPC frame is
+    worker-authored: the worker reached its own guard, released the session
+    lock and removed its session dir before reporting, then exited — nothing
+    survives it. This one is raised only past the point where
+    ``subprocess.Popen`` has already detached the worker, so the worker may be
+    perfectly healthy, holding the session lock with tunnels open, while the
+    parent is the side that failed. Callers must stop it rather than delete its
+    session directory and walk away.
+
+    A subclass so that every existing ``except DaemonError`` keeps working; it
+    needs its own ``_EXIT_CODES`` entry because ``exit_code_for`` keys on the
+    exact type.
+    """
+
+
+class DaemonHandshakeTimeoutError(DaemonHandshakeError):
+    """The parent exceeded the configured deadline for the worker IPC response."""
+
+
 class KubeParseError(TunstrapError):
-    """A kubeconfig could not be parsed or lacked a usable current-context."""
+    """A fetched kubeconfig could not be used as-is.
+
+    Raised when a kubeconfig could not be parsed, lacked a usable
+    current-context, or already contained tunstrap's reserved
+    ``tunstrap-<node>-<target>`` name in its ``clusters``/``users``/``contexts``
+    (a reserved-namespace collision that is rejected, not uniquified).
+    """
 
 
 class SessionActive(TunstrapError):
@@ -60,6 +93,8 @@ _EXIT_CODES: dict[type[TunstrapError], int] = {
     KubeParseError: 2,
     SessionActive: 3,
     DaemonError: 4,
+    DaemonHandshakeError: 4,
+    DaemonHandshakeTimeoutError: 4,
 }
 
 
