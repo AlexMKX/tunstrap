@@ -123,10 +123,19 @@ class SessionDir:
         self._lock_fd = lock_fd
 
     @classmethod
-    def create(cls, *, supplied: str | None, base: Path | None = None) -> SessionDir:
+    def create(
+        cls,
+        *,
+        supplied: str | None,
+        base: Path | None = None,
+        owns_supplied_root: bool = False,
+    ) -> SessionDir:
         """Resolve the session dir, acquire session.lock, (re)create tunnel-data/.
 
         Raises ``SessionActive`` if a live daemon already holds the lock.
+        ``owns_supplied_root`` is for the worker-only case where its parent
+        securely minted ``supplied`` before spawning and ownership must survive
+        that process boundary; ordinary caller-supplied roots remain untouched.
         """
         if supplied is None:
             parent = base if base is not None else Path(tempfile.gettempdir())
@@ -150,7 +159,7 @@ class SessionDir:
             for directory in reversed(missing):
                 directory.mkdir(mode=0o700, exist_ok=True)
             cls._secure_supplied_root(root)
-            generated = False
+            generated = owns_supplied_root
 
         try:
             lock_fd = acquire_session_lock(root)
