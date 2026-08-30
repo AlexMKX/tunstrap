@@ -888,7 +888,7 @@ Mark with the `integration` marker like the other files. Read an existing integr
 
 - [ ] **Step 2: README**
 
-Add a section documenting: flag mode (`tunstrap start root@host --target api=127.0.0.1:6443`), `--output env` with capture/status-check/`eval`, and `run` (`tunstrap run root@host --kube k3s=/etc/rancher/k3s/k3s.yaml -- helm list`). Note exit-code semantics (child code wins; 3=session active).
+Add a section documenting: flag mode (`tunstrap start root@host --target api=127.0.0.1:6443`), `--output env` with `eval "$(...)"`, and `run` (`tunstrap run root@host --kube k3s=/etc/rancher/k3s/k3s.yaml -- helm list`). Note exit-code semantics (child code wins; 3=session active).
 
 - [ ] **Step 3: Full gates**
 
