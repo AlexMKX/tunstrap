@@ -24,7 +24,6 @@ dev = [
     "pytest-cov>=5.0,<8",
     "mypy>=1.13,<3",
     "ruff>=0.16,<0.17",
-    "black>=24.10,<26",
     "pylint>=3.3,<4",
     "vulture>=2.13,<3",
 ]
@@ -159,10 +158,6 @@ omit = [
     "tunstrap/_version.py",
     "tunstrap/_worker.py",
 ]
-
-[tool.black]
-line-length = 100
-target-version = ["py310"]
 
 [tool.pylint.main]
 fail-under = 9.0

@@ -45,9 +45,9 @@ _PYPROJECT = REPO_ROOT / "pyproject.toml"
 # A TOML table header: ``[tool.ruff.lint]`` -> group(1) = ``tool.ruff.lint``.
 _TABLE_HEADER = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 # extend-select = [...] inside the [tool.ruff.lint] body. Single-line array
-# (black/ruff-format keep short arrays unwrapped); a multi-line array fails the
-# match loudly so the guard is updated to the new shape rather than passing
-# silently.
+# (ruff format, the sole formatter, keeps short arrays unwrapped); a multi-line
+# array fails the match loudly so the guard is updated to the new shape rather
+# than passing silently.
 _EXTEND_SELECT = re.compile(r"^extend-select\s*=\s*\[([^\]]*)\]", re.MULTILINE)
 # A per-file-ignores entry: "glob" = [ ... ]. group(2) = glob, group(3) = array
 # body (single-line, same rationale as above).

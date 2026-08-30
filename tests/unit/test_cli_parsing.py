@@ -44,8 +44,9 @@ def test_version_flag() -> None:
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0
     expected = version("tunstrap")
-    # Local message vars: black and ruff format disagree on the multi-line
-    # ``assert cond, (msg)`` form, so hoist (established pattern in this file).
+    # Local message vars: hoisted per the pattern established across the test
+    # suite when black and ruff format disagreed on the multi-line
+    # ``assert cond, (msg)`` form (black is gone, #34; the pattern stays).
     mismatch_msg = (
         f"--version output does not match the resolved metadata version: {result.output!r}"
     )

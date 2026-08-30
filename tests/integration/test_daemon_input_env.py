@@ -77,8 +77,9 @@ def test_real_worker_does_not_inherit_the_input_variable(tmp_path: Path, var_nam
         assert identity.exists(), "worker did not publish its identity"
         worker_env = Path(f"/proc/{identity.read_text().strip()}/environ").read_bytes()
 
-        # Messages hoisted to locals: black and ruff format disagree on the
-        # parenthesised assert-message construct (recorded repo-wide).
+        # Messages hoisted to locals per the pattern established repo-wide
+        # when black and ruff format disagreed on the parenthesised
+        # assert-message construct (black is gone, #34; the pattern stays).
         leaked_name = f"the worker inherited {var_name}, which holds the SSH private key"
         leaked_value = "the input variable's value survived in the worker environment"
         assert f"{var_name}=".encode() not in worker_env, leaked_name
