@@ -164,16 +164,22 @@ tunstrap start root@edge1.example.net \
 > `^[a-zA-Z_][a-zA-Z0-9_-]*$`. Use a hostname (e.g. `localhost`,
 > `edge1.example.net`) rather than a bare IP literal in flag mode.
 
-### `--output env` (consume via `eval`)
+### `--output env` (capture, check, then `eval`)
 
 `start` defaults to `--output json`. With `--output env` it instead prints
 POSIX `export` lines and force-materializes both patched kubeconfigs and
 fetched files under `tunnel-data/` (mode 0600; see [On-disk
-materialization](#on-disk-materialization)), ready for `eval`:
+materialization](#on-disk-materialization)), ready for `eval`. Capture the
+exports and check `start` first: evaluating an empty capture would otherwise
+hide its non-zero status.
 
 ```bash
-eval "$(tunstrap start root@edge1 --ssh-key ~/.ssh/id_ed25519 \
-  --target api=127.0.0.1:6443 --kube k3s=/etc/rancher/k3s/k3s.yaml --output env)"
+TUNSTRAP_EXPORTS=$(tunstrap start root@edge1 --ssh-key ~/.ssh/id_ed25519 \
+  --target api=127.0.0.1:6443 --kube k3s=/etc/rancher/k3s/k3s.yaml --output env) || {
+  TUNSTRAP_STATUS=$?
+  exit "$TUNSTRAP_STATUS"
+}
+eval "$TUNSTRAP_EXPORTS"
 
 kubectl get nodes          # KUBECONFIG is exported automatically
 

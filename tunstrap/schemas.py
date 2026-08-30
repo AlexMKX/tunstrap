@@ -478,7 +478,7 @@ class UnifiedOutput(BaseModel):
 
 
 class ErrorOutput(BaseModel):
-    """Error envelope returned by ``tunstrap start`` on stdout."""
+    """Error envelope from ``start``: JSON stdout, or diagnostic stderr for env output."""
 
     model_config = ConfigDict(extra="forbid")
 
