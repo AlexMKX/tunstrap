@@ -323,6 +323,10 @@ is the node-keyed structured channel for that metadata.
 - `NAME` may not collide with a variable `run` itself injects or scrubs, else
   exit `64`.
   Collision with an unrelated inherited variable is a documented overwrite.
+- `NAME` may not equal the `--input-env` NAME, else exit `64`. The rejection is
+  pre-spawn; reusing one NAME for both flags is almost certainly an operator
+  mistake even though the child's environment drops the `--input-env` variable
+  before assigning `NAME`.
 - **Any node count:** the three session scalars are injected, as is the
   cardinality-appropriate kube channel when kube files exist; `NAME` is added
   if given. Ports remain available in the unified JSON or its materialized file,
