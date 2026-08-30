@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from tunstrap import cli as cli_mod
+from tunstrap import cli_stop as cli_stop_mod
 from tunstrap.cli import main
 from tunstrap.session import StopOutcome
 
@@ -146,7 +147,7 @@ def test_status_alive_by_session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyP
         captured["pid"] = pid
         return IdentityCheckResult.match
 
-    monkeypatch.setattr(cli_mod, "verify_session", fake_verify)
+    monkeypatch.setattr(cli_stop_mod, "verify_session", fake_verify)
     result = CliRunner().invoke(cli_mod.main, ["status", "--session-dir", str(tmp_path)])
     assert result.exit_code == 0
     out = json.loads(result.output)
@@ -205,7 +206,7 @@ def test_stop_removes_tunnel_data_on_success(
         calls.append((session_dir, pid, grace_seconds, force))
         return StopOutcome(True)
 
-    monkeypatch.setattr(cli_mod, "stop_session", _stop_session)
+    monkeypatch.setattr(cli_stop_mod, "stop_session", _stop_session)
 
     runner = CliRunner()
     result = runner.invoke(

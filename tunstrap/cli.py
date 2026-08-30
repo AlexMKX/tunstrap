@@ -20,7 +20,7 @@ from tunstrap.cli_input import (
     build_start_schema,
     connection_flags_present,
 )
-from tunstrap.cli_stop import _stop_resolved, status_command, stop_command
+from tunstrap.cli_stop import _stop_resolved, _warn, status_command, stop_command
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
     KUBE_ENV_NAMES,
@@ -38,7 +38,6 @@ from tunstrap.exceptions import (
     TunstrapError,
     exit_code_for,
 )
-from tunstrap.identity import verify_session
 from tunstrap.schemas import OutputSchema
 from tunstrap.session import (
     SessionDir,
@@ -46,15 +45,6 @@ from tunstrap.session import (
     SessionIdentityUnreadable,
     stop_session,
 )
-
-# ``stop_session`` and ``verify_session`` are re-exported (the former also
-# called directly by ``_teardown_run_inner``) because this module's namespace
-# is the patch seam the unit suite drives: tests patch ``cli.stop_session``
-# and ``cli.verify_session``, and the commands in ``cli_stop`` resolve them
-# through here at call time. Declared via ``__all__`` — the same re-export
-# mechanism ``kube.py`` uses — so the imports read as intentional to the
-# unused-import and strict-reexport checks alike.
-__all__ = ["stop_session", "verify_session"]
 
 _FC = TypeVar("_FC", bound=Callable[..., object])
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -846,20 +836,7 @@ def _warn_preserved(
             f"{verb}: {minted_root} was created by {verb} and is not removed by that "
             f"command; delete it once the daemon is dealt with\n"
         )
-    warn(recovery)
-
-
-def warn(message: str) -> None:
-    """Attempt a teardown diagnostic without allowing a closed stderr to escape.
-
-    Public (no leading underscore) because ``cli_stop``'s ``_emit_stop_outcome``
-    reaches it through this module's namespace — the patch seam — rather than
-    an import, which would close a static ``cli`` ↔ ``cli_stop`` cycle.
-    """
-    try:
-        sys.stderr.write(message)
-    except BaseException:  # noqa: BLE001, S110  # pylint: disable=broad-exception-caught
-        pass
+    _warn(recovery)
 
 
 def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
@@ -887,11 +864,11 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
             return
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
-        warn("run: could not remove: " + ", ".join(survivors) + "\n")
+        _warn("run: could not remove: " + ", ".join(survivors) + "\n")
     if minted_root is not None:
         remaining = SessionDir.remove_root(minted_root)
         if remaining:
-            warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
+            _warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
 
 
 # ``stop``/``status`` live in ``cli_stop`` (issue #32) and register here, which
