@@ -137,6 +137,13 @@ def _session_scalars(out: OutputSchema) -> dict[str, str]:
     }
 
 
+def _write_start_error(payload: object, output_fmt: str) -> None:
+    """Write a start error where its selected output contract expects it."""
+    stream = sys.stderr if output_fmt == "env" else sys.stdout
+    stream.write(json.dumps(payload) + "\n")
+    stream.flush()
+
+
 def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
     """Write ``start``'s envelope to stdout, then exit with the mapped code.
     Only ``--output env`` renders shell exports; ``write_materialized_output``
@@ -156,8 +163,9 @@ def _emit_start_result(message: dict[str, Any], output_fmt: str) -> None:
         out = OutputSchema.model_validate(message["payload"])
         sys.stdout.write(json.dumps(render_start_json(out)) + "\n")
     else:
-        sys.stdout.write(json.dumps(message["payload"]) + "\n")
-    sys.stdout.flush()
+        _write_start_error(message["payload"], output_fmt)
+    if kind == "success":
+        sys.stdout.flush()
     code = {"required_failure": 2, "daemon_error": 4, "session_active": 3}.get(kind)
     if code is not None:
         sys.exit(code)
@@ -189,7 +197,10 @@ def _start_recovery_handles(message: object) -> tuple[str, int] | None:
 
 
 def _report_start_post_spawn_failure(
-    exc: BaseException, message: object, supplied_session_dir: str | None
+    exc: BaseException,
+    message: object,
+    supplied_session_dir: str | None,
+    output_fmt: str,
 ) -> None:
     """Report an output failure without discarding a live daemon's handles.
 
@@ -218,10 +229,9 @@ def _report_start_post_spawn_failure(
             None,
             verb="start",
         )
-    sys.stdout.write(
-        json.dumps(DaemonError("unexpected failure during start", details).to_error_output()) + "\n"
+    _write_start_error(
+        DaemonError("unexpected failure during start", details).to_error_output(), output_fmt
     )
-    sys.stdout.flush()
 
 
 @main.command("start")
@@ -272,27 +282,23 @@ def start_command(  # pylint: disable=too-many-locals
         try:
             _emit_start_result(message, output_fmt)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            _report_start_post_spawn_failure(exc, message, session_dir)
+            _report_start_post_spawn_failure(exc, message, session_dir, output_fmt)
             sys.exit(4)
     except click.UsageError:
         raise
     except TunstrapError as exc:
-        sys.stdout.write(json.dumps(exc.to_error_output()) + "\n")
-        sys.stdout.flush()
+        _write_start_error(exc.to_error_output(), output_fmt)
         sys.exit(exit_code_for(exc))
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         # Top-level guard: surface any unexpected failure as DaemonError JSON and
         # exit 4 instead of dumping a Python traceback to a caller.
-        sys.stdout.write(
-            json.dumps(
-                DaemonError(
-                    "unexpected failure during start",
-                    {"type": type(exc).__name__},
-                ).to_error_output()
-            )
+        _write_start_error(
+            DaemonError(
+                "unexpected failure during start",
+                {"type": type(exc).__name__},
+            ).to_error_output(),
+            output_fmt,
         )
-        sys.stdout.write("\n")
-        sys.stdout.flush()
         sys.exit(4)
 
 

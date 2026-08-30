@@ -126,8 +126,9 @@ KUBECONFIG = <colon-joined materialized kube paths>
   exactly one in single-node modes).
 - Name sanitization: uppercase, every non-`[A-Z0-9]` → `_`. Duplicate sanitized
   keys are a build-time error (caught in tests).
-- `format_exports` single-quotes values with POSIX-safe escaping so
-  `eval "$(...)"` is safe.
+- `format_exports` single-quotes successful values with POSIX-safe escaping.
+  Callers must capture the output, check `start`'s status, and only then `eval`
+  it; failure diagnostics are not shell input.
 
 ### Why `KUBECONFIG` to a file
 
@@ -205,7 +206,7 @@ The CLI rejects contradictory invocations with a clear message:
 | `tunstrap/envrender.py` | New: `render_env` + `format_exports`. |
 | `tunstrap/cli.py` | `start` gains connection arg + conn-flags + `--output`; new `run` command; conflict validation. |
 | `tunstrap/session.py` / `manager.py` | Ensure fetch-file materialization path exists for env/run (extend existing kube materialize hook to fetched files). |
-| `README.md` | Document flag mode, `--output env` (`eval "$(...)"`), and `run`. |
+| `README.md` | Document flag mode, checked capture before `eval` for `--output env`, and `run`. |
 
 No changes to the IPC protocol, the daemon, or the lock — those are stable from
 Task A.

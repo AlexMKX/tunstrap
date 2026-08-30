@@ -94,8 +94,48 @@ def test_start_required_failure_returns_two(monkeypatch: pytest.MonkeyPatch) -> 
     )
     result = CliRunner().invoke(main, ["start"], input=payload)
     assert result.exit_code == 2
-    out = json.loads(result.output)
-    assert out["error"] == "RequiredTunnelFailure"
+    expected = {
+        "error": "RequiredTunnelFailure",
+        "message": "required tunnel(s) failed to start",
+        "details": {"failed": [{"node": "a", "error": "boom"}]},
+    }
+    assert result.stdout == json.dumps(expected) + "\n"
+    assert result.stderr == ""
+
+
+def test_start_required_failure_env_uses_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operational failure cannot become shell input under ``--output env``."""
+
+    error = {
+        "error": "RequiredTunnelFailure",
+        "message": "required tunnel(s) failed to start",
+        "details": {"failed": [{"node": "a", "error": "$(touch should-not-run)"}]},
+    }
+
+    def fake_spawn_daemon(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        return {"kind": "required_failure", "payload": error}
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn_daemon)
+    payload = json.dumps(
+        {
+            "nodes": {
+                "a": {
+                    "host": "h",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "remote_targets": {"p": "127.0.0.1:22"},
+                }
+            }
+        }
+    )
+
+    result = CliRunner().invoke(main, ["start", "--output", "env"], input=payload)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == json.dumps(error) + "\n"
 
 
 def test_start_daemon_error_returns_four(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,6 +285,15 @@ def test_start_invalid_json_returns_one() -> None:
     assert out["error"] == "SchemaValidationError"
 
 
+def test_start_invalid_json_env_uses_stderr() -> None:
+    """A typed pre-spawn failure is diagnostic stderr, never env stdout."""
+    result = CliRunner().invoke(main, ["start", "--output", "env"], input="not-json-at-all")
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["error"] == "SchemaValidationError"
+
+
 def test_start_schema_violation_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """start with a JSON object that fails InputSchema returns exit 1."""
     # Node without ssh_pkey/ssh_password triggers the cross-field validator.
@@ -284,6 +333,39 @@ def test_start_unexpected_exception_returns_four(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 4
     out = json.loads(result.output)
     assert out["error"] == "DaemonError"
+
+
+def test_start_unexpected_exception_env_uses_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected pre-spawn failure is diagnostic stderr in env mode."""
+
+    def boom(
+        schema: Any, session_dir: str | None = None, *, input_env: str | None = None
+    ) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli_mod, "spawn_daemon", boom)
+    payload = json.dumps(
+        {
+            "nodes": {
+                "a": {
+                    "host": "h",
+                    "user": "u",
+                    "ssh_password": "p",
+                    "remote_targets": {"p": "127.0.0.1:22"},
+                }
+            }
+        }
+    )
+
+    result = CliRunner().invoke(main, ["start", "--output", "env"], input=payload)
+
+    assert result.exit_code == 4
+    assert result.stdout == ""
+    assert json.loads(result.stderr) == {
+        "error": "DaemonError",
+        "message": "unexpected failure during start",
+        "details": {"type": "RuntimeError"},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +811,10 @@ def test_start_post_spawn_render_failure_preserves_recovery_handle(
     )
 
     assert result.exit_code == 4
-    error = json.loads(result.stdout)
+    assert result.stdout == ""
+    error = json.loads(
+        next(line for line in result.stderr.splitlines() if line.startswith('{"error"'))
+    )
     assert error["error"] == "DaemonError"
     assert error["details"]["type"] == "ValueError"
     assert error["details"]["session_dir"] == session_path
