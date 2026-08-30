@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from tunstrap import cli as cli_mod
+from tunstrap import cli_stop as cli_mod
 from tunstrap import session as session_mod
 from tunstrap.cli import main
 from tunstrap.session import SessionError, SessionIdentityUnreadable, StopOutcome

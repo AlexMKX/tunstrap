@@ -27,6 +27,7 @@ from click.testing import CliRunner
 
 from tests.unit.conftest import cleaning_teardown
 from tunstrap import cli as cli_mod
+from tunstrap import cli_stop as cli_stop_mod
 from tunstrap import session as session_mod
 from tunstrap.cli import main
 from tunstrap.exceptions import DaemonError, DaemonHandshakeError
@@ -486,7 +487,7 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     operator holding preserved session data — the entire point of preserving
     it — follows the instruction and gets a usage error. ``stop`` accepts only
     ``--session-dir`` and ``--grace-seconds``; it already forces
-    unconditionally (``tunstrap/cli.py::stop_command``), so there is no
+    unconditionally (``tunstrap/cli_stop.py::stop_command``), so there is no
     ``--force`` to pass.
 
     The command is extracted from what ``run`` actually printed and fed to the
@@ -495,6 +496,14 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     """
     monkeypatch.setattr(
         cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+    # The recovery command this test then runs resolves ``stop_session`` in
+    # ``cli_stop``'s namespace; stub both so the outcome stays unresolved
+    # across ``run``'s teardown and the recovery ``stop`` alike.
+    monkeypatch.setattr(
+        cli_stop_mod,
         "stop_session",
         lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
     )
@@ -548,6 +557,14 @@ def test_the_printed_recovery_command_does_not_eat_what_it_recovers(
     monkeypatch.setattr(cli_mod.subprocess, "Popen", QuietPopen)
     monkeypatch.setattr(
         cli_mod,
+        "stop_session",
+        lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
+    )
+    # Same stub on ``cli_stop``: the recovery ``stop`` below resolves
+    # ``stop_session`` there, and the outcome must stay unresolved across
+    # both invocations.
+    monkeypatch.setattr(
+        cli_stop_mod,
         "stop_session",
         lambda _sd, _pid, _g, force: StopOutcome(False, "identity mismatch"),
     )
