@@ -20,6 +20,7 @@ from tunstrap.cli_input import (
     build_start_schema,
     connection_flags_present,
 )
+from tunstrap.cli_stop import _stop_resolved, status_command, stop_command
 from tunstrap.daemon import spawn_daemon
 from tunstrap.envrender import (
     KUBE_ENV_NAMES,
@@ -37,15 +38,23 @@ from tunstrap.exceptions import (
     TunstrapError,
     exit_code_for,
 )
-from tunstrap.identity import IdentityCheckResult, verify_session
+from tunstrap.identity import verify_session
 from tunstrap.schemas import OutputSchema
 from tunstrap.session import (
     SessionDir,
     SessionError,
     SessionIdentityUnreadable,
-    StopOutcome,
     stop_session,
 )
+
+# ``stop_session`` and ``verify_session`` are re-exported (the former also
+# called directly by ``_teardown_run_inner``) because this module's namespace
+# is the patch seam the unit suite drives: tests patch ``cli.stop_session``
+# and ``cli.verify_session``, and the commands in ``cli_stop`` resolve them
+# through here at call time. Declared via ``__all__`` — the same re-export
+# mechanism ``kube.py`` uses — so the imports read as intentional to the
+# unused-import and strict-reexport checks alike.
+__all__ = ["stop_session", "verify_session"]
 
 _FC = TypeVar("_FC", bound=Callable[..., object])
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -837,11 +846,16 @@ def _warn_preserved(
             f"{verb}: {minted_root} was created by {verb} and is not removed by that "
             f"command; delete it once the daemon is dealt with\n"
         )
-    _warn(recovery)
+    warn(recovery)
 
 
-def _warn(message: str) -> None:
-    """Attempt a teardown diagnostic without allowing a closed stderr to escape."""
+def warn(message: str) -> None:
+    """Attempt a teardown diagnostic without allowing a closed stderr to escape.
+
+    Public (no leading underscore) because ``cli_stop``'s ``_emit_stop_outcome``
+    reaches it through this module's namespace — the patch seam — rather than
+    an import, which would close a static ``cli`` ↔ ``cli_stop`` cycle.
+    """
     try:
         sys.stderr.write(message)
     except BaseException:  # noqa: BLE001, S110  # pylint: disable=broad-exception-caught
@@ -873,114 +887,20 @@ def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: st
             return
     survivors = SessionDir.cleanup_path(session_dir)
     if survivors:
-        _warn("run: could not remove: " + ", ".join(survivors) + "\n")
+        warn("run: could not remove: " + ", ".join(survivors) + "\n")
     if minted_root is not None:
         remaining = SessionDir.remove_root(minted_root)
         if remaining:
-            _warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
+            warn("run: could not remove session root: " + ", ".join(remaining) + "\n")
 
 
-def _stop_resolved(outcome: StopOutcome) -> bool:
-    """True when the daemon is known to be gone, so its session data is safe to delete.
-
-    The single expression of that rule. ``run``'s teardown and ``stop`` both
-    have to decide it, and stating it twice is how they drift — which is
-    exactly what happened: ``_teardown_run_inner`` preserved on an unresolved
-    outcome while ``stop`` deleted unconditionally, so following the recovery
-    command ``run`` prints destroyed the identity file the preservation existed
-    to keep.
-
-    ``"not found"`` is a *resolved* outcome, not a failure: it means no daemon
-    is recorded as running, which is the normal shape when auto-stop-idle
-    already fired. Everything else with ``stopped=False`` leaves the daemon's
-    state unknown.
-    """
-    return outcome.stopped or outcome.reason == "not found"
-
-
-def _stop_outcome_json(outcome: StopOutcome) -> str:
-    """Render a StopOutcome as ``stop``'s documented stdout JSON, key for key.
-
-    Key order and omission rules are a public contract, pinned byte for byte
-    across all seven outcomes by ``tests/unit/test_cli_stop_output.py``:
-    ``stopped`` first, then ``reason`` when there is one, then ``forced`` only
-    when True, then ``preserved`` only when the session data was kept.
-
-    ``preserved`` is additive and omitted when false, so every previously
-    emitted shape — including the most-parsed ``{"stopped": true}`` — is
-    byte-identical to before. It is here rather than left for the caller to
-    infer because the rule is not derivable without string-matching
-    ``reason`` against ``"not found"``, and a caller that has to replicate an
-    internal reason string to learn whether state is still on disk is a caller
-    we have set up to break.
-    """
-    body: dict[str, object] = {"stopped": outcome.stopped}
-    if outcome.reason is not None:
-        body["reason"] = outcome.reason
-    if outcome.forced:
-        body["forced"] = True
-    if not _stop_resolved(outcome):
-        body["preserved"] = True
-    return json.dumps(body)
-
-
-def _emit_stop_outcome(outcome: StopOutcome, session_dir: str) -> None:
-    """Write ``stop``'s envelope on stdout, plus the stderr notice when data was kept.
-
-    Both of ``stop``'s exits report through here, so an outcome cannot be
-    reported without the signal that belongs to it. The identity-read failures
-    used to render their own JSON literal inline, which is precisely how they
-    ended up preserving ``tunnel-data`` while emitting no ``preserved`` key —
-    a caller reading the envelope concluded the directory had been cleaned.
-    """
-    sys.stdout.write(_stop_outcome_json(outcome))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-    if not _stop_resolved(outcome):
-        _warn(
-            f"tunstrap stop: daemon not stopped: {outcome.reason}; "
-            f"session data preserved under {session_dir}\n"
-        )
-
-
-@main.command("stop")
-@click.option("--session-dir", "session_dir", required=True)
-@click.option("--grace-seconds", type=int, default=10, show_default=True)
-def stop_command(session_dir: str, grace_seconds: int) -> None:
-    """Stop the daemon recorded under <session-dir>/tunnel-data and clean it up."""
-    try:
-        pid = SessionDir.read_identity(session_dir)
-    except SessionError as exc:
-        # All three identity-read failures — missing, unreadable, malformed —
-        # return before cleanup, so all three preserve and all three must say
-        # so. Deliberately not the split ``run`` makes: there
-        # ``SessionIdentityUnreadable`` decides whether to delete, while here
-        # nothing is deleted either way.
-        _emit_stop_outcome(StopOutcome(False, str(exc)), session_dir)
-        sys.exit(1)
-    outcome = stop_session(session_dir, pid, grace_seconds, force=True)
-    _emit_stop_outcome(outcome, session_dir)
-    if _stop_resolved(outcome):
-        # Deleting on an unresolved outcome would make the recovery command
-        # ``run`` prints destroy the identity file it was invoked to recover.
-        SessionDir.cleanup_path(session_dir)
-        return
-    sys.exit(1)
-
-
-@main.command("status")
-@click.option("--session-dir", "session_dir", required=True)
-def status_command(session_dir: str) -> None:
-    """Report whether the daemon for the given session dir is alive."""
-    try:
-        pid = SessionDir.read_identity(session_dir)
-    except SessionError:
-        alive = False
-    else:
-        alive = verify_session(session_dir, pid) == IdentityCheckResult.match
-    sys.stdout.write(json.dumps({"alive": alive}))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+# ``stop``/``status`` live in ``cli_stop`` (issue #32) and register here, which
+# is the registration ``@main.command`` performed for them before the split.
+# Import direction follows ``cli_input``/``envrender``: this module imports the
+# split module, never the reverse. Registered at the foot of the file to keep
+# the historical order (start, run, stop, status).
+main.add_command(stop_command)
+main.add_command(status_command)
 
 
 if __name__ == "__main__":  # pragma: no cover

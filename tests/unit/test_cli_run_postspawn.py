@@ -486,7 +486,7 @@ def test_the_printed_recovery_command_is_one_tunstrap_accepts(
     operator holding preserved session data — the entire point of preserving
     it — follows the instruction and gets a usage error. ``stop`` accepts only
     ``--session-dir`` and ``--grace-seconds``; it already forces
-    unconditionally (``tunstrap/cli.py::stop_command``), so there is no
+    unconditionally (``tunstrap/cli_stop.py::stop_command``), so there is no
     ``--force`` to pass.
 
     The command is extracted from what ``run`` actually printed and fed to the

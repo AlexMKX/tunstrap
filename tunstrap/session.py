@@ -476,10 +476,10 @@ def stop_session(  # pylint: disable=too-many-return-statements
     """Stop the daemon recorded for ``session_dir``. Performs the stop, writes nothing.
 
     Silent by design, because it has two callers wanting different channels:
-    ``cli.stop_command`` renders the returned outcome as ``stop``'s stdout JSON
-    (``cli._stop_outcome_json``), while ``cli._teardown_run_inner`` prints
-    nothing on success and stderr on failure, so a foreground child keeps fd 1
-    to itself. Deciding here would serve only one of them.
+    ``cli_stop.stop_command`` renders the returned outcome as ``stop``'s stdout
+    JSON (``cli_stop._stop_outcome_json``), while ``cli._teardown_run_inner``
+    prints nothing on success and stderr on failure, so a foreground child
+    keeps fd 1 to itself. Deciding here would serve only one of them.
 
     A non-positive ``pid`` is refused at function entry, before any syscall.
     Under ``kill(2)`` such a value selects a process *group* (0 is the caller's
