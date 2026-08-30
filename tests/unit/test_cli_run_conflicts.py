@@ -177,11 +177,13 @@ def test_connection_flags_still_work_in_flag_mode(
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", _spawn)
     # The base command supplies auth via --ssh-key rather than relying on an
-    # ambient SSH_AUTH_SOCK (an ssh-agent runs on a dev workstation but not on
-    # a CI runner). Without explicit auth, InputSchema._validate_auth rejects a
-    # keyless/passwordless node and `run` exits before spawn — which is the
-    # product working as intended, not something this flag-mode test should
-    # depend on. Mirrors test_daemon_flags_still_work_in_flag_mode below.
+    # ambient SSH_AUTH_SOCK. The tier-wide guard (the autouse
+    # tests/unit/conftest.py::_no_ambient_ssh_agent fixture) enforces that
+    # default by deleting the variable for every unit test (#35), so without
+    # explicit auth InputSchema._validate_auth rejects a keyless/passwordless
+    # node and `run` exits before spawn — which is the product working as
+    # intended, not something this flag-mode test should depend on. Mirrors
+    # test_daemon_flags_still_work_in_flag_mode below.
     key = tmp_path / "id"
     key.write_text("K\n")
     CliRunner().invoke(
