@@ -529,6 +529,13 @@ always `tunstrap-<node>-<target>`.
 
 `session_dir` is **always** present. Pass it to `stop --session-dir`.
 
+If `start` loses the worker IPC handshake after detaching it, the exit-4 error
+includes the known `details.session_dir` and `details.pid` (when a worker PID
+was created). Tunstrap preserves that directory and prints the exact
+`tunstrap stop --session-dir ...` recovery command on stderr rather than risk
+deleting a live daemon's identity. The structured error remains on stdout for
+`--output json`; `--output env` keeps stdout empty and writes it to stderr.
+
 With `daemon.materialize: true`, `start --output json` retains the
 `OutputSchema` envelope but projects every materialized content-bearing entry
 to a reference. For example:
