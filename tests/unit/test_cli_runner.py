@@ -444,6 +444,8 @@ def test_start_json_materialized_kubeconfig_never_prints_credential_content(
         }
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
 
@@ -503,6 +505,8 @@ def test_start_json_unmaterialized_kubeconfig_keeps_stdout_delivery(
         }
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
 
@@ -547,6 +551,8 @@ def test_start_json_materialized_fetch_file_never_prints_content(
         }
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
 
@@ -590,6 +596,8 @@ def test_start_json_unmaterialized_fetch_file_keeps_stdout_delivery(
         }
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     res = CliRunner().invoke(main, ["start", "u@h", "--target", "db=127.0.0.1:5432"])
 
@@ -711,6 +719,8 @@ def test_start_post_spawn_render_failure_preserves_recovery_handle(
         }
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     result = CliRunner().invoke(
         main,
@@ -743,6 +753,8 @@ def test_start_post_spawn_unusable_envelope_preserves_supplied_session_dir(
         return {"kind": "success", "payload": None}
 
     monkeypatch.setattr(cli_mod, "spawn_daemon", fake_spawn)
+    # No ssh_pkey/ssh_password supplied: independent of ambient ssh-agent state.
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/dummy-agent.sock")
 
     result = CliRunner().invoke(
         main,
