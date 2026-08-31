@@ -38,6 +38,17 @@ def test_generated_dir_cleanup_removes_whole_dir(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+def test_parent_minted_root_cleanup_removes_whole_dir(tmp_path: Path) -> None:
+    """A path pre-created by the parent remains worker-owned when flagged."""
+    root = tmp_path / "parent-minted"
+    root.mkdir(mode=0o700)
+    sd = SessionDir.create(supplied=str(root), owns_supplied_root=True)
+
+    sd.cleanup()
+
+    assert not root.exists()
+
+
 def test_supplied_dir_cleanup_keeps_dir(tmp_path: Path) -> None:
     """A supplied session dir keeps the dir; only tunnel-data is removed."""
     supplied = tmp_path / "work"

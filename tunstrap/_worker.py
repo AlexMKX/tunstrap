@@ -34,7 +34,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="tunstrap._worker", add_help=False)
     parser.add_argument("--ipc-fd", type=int, required=True)
     parser.add_argument("--session-dir", default=None)
-    return parser.parse_args(argv)
+    parser.add_argument("--generated-session-dir", action="store_true")
+    args = parser.parse_args(argv)
+    if args.generated_session_dir and args.session_dir is None:
+        parser.error("--generated-session-dir requires --session-dir")
+    return args
 
 
 async def _idle_watchdog(
@@ -172,7 +176,10 @@ def main(argv: list[str] | None = None) -> None:
     """Worker entry: create+lock session dir, run loop, clean up, exit."""
     args = _parse_args(argv)
     try:
-        session = SessionDir.create(supplied=args.session_dir)
+        session = SessionDir.create(
+            supplied=args.session_dir,
+            owns_supplied_root=args.generated_session_dir,
+        )
     except SessionActive as exc:
         try:
             _write_message(

@@ -7,6 +7,7 @@ import os
 import select
 import subprocess
 import sys
+import tempfile
 import time
 from typing import IO, Any
 
@@ -67,6 +68,11 @@ def spawn_daemon(
     are worker-authored: the worker cleaned up after itself before writing the
     frame, so no daemon of ours survives them.
 
+    When no path is supplied, the parent mints one before ``Popen`` so every
+    later handshake error can report it. The worker-only ownership flag keeps
+    the old lifecycle contract: normal worker cleanup still removes that whole
+    generated root rather than treating it as an operator-owned directory.
+
     **This function is not atomic, and the seam is ``Popen``.** Before it, no
     worker exists and a failure leaves nothing behind. After it, the worker is
     launched and detached — so every failure from there on is *parent-side* and
@@ -77,14 +83,26 @@ def spawn_daemon(
     worker_env = _worker_env(input_env)
     ipc_read_fd, ipc_write_fd = os.pipe()
     log_target = _open_log_target(schema.daemon.log_file)
+    generated_session_dir = session_dir is None
+    worker_session_dir: str | None = None
     try:
+        # ``realpath`` so the handle the parent reports is byte-identical to the
+        # one the worker itself would report: ``SessionDir.create`` resolves a
+        # supplied path, and a recovery handle that does not match ``status``
+        # and ``stop`` output is one an operator has to second-guess.
+        worker_session_dir = (
+            os.path.realpath(tempfile.mkdtemp(prefix="tunstrap-"))
+            if session_dir is None
+            else session_dir
+        )
         proc = subprocess.Popen(  # pylint: disable=consider-using-with  # detached; never wait()ed
             [
                 sys.executable,
                 "-m",
                 "tunstrap._worker",
                 f"--ipc-fd={ipc_write_fd}",
-                *([f"--session-dir={session_dir}"] if session_dir is not None else []),
+                f"--session-dir={worker_session_dir}",
+                *(["--generated-session-dir"] if generated_session_dir else []),
             ],
             stdin=subprocess.PIPE,
             stdout=log_target,
@@ -94,6 +112,18 @@ def spawn_daemon(
             close_fds=True,
             env=worker_env,
         )
+    except BaseException:
+        # Pre-detach by construction: this handler is reachable only while
+        # ``Popen`` is still raising, so no worker exists and the minted root is
+        # unambiguously ours to remove. ``rmdir``, never ``rmtree``: it succeeds
+        # only on an empty directory, so it can never destroy session state even
+        # if some future change lets a worker reach this path.
+        if generated_session_dir and worker_session_dir is not None:
+            try:
+                os.rmdir(worker_session_dir)
+            except OSError:
+                pass
+        raise
     finally:
         os.close(ipc_write_fd)
         if isinstance(log_target, int):
@@ -103,29 +133,35 @@ def spawn_daemon(
             log_target.close()
 
     # Everything below this line runs with a detached worker already alive.
-    if proc.stdin is None:
-        # Unreachable with stdin=PIPE, but it must not be an `assert`: that is
-        # an AssertionError, which is outside TunstrapError and so escapes the
-        # CLI's handler as a traceback, and `python -O` erases the check
-        # altogether, leaving an AttributeError on the next line instead.
-        os.close(ipc_read_fd)
-        raise DaemonHandshakeError("worker stdin pipe unavailable", {})
-
     try:
-        proc.stdin.write(schema.model_dump_json().encode("utf-8"))
-        proc.stdin.close()
-    except (BrokenPipeError, OSError) as exc:
-        # Worker died before reading schema. Still try to read the IPC pipe;
-        # the worker's main() guard may have written a daemon_error frame.
-        proc.stdin = None
-        _ = exc  # discarded; we surface via the IPC read path below
+        if proc.stdin is None:
+            # Unreachable with stdin=PIPE, but it must not be an `assert`: that is
+            # an AssertionError, which is outside TunstrapError and so escapes the
+            # CLI's handler as a traceback, and `python -O` erases the check
+            # altogether, leaving an AttributeError on the next line instead.
+            os.close(ipc_read_fd)
+            raise DaemonHandshakeError("worker stdin pipe unavailable", {})
+        try:
+            proc.stdin.write(schema.model_dump_json().encode("utf-8"))
+            proc.stdin.close()
+        except (BrokenPipeError, OSError) as exc:
+            # Worker died before reading schema. Still try to read the IPC pipe;
+            # the worker's main() guard may have written a daemon_error frame.
+            proc.stdin = None
+            _ = exc  # discarded; we surface via the IPC read path below
 
-    return _read_ipc_response(
-        ipc_read_fd,
-        proc,
-        timeout=schema.daemon.startup_timeout_seconds,
-        reap_timeout=schema.daemon.shutdown_grace_seconds,
-    )
+        return _read_ipc_response(
+            ipc_read_fd,
+            proc,
+            timeout=schema.daemon.startup_timeout_seconds,
+            reap_timeout=schema.daemon.shutdown_grace_seconds,
+        )
+    except DaemonHandshakeError as exc:
+        if worker_session_dir is not None:
+            exc.details.setdefault("session_dir", worker_session_dir)
+        if proc.pid > 0:
+            exc.details.setdefault("pid", proc.pid)
+        raise
 
 
 def _kill_timed_out_worker(proc: subprocess.Popen[bytes], reap_timeout: int) -> bool:

@@ -206,8 +206,9 @@ def _report_start_post_spawn_failure(
 
     ``start`` is detached and does not own teardown. For a success envelope,
     the worker has already reported the authoritative root, so pre-minting adds
-    nothing here; it would only help on the handshake-failure path, which this
-    change does not address.
+    nothing here; the path that needed it is the handshake failure, where no
+    envelope exists at all, and ``spawn_daemon`` now mints there
+    (``_report_start_handshake_failure``).
     """
     details: dict[str, object] = {"type": type(exc).__name__}
     handles = _start_recovery_handles(message)
@@ -232,6 +233,41 @@ def _report_start_post_spawn_failure(
     _write_start_error(
         DaemonError("unexpected failure during start", details).to_error_output(), output_fmt
     )
+
+
+def _report_start_handshake_failure(
+    exc: DaemonHandshakeError,
+    supplied_session_dir: str | None,
+    output_fmt: str,
+) -> None:
+    """Report recovery handles without touching a possibly live daemon.
+
+    The mirror image of ``run``'s handshake arm, and deliberately not a copy of
+    it. Both face the same fact — ``Popen`` has already detached a worker, so
+    one may be live and holding the session lock — but they owe the caller
+    opposite things. ``run`` owns its child's lifetime and tears it down.
+    ``start`` exists precisely to leave a daemon running, so tearing down here
+    would delete a live daemon's directory and destroy the identity file that
+    is the only handle on it. This function therefore only ever *reports*: it
+    writes diagnostics and the error envelope, and touches no filesystem state.
+
+    ``spawn_daemon`` guarantees ``details['session_dir']`` on every
+    ``DaemonHandshakeError`` — pre-minting the root when the caller supplied
+    none — so the recovery command can be printed even for the timeout flavour
+    with ``--session-dir`` omitted, which is the README's default flow and the
+    combination that used to leave an unnameable directory behind. The minted
+    root is passed on only when we minted it, per ``_warn_preserved``.
+    """
+    recovery_dir = exc.details.get("session_dir")
+    if isinstance(recovery_dir, str):
+        minted_root = recovery_dir if supplied_session_dir is None else None
+        _warn_preserved(
+            recovery_dir,
+            f"daemon handshake failed: {exc.message}",
+            minted_root,
+            verb="start",
+        )
+    _write_start_error(exc.to_error_output(), output_fmt)
 
 
 @main.command("start")
@@ -286,6 +322,9 @@ def start_command(  # pylint: disable=too-many-locals
             sys.exit(4)
     except click.UsageError:
         raise
+    except DaemonHandshakeError as exc:
+        _report_start_handshake_failure(exc, session_dir, output_fmt)
+        sys.exit(exit_code_for(exc))
     except TunstrapError as exc:
         _write_start_error(exc.to_error_output(), output_fmt)
         sys.exit(exit_code_for(exc))
