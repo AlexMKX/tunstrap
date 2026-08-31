@@ -63,6 +63,26 @@ class TunnelManager:
         self._runtimes: list[_NodeRuntime] = []
         self.activity_tracker = ActivityTracker()
 
+    def live_nodes(self) -> list[tuple[str, asyncssh.SSHClientConnection, bool]]:
+        """``(name, connection, required)`` for every node that started successfully.
+
+        ``_runtimes`` holds only the nodes ``_start_one`` finished cleanly, and
+        each one keeps the single ``SSHClientConnection`` its local forwards
+        were layered on. That connection is what the worker's tunnel-loss
+        watchdog awaits (``tunstrap/_worker.py::_tunnel_loss_watchdog``), and
+        ``required`` travels with it because the watchdog's whole decision is
+        whether this node's death should take the daemon down.
+
+        A node that failed at startup is absent by construction, which is
+        correct: ``start`` has already reported it, as a hard failure when it
+        was required and as a ``TunnelWarning`` when it was not.
+        """
+        return [
+            (runtime.name, runtime.conn, self._schema.nodes[runtime.name].required)
+            for runtime in self._runtimes
+            if runtime.conn is not None
+        ]
+
     async def stop_all(self) -> None:
         """Close every active listener and connection, best-effort."""
         runtimes = list(self._runtimes)

@@ -13,6 +13,7 @@ its group/other write bits cleared on use, because it hosts 0600 credentials.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import shutil
 import signal
@@ -31,6 +32,7 @@ from tunstrap.identity import (
 )
 
 _TUNNEL_DATA = "tunnel-data"
+_TUNNEL_LOSS = "tunnel-loss.json"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -328,6 +330,58 @@ class SessionDir:
         finally:
             os.close(fd)
         return str(path)
+
+    def write_tunnel_loss(self, payload: dict[str, object]) -> None:
+        """Record a post-startup tunnel loss into ``tunnel-data/tunnel-loss.json``.
+
+        Written by the daemon's own watchdog while it still holds the session
+        lock, so the record is on disk *before* the lock is released and before
+        any ``start`` racing for the same directory can win it — otherwise the
+        replacement daemon's ``_reclaim_data_slot`` would wipe the explanation
+        for why its predecessor left.
+
+        Goes through ``materialize_atomic`` (temp file + ``os.replace``) rather
+        than ``_write_file``'s ``O_TRUNC``, because several watchdogs can record
+        into the same file and a truncated JSON object is indistinguishable from
+        a valid short one to ``read_tunnel_loss``.
+        """
+        self.materialize_atomic(_TUNNEL_LOSS, (json.dumps(payload) + "\n").encode("utf-8"))
+
+    def release_lock_preserving_data(self) -> None:
+        """Drop ``session.lock`` and keep every file under the session dir.
+
+        The deliberate counterpart to ``cleanup``, for issue #33: a daemon that
+        terminates *itself* because a required tunnel died must release the
+        flock — that is the single thing which has to go for a subsequent
+        ``start`` on the same directory to stop failing with ``SessionActive``
+        — while leaving the kubeconfigs, fetched files, ``daemon.pid`` and the
+        loss record exactly where they are.
+
+        Deleting them instead would replace the consumer's familiar
+        ``connection refused`` on a dead local port with a file vanishing
+        mid-command, which is the strictly worse failure to debug. Disposal of
+        the preserved directory stays where it already was: the operator's
+        ``stop``, or ``run``'s teardown.
+        """
+        release_session_lock(self._lock_fd, self._root)
+
+    @staticmethod
+    def read_tunnel_loss(session_dir: str) -> dict[str, object] | None:
+        """Best-effort read of the loss record; ``None`` when absent or unusable.
+
+        Never raises. Every caller — ``status``'s envelope and ``run``'s
+        teardown diagnostic — is reporting *about* a session it has already
+        decided something else about, so an unreadable or truncated record must
+        degrade to "nothing to add" rather than fail the command it decorates.
+        """
+        path = Path(session_dir).resolve() / _TUNNEL_DATA / _TUNNEL_LOSS
+        try:
+            body = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+        return body
 
     def cleanup(self) -> None:
         """Release the lock, then remove tunnel-data/ (or the whole generated dir)."""
