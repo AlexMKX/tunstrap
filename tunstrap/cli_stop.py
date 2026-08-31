@@ -133,13 +133,31 @@ def stop_command(session_dir: str, grace_seconds: int) -> None:
 @click.command("status")
 @click.option("--session-dir", "session_dir", required=True)
 def status_command(session_dir: str) -> None:
-    """Report whether the daemon for the given session dir is alive."""
+    """Report whether the daemon for the given session dir is alive.
+
+    ``alive`` answers PID-liveness, which issue #33 showed is not the same
+    question as "is the tunnel working". A daemon that detected its own tunnel
+    death now exits, so ``alive`` is truthful for that case for free — and
+    ``tunnel_loss`` carries the *reason*, read from the session data the daemon
+    deliberately preserved on its way out (``SessionDir.read_tunnel_loss``).
+
+    The key is additive and emitted only when a record exists, so every session
+    that never lost a tunnel still renders exactly ``{"alive": …}`` — the shape
+    ``tests/unit/test_cli_runner.py`` pins by whole-dict equality. ``stop``'s
+    envelope is untouched: it is byte-pinned across all seven outcomes by
+    ``tests/unit/test_cli_stop_output.py``, and a self-terminated daemon already
+    reports through it correctly as ``not found``.
+    """
     try:
         pid = SessionDir.read_identity(session_dir)
     except SessionError:
         alive = False
     else:
         alive = verify_session(session_dir, pid) == IdentityCheckResult.match
-    sys.stdout.write(json.dumps({"alive": alive}))
+    body: dict[str, object] = {"alive": alive}
+    loss = SessionDir.read_tunnel_loss(session_dir)
+    if loss is not None:
+        body["tunnel_loss"] = loss
+    sys.stdout.write(json.dumps(body))
     sys.stdout.write("\n")
     sys.stdout.flush()

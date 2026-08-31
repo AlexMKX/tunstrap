@@ -885,7 +885,19 @@ def _warn_preserved(
 
 
 def _teardown_run_inner(session_dir: str, grace_seconds: int, *, minted_root: str | None) -> None:
-    """Stop the daemon, remove tunnel-data and any minted root; report on stderr."""
+    """Stop the daemon, remove tunnel-data and any minted root; report on stderr.
+
+    The tunnel-loss notice (issue #33, decision 3) is read first and on every
+    path, because it is the one diagnostic that explains a child which failed
+    with ``connection refused``. ``run`` deliberately does not kill that child
+    when the daemon self-terminates -- its exit code is the documented contract
+    and aborting a ``tofu apply`` mid-flight is worse than letting it fail on
+    its own terms -- so the notice is emitted here, once the child has finished.
+    stderr, because under the tofu-proxy pattern fd 1 belongs to the child.
+    """
+    loss = SessionDir.read_tunnel_loss(session_dir)
+    if loss is not None:
+        _warn(f"run: daemon reported tunnel loss: {json.dumps(loss)}\n")
     try:
         pid = SessionDir.read_identity(session_dir)
     except SessionIdentityUnreadable as exc:

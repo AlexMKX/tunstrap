@@ -117,6 +117,52 @@ ephemeral CI runs that may abort before reaching `tunstrap stop`.
 Omit the field (or set to `null`) to keep the daemon alive until you call
 `stop` explicitly.
 
+### Self-termination when a tunnel dies
+
+A daemon does not only exit on `stop` or on the idle timer. After a successful
+start it also watches each node's SSH connection, and **when a `required`
+node's connection is lost the daemon terminates itself**.
+
+This matters because losing the SSH connection already closes every local
+forward that was layered on it: the ports stop accepting and consumers get
+`connection refused`. Before, the daemon kept running anyway — so its PID
+stayed alive, its `session.lock` stayed held, `status` still reported
+`"alive": true`, and a fresh `start` on the same `--session-dir` was refused
+with `SessionActive` even though nothing was being served.
+
+A node with `required: false` behaves the way it already does at startup: its
+loss is recorded and the daemon keeps running with the remaining forwards.
+
+**Session data is preserved on this path.** The daemon releases only
+`session.lock` — which is what makes a subsequent `start` on the same
+`--session-dir` succeed instead of returning `SessionActive` — and leaves
+`tunnel-data/` exactly as it was, including any materialized kubeconfigs and
+fetched files. A consumer therefore keeps seeing the familiar `connection
+refused` on a dead port rather than having files disappear underneath it.
+Disposal stays where it always was: your `tunstrap stop`, or `run`'s teardown.
+
+The reason is recorded in `<session-dir>/tunnel-data/tunnel-loss.json` and
+surfaces in two places:
+
+* `tunstrap status` adds a `tunnel_loss` key when a record exists. The key is
+  additive — a session that never lost a tunnel still prints exactly
+  `{"alive": …}`:
+
+  ```console
+  $ tunstrap status --session-dir "$SESSION_DIR"
+  {"alive": false, "tunnel_loss": {"self_terminated": true, "reason": "required tunnel lost: the daemon terminated itself and released its session lock; session data is preserved", "losses": [{"node": "edge", "required": true}]}}
+  ```
+
+* `tunstrap run` prints the same record on **stderr** during teardown. `run`
+  deliberately does not kill its child when the daemon self-terminates: the
+  child's exit code is `run`'s documented contract, and killing it could abort
+  a non-idempotent operation such as `tofu apply` mid-flight. The child fails
+  on its own terms against the dead port, and the notice explains why.
+
+`stop`'s JSON envelope is unchanged. A self-terminated daemon is simply no
+longer recorded as running, so `stop` reports the existing
+`{"stopped": false, "reason": "not found"}` and cleans up.
+
 ### Using `fetch_files` (generic byte fetch)
 
 ```bash
@@ -656,6 +702,7 @@ future feature.
 | `kube_targets[name]` missing or has error | Check `warnings[]` for SAN-probe details; try setting explicit `tls_server_name`. |
 | `start` with a supplied `--session-dir` fails with "tunnel-data already exists" | Orphaned `tunnel-data/` from a previous `kill -9`. Remove it: `rm -rf <session-dir>/tunnel-data`. |
 | `start` hangs | Node firewalled / DNS-stuck. Increase `ssh_options.connect_timeout` or remove the node. |
+| Forwarded port gives `connection refused` and `status` says `"alive": false` | The SSH connection to a `required` node was lost, so the daemon terminated itself. Read `tunnel_loss` in the `status` output (or `tunnel-data/tunnel-loss.json`) for which node went, then `start` again — the session dir is reusable, its lock was released. |
 
 ## Migration from `v2026.10516.11702`
 
