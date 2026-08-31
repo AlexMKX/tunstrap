@@ -25,6 +25,7 @@ additionally fails today with ``AssertionError``, which is not a
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import os
@@ -214,6 +215,94 @@ def test_pre_detach_spawn_failure_removes_parent_minted_empty_root(
         spawn_daemon(_schema())
 
     assert not minted.exists()
+
+
+def _recording_pipe(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Record the fd pairs ``spawn_daemon`` mints, then hand them out untouched.
+
+    Wrapping rather than replacing ``os.pipe`` keeps the real kernel objects
+    flowing through ``tunstrap/daemon.py::spawn_daemon`` so the tests can
+    ``fstat`` the exact fds afterwards (``EBADF`` == closed) without caring
+    which numbers the allocator picked.
+    """
+    real_pipe = os.pipe
+    minted: list[tuple[int, int]] = []
+
+    def wrapper() -> tuple[int, int]:
+        pair = real_pipe()
+        minted.append(pair)
+        return pair
+
+    monkeypatch.setattr(daemon_mod.os, "pipe", wrapper)
+    return minted
+
+
+def test_pre_detach_spawn_failure_closes_ipc_read_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #40: a raising ``Popen`` must not leak the IPC read end.
+
+    The shared ``finally`` closes only the write end; the read end used to
+    survive the re-raised failure for the life of the process, because only
+    the success path hands it to the IPC reader. The pre-detach handler is
+    the one place that can close it: past ``Popen`` a detached worker holds
+    the peer and the parent still needs the handshake. Proven as ``EBADF``
+    on both exact fds minted by the spawn, which is immune to unrelated fd
+    churn under pytest and works wherever ``os.fstat`` does.
+    """
+    minted_pipe = _recording_pipe(monkeypatch)
+
+    def fail_popen(*_args: object, **_kwargs: object) -> object:
+        raise OSError("injected Popen failure")
+
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", fail_popen)
+    with pytest.raises(OSError, match="injected Popen failure"):
+        spawn_daemon(_schema())
+
+    assert minted_pipe, "spawn_daemon must mint its IPC pipe through os.pipe"
+    read_fd, write_fd = minted_pipe[0]
+    with pytest.raises(OSError) as caught:
+        os.fstat(write_fd)
+    assert caught.value.errno == errno.EBADF
+    with pytest.raises(OSError) as caught:
+        os.fstat(read_fd)
+    assert caught.value.errno == errno.EBADF, "read end leaked past a failed Popen"
+
+
+def test_ipc_read_end_stays_open_through_detach_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative control for the issue #40 fix: success keeps the read end.
+
+    The read end is the parent's only handle on the worker's IPC frame, so it
+    must still be open when the IPC reader is entered; closing it on the
+    success path would break ``tunstrap start`` outright. The spy ``fstat``s
+    the fd at that seam before delegating to the real reader, which closes it
+    once the frame is consumed — so the success path leaks nothing either.
+    """
+    minted_pipe = _recording_pipe(monkeypatch)
+    frame = json.dumps({"kind": "success", "payload": {"pid": 424242}}).encode()
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _fake_popen(frame))
+
+    real_read_ipc_response = daemon_mod._read_ipc_response
+    entered_with_open_fd: list[int] = []
+
+    def spy_read_ipc_response(
+        read_fd: int, proc: Any, *, timeout: int, reap_timeout: int
+    ) -> dict[str, Any]:
+        os.fstat(read_fd)  # raises OSError if the read end was closed early
+        entered_with_open_fd.append(read_fd)
+        return real_read_ipc_response(read_fd, proc, timeout=timeout, reap_timeout=reap_timeout)
+
+    monkeypatch.setattr(daemon_mod, "_read_ipc_response", spy_read_ipc_response)
+
+    message = spawn_daemon(_schema())
+
+    assert message["kind"] == "success"
+    assert entered_with_open_fd == [minted_pipe[0][0]]
+    with pytest.raises(OSError) as caught:
+        os.fstat(minted_pipe[0][0])
+    assert caught.value.errno == errno.EBADF
 
 
 def test_handshake_error_is_a_daemon_error_and_still_exits_4() -> None:
