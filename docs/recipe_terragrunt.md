@@ -79,6 +79,9 @@ that changes per resolution. There is nothing to copy into your repo: point
 `tunstrap_tofu` is a thin dispatcher around `tofu` with three branches, decided
 from `argv` and `TUNSTRAP_INPUT`:
 
+> **Saved-plan hazard.** The proxy warns for Mode B saved-plan forms because its
+> per-invocation `TF_VAR_tunstrap` is frozen into plans; use one-shot `plan && apply` instead.
+
 | Condition | Branch | What happens |
 |---|---|---|
 | `TUNSTRAP_INPUT` unset | pass-through | `execvp tofu "$@"` — no tunnel, no `tunstrap`. This is the "infra not applied yet" path: Terragrunt omits the env_var, so the proxy is a transparent `tofu` wrapper. |

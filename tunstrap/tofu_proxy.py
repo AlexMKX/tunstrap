@@ -36,6 +36,10 @@ import sys
 _INPUT_ENV = "TUNSTRAP_INPUT"
 _OUTPUT_VAR = "TF_VAR_tunstrap"
 _TOFU = "tofu"
+_SAVED_PLAN_WARNING = (
+    "tunstrap_tofu: warning: a saved plan freezes per-invocation "
+    "TF_VAR_tunstrap; use one-shot plan && apply instead.\n"
+)
 
 # tofu subcommands that BYPASS the tunnel when TUNSTRAP_INPUT is set — the ones
 # that provably do not contact the cluster. Behaviourally equivalent to the
@@ -90,6 +94,9 @@ def main() -> int:
         _exec_tofu(argv)
     if _should_bypass(argv):
         _exec_tofu(argv)
+    warning = _saved_plan_warning(argv)
+    if warning is not None:
+        sys.stderr.write(warning)
     _run_tunnelled(argv)
     return 0  # pragma: no cover — _run_tunnelled exits
 
@@ -130,6 +137,12 @@ def _find_subcommand(argv: list[str]) -> str | None:
     subcommand, where a naive "``init`` anywhere in argv" predicate would
     wrongly bypass.
     """
+    found = _find_subcommand_index(argv)
+    return None if found is None else found[0]
+
+
+def _find_subcommand_index(argv: list[str]) -> tuple[str, int] | None:
+    """Return the tofu subcommand and its argv index, if one is present."""
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -141,8 +154,47 @@ def _find_subcommand(argv: list[str]) -> str | None:
         if tok.startswith("-"):
             i += 1  # any other global flag (=form or bare); skip one token
             continue
-        return tok
+        return tok, i
     return None
+
+
+def _saved_plan_warning(argv: list[str]) -> str | None:
+    """Describe an unambiguous saved-plan workflow, otherwise return ``None``.
+
+    The detector intentionally recognizes only ``plan -out`` and conventional
+    plan filenames (``tfplan`` or ``*.tfplan``) passed to ``apply``/``show``.
+    It stops at ``--`` and does not infer that an arbitrary positional argument
+    is a plan, because old tofu syntax also accepts a working directory there.
+    """
+    found = _find_subcommand_index(argv)
+    if found is None:
+        return None
+    subcommand, index = found
+    args = argv[index + 1 :]
+    if "--" in args:
+        return None
+    if subcommand == "plan" and _has_plan_output(args):
+        return _SAVED_PLAN_WARNING
+    if subcommand in {"apply", "show"} and any(
+        _is_plan_filename(arg) for arg in args if not arg.startswith("-")
+    ):
+        return _SAVED_PLAN_WARNING
+    return None
+
+
+def _has_plan_output(args: list[str]) -> bool:
+    """True when ``plan`` has a non-empty ``-out`` value before a terminator."""
+    for index, arg in enumerate(args):
+        if arg.startswith("-out="):
+            return len(arg) > len("-out=")
+        if arg == "-out" and index + 1 < len(args) and not args[index + 1].startswith("-"):
+            return True
+    return False
+
+
+def _is_plan_filename(arg: str) -> bool:
+    """True for conventional saved-plan filenames, excluding ambiguous paths."""
+    return arg == "tfplan" or arg.endswith(".tfplan")
 
 
 def _run_tunnelled(argv: list[str]) -> None:
