@@ -79,6 +79,20 @@ _BYPASS_COMMANDS = frozenset({"init", "version", "validate", "fmt"})
 # the bypass and built a needless tunnel — the documented gap this parser fixes.
 _GLOBAL_VALUE_FLAGS = frozenset({"-chdir", "--chdir"})
 
+# Apply/show flags whose following argv token is a value, not a plan input.
+_PLAN_INPUT_VALUE_FLAGS = frozenset(
+    {
+        "-backup",
+        "-lock-timeout",
+        "-parallelism",
+        "-replace",
+        "-state",
+        "-target",
+        "-var",
+        "-var-file",
+    }
+)
+
 
 def main() -> int:
     """``tunstrap_tofu`` entry point.
@@ -175,9 +189,7 @@ def _saved_plan_warning(argv: list[str]) -> str | None:
         return None
     if subcommand == "plan" and _has_plan_output(args):
         return _SAVED_PLAN_WARNING
-    if subcommand in {"apply", "show"} and any(
-        _is_plan_filename(arg) for arg in args if not arg.startswith("-")
-    ):
+    if subcommand in {"apply", "show"} and _has_plan_input(args):
         return _SAVED_PLAN_WARNING
     return None
 
@@ -195,6 +207,23 @@ def _has_plan_output(args: list[str]) -> bool:
 def _is_plan_filename(arg: str) -> bool:
     """True for conventional saved-plan filenames, excluding ambiguous paths."""
     return arg == "tfplan" or arg.endswith(".tfplan")
+
+
+def _has_plan_input(args: list[str]) -> bool:
+    """True when apply/show receives a conventional plan filename positional."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in _PLAN_INPUT_VALUE_FLAGS:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        if _is_plan_filename(arg):
+            return True
+        index += 1
+    return False
 
 
 def _run_tunnelled(argv: list[str]) -> None:

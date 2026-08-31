@@ -152,6 +152,7 @@ _SAVED_PLAN_WARNING_CASES = [
     (["apply"], False, "normal apply has no plan input"),
     (["apply", "."], False, "known older-syntax directory spelling"),
     (["apply", "module"], False, "ambiguous bare positional is not assumed to be a plan"),
+    (["apply", "-var-file", "review.tfplan"], False, "flag value is not a plan input"),
     (["show", "--", "review.tfplan"], False, "terminator is deliberately not parsed"),
     (["destroy", "-out=tfplan"], False, "out belongs to a different subcommand"),
 ]
