@@ -793,6 +793,7 @@ pytest tests/integration -m integration
 
 ## Project documents
 
+- Agent quickstart (Terraform/OpenTofu/Terragrunt): [`docs/recipe_agents.md`](docs/recipe_agents.md)
 - Terragrunt / OpenTofu recipe: [`docs/recipe_terragrunt.md`](docs/recipe_terragrunt.md)
 - Kube-targets design: `docs/specs/2026-05-30-kube-targets-design.md`
 - Fetch-files design: `docs/specs/2026-05-20-feature-fetch-files-design.md`
