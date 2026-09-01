@@ -136,6 +136,52 @@ def _run_main(argv: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Saved plans freeze TF_VAR_tunstrap, so the proxy warns before tunnelling.
+# --------------------------------------------------------------------------- #
+
+
+_SAVED_PLAN_WARNING_CASES = [
+    (["plan", "-out=tfplan"], True, "equals-form plan output"),
+    (["-chdir=module", "plan", "-out", "review.tfplan"], True, "global flag before plan"),
+    (["apply", "tfplan"], True, "conventional bare plan name"),
+    (["apply", "-auto-approve", "review.tfplan"], True, "flag before plan input"),
+    (["show", "review.tfplan"], True, "show accepts a plan input"),
+    (["plan"], False, "normal plan is not saved"),
+    (["plan", "-out"], False, "missing output filename"),
+    (["plan", "--", "-out=tfplan"], False, "terminator stops flag parsing"),
+    (["apply"], False, "normal apply has no plan input"),
+    (["apply", "."], False, "known older-syntax directory spelling"),
+    (["apply", "module"], False, "ambiguous bare positional is not assumed to be a plan"),
+    (["apply", "-var-file", "review.tfplan"], False, "flag value is not a plan input"),
+    (["show", "--", "review.tfplan"], False, "terminator is deliberately not parsed"),
+    (["destroy", "-out=tfplan"], False, "out belongs to a different subcommand"),
+]
+
+
+@pytest.mark.parametrize(("argv", "warns", "_why"), _SAVED_PLAN_WARNING_CASES)
+def test_saved_plan_detector_handles_only_unambiguous_proxy_workflows(
+    argv: list[str], warns: bool, _why: str
+) -> None:
+    """Catch a missing warning branch without treating unrelated argv as plans."""
+    del _why
+    # Removing the saved-plan branch must make every True row fail, while a
+    # broad positional/flag scan must make at least one False row fail.
+    assert (proxy._saved_plan_warning(argv) is not None) is warns  # pylint: disable=protected-access
+
+
+def test_tunnelled_saved_plan_warning_is_stderr_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A warning reaches the user without contaminating tofu's stdout channel."""
+    monkeypatch.setenv(VAR, _payload())
+    monkeypatch.setattr(proxy, "_run_tunnelled", lambda _argv: None)
+    _run_main(["plan", "-out=tfplan"])
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "saved plan" in captured.err
+
+
+# --------------------------------------------------------------------------- #
 # Branch 1: pass-through when TUNSTRAP_INPUT is unset / empty / whitespace.
 # --------------------------------------------------------------------------- #
 
