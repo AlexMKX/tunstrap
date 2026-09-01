@@ -118,6 +118,21 @@ def spawn_daemon(
         # unambiguously ours to remove. ``rmdir``, never ``rmtree``: it succeeds
         # only on an empty directory, so it can never destroy session state even
         # if some future change lets a worker reach this path.
+        #
+        # The read end of the IPC pipe is ours to close here for the same
+        # reason no worker exists: nothing was ever launched to write a
+        # handshake into it. It cannot go into the shared ``finally`` instead,
+        # because that also runs on success — past the detach the read end is
+        # the parent's only handle on the worker's IPC frame, so closing it
+        # there would break every ``spawn_daemon`` caller that reads the
+        # handshake. Left unclosed on this path it would leak for the life of
+        # the process (issue #40). The write end needs no such care: the
+        # ``finally`` below closes it on every path already. A failing close
+        # must not mask the exception being re-raised, hence the swallow.
+        try:
+            os.close(ipc_read_fd)
+        except OSError:
+            pass
         if generated_session_dir and worker_session_dir is not None:
             try:
                 os.rmdir(worker_session_dir)
