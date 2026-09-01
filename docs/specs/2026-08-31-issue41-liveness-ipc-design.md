@@ -389,7 +389,7 @@ work.
 |---|---|---|
 | S1 | pid gone / lock free | dead. `alive: false` today, correct. |
 | S2 | pid + lock held, socket absent (ENOENT) | alive; **no channel** — either a pre-#41 daemon or a daemon whose bind failed. Not a health verdict. |
-| S3 | pid + lock held, socket present, ECONNREFUSED | alive under this pid, but nothing is serving that socket. Anomalous: on 3.13+ the socket should have been removed at close; on 3.10–3.12 this is also the expected shape of a *preserved* dead session's leftovers. |
+| S3 | pid + lock held, socket present, ECONNREFUSED | alive under this pid, but nothing is serving that socket. Anomalous: on 3.13+ the socket should have been removed at close; on 3.10–3.12 a socket can linger after close the same way. A *preserved* dead session's stale socket is **not** an S3 observation: `tunstrap/session.py::release_lock_preserving_data` releases the lock on self-termination, so `status` classifies that directory `alive: false` (S1) via `tunstrap/identity.py::verify_session` before any probe runs — the leftover there is only a raw filesystem/connect shape a live client could stumble into, never a probe verdict. |
 | S4 | pid + lock held, connect ok, reply within deadline | answered. The event loop is scheduling. Payload carries per-node detail. |
 | S5 | pid + lock held, connect ok, **no reply** within deadline | **the case #41 exists for.** Alive, holds the lock, cannot answer. |
 | S6 | pid + lock held, reply arrives but reports a closed/broken node | degraded; overlaps with the existing `tunnel_loss` reporting. |

@@ -146,6 +146,32 @@ _SAVED_PLAN_WARNING_CASES = [
     (["apply", "tfplan"], True, "conventional bare plan name"),
     (["apply", "-auto-approve", "review.tfplan"], True, "flag before plan input"),
     (["show", "review.tfplan"], True, "show accepts a plan input"),
+    # ``tofu show -help``: "-plan=FILENAME  The plan from a saved plan file."
+    # The flag declares plan intent for ANY filename, so these rows pin the
+    # explicit flag handling, not another filename-coincidence match.
+    (["show", "-plan=tfplan"], True, "canonical show -plan= saved-plan form"),
+    (["show", "-plan=review.tfplan"], True, "show -plan= with a conventional name"),
+    (["show", "-plan=prod.plan"], True, "show -plan= declares intent for any filename"),
+    (["show", "-plan", "tfplan"], True, "show -plan FILE pair"),
+    (["show", "-plan", "prod.plan"], True, "show -plan FILE declares intent, not filename luck"),
+    (["show", "-plan="], False, "empty -plan value is tofu usage-error territory"),
+    (["show", "-plan", "-json"], False, "-plan missing its separate value"),
+    (["apply", "-plan=tfplan"], False, "-plan is show-only; apply rejects the flag"),
+    # Value-taking flags (each documented with a =value placeholder in
+    # ``tofu show/apply/plan -help``): the token after the flag is a VALUE,
+    # never a plan positional, whatever it is named.
+    (["show", "-json-into", "tfplan"], False, "-json-into value is not a plan input"),
+    (["apply", "-json-into", "tfplan"], False, "-json-into value is not a plan input (apply)"),
+    (["apply", "-state-out", "tfplan"], False, "-state-out value is not a plan input"),
+    (["apply", "-target-file", "tfplan"], False, "-target-file value is not a plan input"),
+    (["apply", "-exclude", "tfplan"], False, "-exclude value is not a plan input"),
+    (["apply", "-exclude-file", "tfplan"], False, "-exclude-file value is not a plan input"),
+    (
+        ["apply", "-generate-config-out", "tfplan"],
+        False,
+        "-generate-config-out value is not a plan input",
+    ),
+    (["apply", "-state-out"], False, "value flag missing its value"),
     (["plan"], False, "normal plan is not saved"),
     (["plan", "-out"], False, "missing output filename"),
     (["plan", "--", "-out=tfplan"], False, "terminator stops flag parsing"),
@@ -169,13 +195,30 @@ def test_saved_plan_detector_handles_only_unambiguous_proxy_workflows(
     assert (proxy._saved_plan_warning(argv) is not None) is warns  # pylint: disable=protected-access
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["plan", "-out=tfplan"],
+        ["show", "-plan=tfplan"],
+        ["show", "-plan", "prod.plan"],
+        ["apply", "review.tfplan"],
+    ],
+)
 def test_tunnelled_saved_plan_warning_is_stderr_only(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
 ) -> None:
-    """A warning reaches the user without contaminating tofu's stdout channel."""
+    """A warning reaches the user without contaminating tofu's stdout channel.
+
+    Every warnable detector branch (``plan -out``, ``show -plan`` in both
+    spellings, conventional-name positionals) must write to stderr only —
+    stdout is the machine-readable channel Terragrunt labels and parses, so a
+    stray byte there is a regression of the issue #30 class, not cosmetics.
+    """
     monkeypatch.setenv(VAR, _payload())
     monkeypatch.setattr(proxy, "_run_tunnelled", lambda _argv: None)
-    _run_main(["plan", "-out=tfplan"])
+    _run_main(argv)
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "saved plan" in captured.err
