@@ -96,6 +96,9 @@ only `{path, context, endpoint}`, never key material:
 
    ```console
    $ tunstrap run --input-env TUNSTRAP_INPUT --output-var TUNSTRAP_INPUT -- tofu plan
+   Usage: tunstrap run [OPTIONS] [ARGS]...
+   Try 'tunstrap run --help' for help.
+
    Error: --output-var TUNSTRAP_INPUT collides with --input-env TUNSTRAP_INPUT
    $ echo $?
    64

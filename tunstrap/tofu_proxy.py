@@ -80,14 +80,28 @@ _BYPASS_COMMANDS = frozenset({"init", "version", "validate", "fmt"})
 _GLOBAL_VALUE_FLAGS = frozenset({"-chdir", "--chdir"})
 
 # Apply/show flags whose following argv token is a value, not a plan input.
+# Every entry is documented with a ``=value`` placeholder in ``tofu
+# show/apply/plan -help`` (verified against v1.12.6); without an entry here,
+# the token after the flag is scanned as a positional and a value named like
+# a plan file false-positives. ``-plan`` is deliberately absent: it is
+# ``show``'s own saved-plan selector, handled explicitly by
+# ``_has_show_plan_flag``. ``-deprecation`` is absent because the v1.12.6
+# binary rejects it on every subcommand (``flag provided but not defined``)
+# despite the help text listing it, so no real argv carries it.
 _PLAN_INPUT_VALUE_FLAGS = frozenset(
     {
         "-backup",
+        "-exclude",
+        "-exclude-file",
+        "-generate-config-out",
+        "-json-into",
         "-lock-timeout",
         "-parallelism",
         "-replace",
         "-state",
+        "-state-out",
         "-target",
+        "-target-file",
         "-var",
         "-var-file",
     }
@@ -175,10 +189,12 @@ def _find_subcommand_index(argv: list[str]) -> tuple[str, int] | None:
 def _saved_plan_warning(argv: list[str]) -> str | None:
     """Describe an unambiguous saved-plan workflow, otherwise return ``None``.
 
-    The detector intentionally recognizes only ``plan -out`` and conventional
-    plan filenames (``tfplan`` or ``*.tfplan``) passed to ``apply``/``show``.
-    It stops at ``--`` and does not infer that an arbitrary positional argument
-    is a plan, because old tofu syntax also accepts a working directory there.
+    The detector intentionally recognizes only ``plan -out``, ``show -plan``
+    (the saved-plan selector ``tofu show -help`` documents as ``-plan=FILENAME``)
+    and conventional plan filenames (``tfplan`` or ``*.tfplan``) passed to
+    ``apply``/``show``. It stops at ``--`` and does not infer that an arbitrary
+    positional argument is a plan, because old tofu syntax also accepts a
+    working directory there.
     """
     found = _find_subcommand_index(argv)
     if found is None:
@@ -188,6 +204,8 @@ def _saved_plan_warning(argv: list[str]) -> str | None:
     if "--" in args:
         return None
     if subcommand == "plan" and _has_plan_output(args):
+        return _SAVED_PLAN_WARNING
+    if subcommand == "show" and _has_show_plan_flag(args):
         return _SAVED_PLAN_WARNING
     if subcommand in {"apply", "show"} and _has_plan_input(args):
         return _SAVED_PLAN_WARNING
@@ -200,6 +218,25 @@ def _has_plan_output(args: list[str]) -> bool:
         if arg.startswith("-out="):
             return len(arg) > len("-out=")
         if arg == "-out" and index + 1 < len(args) and not args[index + 1].startswith("-"):
+            return True
+    return False
+
+
+def _has_show_plan_flag(args: list[str]) -> bool:
+    """True when ``show`` names a saved plan via its documented ``-plan`` flag.
+
+    ``tofu show -help``: ``-plan=FILENAME  The plan from a saved plan file.``
+    The flag declares plan intent for any filename, so unlike the positional
+    path in ``_has_plan_input`` the value need not look like a plan file.
+    Mirrors ``_has_plan_output``: an empty ``=`` value or a missing separate
+    value is tofu usage-error territory, not a warnable saved plan. Scoped to
+    ``show`` only — ``apply`` takes its plan as a positional and rejects the
+    flag outright (``flag provided but not defined: -plan``).
+    """
+    for index, arg in enumerate(args):
+        if arg.startswith("-plan="):
+            return len(arg) > len("-plan=")
+        if arg == "-plan" and index + 1 < len(args) and not args[index + 1].startswith("-"):
             return True
     return False
 
