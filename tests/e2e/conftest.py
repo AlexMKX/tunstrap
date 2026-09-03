@@ -19,6 +19,7 @@ from typing import Any, Iterator
 import asyncssh
 import pytest
 
+from tests.compose import compose_command
 from tests.e2e.rig import (
     CLUSTER_NAME,
     COMPOSE_FILE,
@@ -26,6 +27,7 @@ from tests.e2e.rig import (
     HERE,
     IN_NODE_KUBECONFIG,
     NODE_IMAGE,
+    REPO_ROOT,
     kubectl_in_node,
     require_tools,
     skip_or_fail,
@@ -305,11 +307,11 @@ def kube_rig(
     # only afterwards would never run, leaking the whole stack.
     try:
         subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--wait"],
+            compose_command(COMPOSE_FILE, REPO_ROOT, "e2e", "up", "-d", "--wait"),
             check=True,
         )
         published = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "port", "sshd-kube", "2222"],
+            compose_command(COMPOSE_FILE, REPO_ROOT, "e2e", "port", "sshd-kube", "2222"),
             capture_output=True,
             text=True,
             check=True,
@@ -334,7 +336,7 @@ def kube_rig(
         # silent one leaves containers and a volume behind for the next run to
         # trip over, so a non-zero exit is reported rather than swallowed.
         removed = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "down", "-v"],
+            compose_command(COMPOSE_FILE, REPO_ROOT, "e2e", "down", "-v"),
             check=False,
             capture_output=True,
             text=True,

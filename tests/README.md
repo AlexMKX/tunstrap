@@ -101,6 +101,13 @@ fixture internals, but the rest read from `rig`):
   not a failure: a green local run with skips is not full coverage. To mirror
   CI, `export TUNSTRAP_E2E_REQUIRE_ALL=1` before running.
 
+## Compose isolation and e2e parallelism
+
+Integration and e2e Compose commands use a deterministic, checkout-specific
+project name from `tests/compose.py::compose_project_name`; set
+`COMPOSE_PROJECT_NAME` to pin one manually. This isolates Compose stacks, but
+the e2e kind cluster below remains shared-host-only.
+
 ## e2e is not parallel-safe (documented deviation)
 
 The e2e tier is a single, session-scoped fixture chain built on fixed,
