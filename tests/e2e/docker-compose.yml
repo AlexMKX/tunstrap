@@ -8,10 +8,6 @@
 # SSH host is a machine that can reach the API server, and tunstrap forwards
 # to it.
 #
-# `name:` pins the compose project so this rig can never collide with the
-# integration rig, whose project name defaults to its directory (`integration`).
-name: tunstrap-e2e
-
 services:
   sshd-kube:
     image: lscr.io/linuxserver/openssh-server:latest

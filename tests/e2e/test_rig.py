@@ -18,12 +18,14 @@ from typing import Any
 
 import pytest
 
+from tests.compose import compose_command
 from tests.e2e import conftest
 from tests.e2e.rig import (
     CLUSTER_NAME,
     COMPOSE_FILE,
     CONTROL_PLANE,
     HERE,
+    REPO_ROOT,
     kubectl_in_node,
     recorded_argvs,
     require_tools,
@@ -63,7 +65,8 @@ def test_rig_borrows_nothing_from_another_suite(e2e_ssh_keypair: tuple[str, str]
                 foreign.update(
                     alias.name
                     for alias in node.names
-                    if alias.name.startswith("tests") and not alias.name.startswith("tests.e2e")
+                    if alias.name.startswith("tests")
+                    and not alias.name.startswith(("tests.compose", "tests.e2e"))
                 )
             elif isinstance(node, ast.ImportFrom):
                 if node.level >= 2:
@@ -71,7 +74,7 @@ def test_rig_borrows_nothing_from_another_suite(e2e_ssh_keypair: tuple[str, str]
                 elif (
                     node.module
                     and node.module.startswith("tests")
-                    and not node.module.startswith("tests.e2e")
+                    and not node.module.startswith(("tests.compose", "tests.e2e"))
                 ):
                     foreign.add(node.module)
     assert not foreign, f"e2e modules importing another suite: {sorted(foreign)}"
@@ -224,7 +227,7 @@ def test_rig_publishes_a_dynamic_port_and_accepts_the_generated_key(
     assert kube_rig["kubeconfig_in_node_path"] == "/etc/kube/admin.conf"
 
     listed = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "ps", "--format", "{{.Name}}"],
+        compose_command(COMPOSE_FILE, REPO_ROOT, "e2e", "ps", "--format", "{{.Name}}"),
         capture_output=True,
         text=True,
         check=True,

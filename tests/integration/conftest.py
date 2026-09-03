@@ -11,7 +11,10 @@ from typing import Any, Iterator
 
 import pytest
 
+from tests.compose import compose_command
+
 HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parents[1]
 
 
 @pytest.fixture(scope="session")
@@ -81,7 +84,7 @@ def ssh_test_cluster(
         pytest.skip("integration tests require Linux + Docker")
     compose_file = HERE / "docker-compose.yml"
     subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "up", "-d", "--wait"],
+        compose_command(compose_file, REPO_ROOT, "integration", "up", "-d", "--wait"),
         check=True,
     )
     try:
@@ -89,7 +92,7 @@ def ssh_test_cluster(
         ports: dict[str, int] = {}
         for service in services:
             result = subprocess.run(
-                ["docker", "compose", "-f", str(compose_file), "port", service, "2222"],
+                compose_command(compose_file, REPO_ROOT, "integration", "port", service, "2222"),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -98,7 +101,7 @@ def ssh_test_cluster(
             ports[service] = int(port)
         # Bastion service for cross-host forward tests.
         result = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "port", "sshd-bastion", "2222"],
+            compose_command(compose_file, REPO_ROOT, "integration", "port", "sshd-bastion", "2222"),
             capture_output=True,
             text=True,
             check=True,
@@ -112,11 +115,10 @@ def ssh_test_cluster(
         for target_alias in ("target-1", "target-2"):
             for attempt in range(30):
                 probe = subprocess.run(
-                    [
-                        "docker",
-                        "compose",
-                        "-f",
-                        str(compose_file),
+                    compose_command(
+                        compose_file,
+                        REPO_ROOT,
+                        "integration",
                         "exec",
                         "-T",
                         "sshd-bastion",
@@ -124,7 +126,7 @@ def ssh_test_cluster(
                         "-z",
                         target_alias,
                         "80",
-                    ],
+                    ),
                     capture_output=True,
                     text=True,
                     check=False,
@@ -146,7 +148,7 @@ def ssh_test_cluster(
         }
     finally:
         subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "down", "-v"],
+            compose_command(compose_file, REPO_ROOT, "integration", "down", "-v"),
             check=False,
         )
 

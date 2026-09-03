@@ -21,18 +21,20 @@ from typing import Any
 
 import pytest
 
+from tests.compose import compose_command
+
 pytestmark = [pytest.mark.integration]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _wait_for_apiserver(compose_file: Path, service: str, port: int = 6443) -> None:
     """Wait until the openssl s_server inside `service` is accepting TCP."""
     for _ in range(60):
         probe = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
+            compose_command(
+                compose_file,
+                REPO_ROOT,
+                "integration",
                 "exec",
                 "-T",
                 "sshd-bastion",
@@ -40,7 +42,7 @@ def _wait_for_apiserver(compose_file: Path, service: str, port: int = 6443) -> N
                 "-z",
                 service,
                 str(port),
-            ],
+            ),
             capture_output=True,
             text=True,
             check=False,
