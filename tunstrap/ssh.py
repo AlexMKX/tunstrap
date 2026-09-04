@@ -26,6 +26,16 @@ def _probe_local_port(host: str, port: int, timeout: float) -> bool:
         return probe.connect_ex((host, port)) == 0
 
 
+# Bound for close_transport's trailing listener drain, in seconds. The
+# listener is already closed by then and the connection (when there is one)
+# already torn down, so this wait is pure observation; but the
+# connection-less path has nothing that would drop an accepted consumer
+# whose remote EOF echo never arrives. Five seconds is far above the
+# millisecond-scale drain measured after a connection teardown, yet well
+# inside the default 10 s shutdown grace.
+_LISTENER_DRAIN_TIMEOUT = 5.0
+
+
 def _load_client_keys(node: NodeInput) -> list[Any] | None:
     """Import the node's ssh_pkey PEM into an asyncssh client key list."""
     if node.ssh_pkey is None:
@@ -166,13 +176,22 @@ async def close_transport(
     the same order asyncssh's own tunnel-loss path takes), makes both waits
     complete promptly afterwards.
 
+    The trailing listener drain is bounded by ``_LISTENER_DRAIN_TIMEOUT``:
+    after the connection teardown it is pure observation, but the
+    connection-less path (forward-setup failure) has no connection to drop
+    an accepted consumer whose remote EOF echo never arrives -- asyncssh's
+    forwarder holds the local transport open until that echo -- so an
+    unbounded drain could wedge teardown again, issue #50 through a
+    narrower door. The connection's own ``wait_closed`` stays unbounded
+    because a forced close completes locally, without any peer round trip.
+
     In-flight forwarded data gets the same treatment asyncssh gives an
     application-initiated disconnect: the per-channel close flushes each
     channel's unsent buffer before closing, and no wait is placed on a peer
     that may never let go.
 
-    Teardown must never raise; partial cleanup is preferable to leaving the
-    asyncio loop with a dangling channel.
+    Teardown must never raise and must never hang; partial cleanup is
+    preferable to leaving the asyncio loop with a dangling channel.
     """
     for lst in listeners:
         try:
@@ -187,6 +206,6 @@ async def close_transport(
             pass
     for lst in listeners:
         try:
-            await lst.wait_closed()
-        except (asyncssh.Error, OSError):
+            await asyncio.wait_for(lst.wait_closed(), timeout=_LISTENER_DRAIN_TIMEOUT)
+        except (asyncssh.Error, OSError, asyncio.TimeoutError):
             continue

@@ -128,15 +128,39 @@ async def test_teardown_swallows_close_and_wait_errors() -> None:
     await close_transport(conn, [listener])  # must not raise
 
 
-async def test_teardown_without_connection_still_awaits_listener_quiescence() -> None:
-    """The forward-setup failure path (conn=None) still fully tears listeners down."""
-    server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    listener = _ForwardListener(server)
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.connect(server.sockets[0].getsockname())
-        await asyncio.sleep(0.05)  # let the accept land
-    finally:
-        probe.close()
+async def test_teardown_without_connection_is_bounded_when_consumer_stays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connection-less teardown path cannot hang on a consumer that never leaves.
 
-    await asyncio.wait_for(close_transport(None, [listener]), timeout=5)
+    ``open_local_forwards``' failure path calls ``close_transport`` with no
+    connection: nothing then exists to drop an accepted consumer whose
+    remote EOF echo never arrives (asyncssh's forwarder deliberately holds
+    the local transport open until that echo), so the trailing listener
+    drain must be bounded by ``_LISTENER_DRAIN_TIMEOUT`` rather than by
+    the peer's behaviour. A CI run on Python 3.12 caught exactly this
+    shape -- and on 3.13+ the same state only resolves when the discarded
+    server-side writer is garbage-collected, which is luck, not a
+    guarantee. The consumer here never closes and its server-side writer
+    is kept referenced, so no interpreter can resolve it by accident.
+    """
+    monkeypatch.setattr("tunstrap.ssh._LISTENER_DRAIN_TIMEOUT", 0.2, raising=False)
+    accepted: list[asyncio.StreamWriter] = []
+
+    def _hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.append(writer)
+
+    server = await asyncio.start_server(_hold, "127.0.0.1", 0)
+    listener = _ForwardListener(server)
+    stuck = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stuck.connect(server.sockets[0].getsockname())
+    await asyncio.sleep(0.05)  # let the accept land; both ends then stay open
+    try:
+        await asyncio.wait_for(close_transport(None, [listener]), timeout=2)
+        assert not server.is_serving(), "listener was not closed"
+    finally:
+        stuck.close()
+        for writer in accepted:
+            writer.close()
+        server.close()
+        await server.wait_closed()
