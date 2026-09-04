@@ -40,9 +40,9 @@ def test_log_file_does_not_contain_file_content(
                 "a": {
                     "host": "127.0.0.1",
                     "user": "tester",
-                    "port": ssh_test_cluster["ports"]["sshd-a"],
+                    "port": ssh_test_cluster["bastion_port"],
                     "ssh_pkey": ssh_test_cluster["private_pem"],
-                    "remote_targets": {"p": "127.0.0.1:6443"},
+                    "remote_targets": {"p": "127.0.0.1:2222"},
                     "fetch_files": {"kubeconfig": {"path": "/srv/files/kubeconfig"}},
                 }
             },
@@ -86,9 +86,9 @@ def test_stdout_only_carrier_of_content(
             "a": {
                 "host": "127.0.0.1",
                 "user": "tester",
-                "port": ssh_test_cluster["ports"]["sshd-a"],
+                "port": ssh_test_cluster["bastion_port"],
                 "ssh_pkey": ssh_test_cluster["private_pem"],
-                "remote_targets": {"p": "127.0.0.1:6443"},
+                "remote_targets": {"p": "127.0.0.1:2222"},
                 "fetch_files": {"kubeconfig": {"path": "/srv/files/kubeconfig"}},
             }
         }
@@ -149,9 +149,9 @@ def test_output_var_and_materialized_output_never_carry_fetched_content(
                 "a": {
                     "host": "127.0.0.1",
                     "user": "tester",
-                    "port": ssh_test_cluster["ports"]["sshd-a"],
+                    "port": ssh_test_cluster["bastion_port"],
                     "ssh_pkey": ssh_test_cluster["private_pem"],
-                    "remote_targets": {"p": "127.0.0.1:6443"},
+                    "remote_targets": {"p": "127.0.0.1:2222"},
                     "fetch_files": {"kubeconfig": {"path": "/srv/files/kubeconfig"}},
                 }
             }

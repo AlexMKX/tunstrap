@@ -25,7 +25,7 @@ def _node_with_fetch(
     port: int,
     pem: str,
     fetch: dict[str, dict[str, Any]],
-    remote_port: int = 6443,
+    remote_port: int = 2222,
     required: bool = True,
 ) -> dict[str, Any]:
     return {
@@ -49,7 +49,7 @@ def test_fetch_single_file_roundtrip(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"kubeconfig": {"path": "/srv/files/kubeconfig"}},
             )
@@ -80,7 +80,7 @@ def test_fetch_required_missing_fails_node(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"absent": {"path": "/srv/files/does-not-exist"}},
             )
@@ -102,7 +102,7 @@ def test_fetch_optional_missing_soft_fails(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={
                     "kubeconfig": {"path": "/srv/files/kubeconfig"},
@@ -129,7 +129,7 @@ def test_fetch_perm_denied_required_fails(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"locked": {"path": "/srv/files/no-perm.txt"}},
             )
@@ -151,7 +151,7 @@ def test_fetch_over_cap_efbig_required(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"big": {"path": "/srv/files/big.bin"}},
             )
@@ -174,7 +174,7 @@ def test_fetch_over_cap_efbig_optional(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"big": {"path": "/srv/files/big.bin", "required": False}},
             )
@@ -198,7 +198,7 @@ def test_fetch_multiple_files_mixed(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={
                     "kubeconfig": {"path": "/srv/files/kubeconfig"},
@@ -228,7 +228,7 @@ def test_fetch_files_breaking_shape(
         "nodes": {
             "a": _node_with_fetch(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
                 fetch={"kubeconfig": {"path": "/srv/files/kubeconfig"}},
             )

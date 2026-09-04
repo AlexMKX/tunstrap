@@ -115,8 +115,8 @@ class _TcpRelay:
 
 @pytest.fixture(name="relay")
 def _relay(ssh_test_cluster: dict[str, Any]) -> Iterator[_TcpRelay]:
-    """A relay in front of sshd-a, torn down with the test."""
-    relay = _TcpRelay(("127.0.0.1", ssh_test_cluster["ports"]["sshd-a"]))
+    """A relay in front of sshd-bastion, torn down with the test."""
+    relay = _TcpRelay(("127.0.0.1", ssh_test_cluster["bastion_port"]))
     try:
         yield relay
     finally:

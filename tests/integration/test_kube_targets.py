@@ -124,7 +124,7 @@ def test_kube_target_insecure_fallback(
                 "port": ssh_test_cluster["bastion_port"],
                 "user": ssh_test_cluster["user"],
                 "ssh_pkey": ssh_test_cluster["private_pem"],
-                "remote_targets": {"keep": "127.0.0.1:22"},
+                "remote_targets": {"keep": "127.0.0.1:2222"},
                 "kube_targets": {
                     "k3s": {
                         "kubeconfig_path": "/srv/files/kube_nosan",
