@@ -429,7 +429,7 @@ up — in which case the daemon has already been torn down.
 | `ssh_pkey` | `str \| null` | `null` | PEM-encoded private key (in-memory, never written) |
 | `ssh_password` | `str \| null` | `null` | Password fallback. If neither `ssh_pkey` nor `ssh_password` is set, keys from `$SSH_AUTH_SOCK` (ssh-agent) are used; if the agent is also unavailable, schema validation fails. |
 | `ssh_pkey_passphrase` | `str \| null` | `null` | Optional passphrase for `ssh_pkey` |
-| `remote_targets` | `dict[str, str] \| null` | `null` | Up to 16 entries; each value is `"host:port"`. Host is resolved on the SSH server side, enabling bastion-style cross-host forwards. |
+| `remote_targets` | `dict[str, str] \| null` | `null` | Up to 16 entries; each value is `"host:port"`. Host is resolved on the SSH server side, enabling bastion-style cross-host forwards. For `required: true` nodes each target is probed once at `start` (one channel open); an unreachable target fails `start` with `RequiredTunnelFailure`. `required: false` nodes are not probed: the forward binds lazily and a dead target surfaces at first use. |
 | `ssh_options.compression` | `bool` | `false` | Enable SSH compression |
 | `ssh_options.connect_timeout` | `int` | `60` | Seconds for connection establishment and each SFTP file fetch. |
 | `required` | `bool` | `true` | If false, this node may fail without aborting `start` |

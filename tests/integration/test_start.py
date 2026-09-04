@@ -3,6 +3,11 @@
 Validates: start happy path across multiple nodes, required-node failure
 cleanup, optional-node failures as warnings, and schema rejection.
 Code: tunstrap/cli.py, tunstrap/manager.py
+
+Nodes whose start must succeed connect through `sshd-bastion` with the
+reachable target `127.0.0.1:2222` (the bastion's own sshd): required
+nodes get one far-end probe per target at start, and the bastion is the
+only rig service that permits direct-tcpip channels.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from tests.integration.conftest import tunstrap_start
 pytestmark = pytest.mark.integration
 
 
-def _node(host: str, port: int, pem: str, remote_port: int = 6443) -> dict[str, Any]:
+def _node(host: str, port: int, pem: str, remote_port: int = 2222) -> dict[str, Any]:
     return {
         "host": host,
         "port": port,
@@ -35,12 +40,12 @@ def test_start_all_required_success(
         "nodes": {
             "a": _node(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-a"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
             ),
             "b": _node(
                 "127.0.0.1",
-                ssh_test_cluster["ports"]["sshd-b"],
+                ssh_test_cluster["bastion_port"],
                 ssh_test_cluster["private_pem"],
             ),
         }
@@ -60,7 +65,7 @@ def test_start_required_failure_cleans_up(
     """Required-node auth failure aborts start with structured error."""
     good = _node(
         "127.0.0.1",
-        ssh_test_cluster["ports"]["sshd-a"],
+        ssh_test_cluster["bastion_port"],
         ssh_test_cluster["private_pem"],
     )
     bad = {
@@ -86,7 +91,7 @@ def test_start_optional_failure_warns(
     """Optional-node failure becomes a TunnelWarning, not an error."""
     good = _node(
         "127.0.0.1",
-        ssh_test_cluster["ports"]["sshd-a"],
+        ssh_test_cluster["bastion_port"],
         ssh_test_cluster["private_pem"],
     )
     optional_bad = {

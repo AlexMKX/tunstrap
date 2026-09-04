@@ -27,10 +27,10 @@ def test_status_alive_then_dead(
         "nodes": {
             "a": {
                 "host": "127.0.0.1",
-                "port": ssh_test_cluster["ports"]["sshd-a"],
+                "port": ssh_test_cluster["bastion_port"],
                 "user": "tester",
                 "ssh_pkey": ssh_test_cluster["private_pem"],
-                "remote_targets": {"p": "127.0.0.1:6443"},
+                "remote_targets": {"p": "127.0.0.1:2222"},
             }
         }
     }

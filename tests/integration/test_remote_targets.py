@@ -86,16 +86,18 @@ def test_multiple_sequential_requests_through_same_forward(
     started_daemons.append(body["session_dir"])
 
 
-def test_request_through_tunnel_to_unreachable_target_fails(
+def test_required_unreachable_target_fails_start(
     ssh_test_cluster: dict[str, Any],
-    started_daemons: list[str],
 ) -> None:
-    """`start` succeeds; the HTTP request through the unreachable forward errors out.
+    """A required node whose far end is dead fails `start` (issue #51).
 
-    SSH local forwards bind lazily — `forward_local_port` succeeds even if the
-    remote target is unreachable. The failure surfaces at first-byte time when
-    the SSH server returns CHANNEL_OPEN_FAILURE. The caller observes this as a
-    connection reset or empty response on the HTTP layer.
+    The startup probe used to validate only the local listener accept,
+    which the kernel completes regardless of the remote target; sshd
+    answers a channel-open failure per connection, so `start` reported
+    success for a forward that could never carry data. For `required:
+    true` nodes the far end is now probed once per target at start, and
+    an unreachable target is reported with the existing required-tunnel
+    vocabulary (RequiredTunnelFailure, exit code 2).
     """
     payload = {
         "nodes": {
@@ -104,12 +106,46 @@ def test_request_through_tunnel_to_unreachable_target_fails(
                 "port": ssh_test_cluster["bastion_port"],
                 "user": "tester",
                 "ssh_pkey": ssh_test_cluster["private_pem"],
-                "remote_targets": {"dead": "no-such-host.invalid:9999"},
+                "remote_targets": {"dead": "127.0.0.1:1"},
             }
         }
     }
     outcome = tunstrap_start(payload)
-    # Start succeeds because the local listener binds without contacting remote.
+    assert outcome["returncode"] == 2, outcome["stderr"]
+    body = outcome["json"]
+    assert body["error"] == "RequiredTunnelFailure"
+    failed = body["details"]["failed"]
+    assert [entry["node"] for entry in failed] == ["edge"]
+    assert "unreachable" in failed[0]["error"]
+    assert "127.0.0.1:1" in failed[0]["error"]
+
+
+def test_optional_unreachable_target_keeps_todays_behaviour(
+    ssh_test_cluster: dict[str, Any],
+    started_daemons: list[str],
+) -> None:
+    """`start` succeeds for an optional node with an unreachable target.
+
+    Optional nodes keep exactly today's contract: no far-end round trip,
+    no new failure mode. SSH local forwards bind lazily, and the failure
+    surfaces at first-byte time when the SSH server returns
+    CHANNEL_OPEN_FAILURE. The caller observes this as a connection reset
+    or empty response on the HTTP layer.
+    """
+    payload = {
+        "nodes": {
+            "edge": {
+                "host": "127.0.0.1",
+                "port": ssh_test_cluster["bastion_port"],
+                "user": "tester",
+                "ssh_pkey": ssh_test_cluster["private_pem"],
+                "remote_targets": {"dead": "127.0.0.1:1"},
+                "required": False,
+            }
+        }
+    }
+    outcome = tunstrap_start(payload)
+    # Start succeeds because no far-end probe runs for optional nodes.
     assert outcome["returncode"] == 0, outcome["stderr"]
     body = outcome["json"]
     local_port = body["connections"]["edge"]["ports"]["dead"]

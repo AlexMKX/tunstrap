@@ -8,6 +8,7 @@ multiplex an SFTP channel without a second authentication.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 from collections.abc import Callable
 from typing import Any
@@ -15,7 +16,7 @@ from typing import Any
 import asyncssh
 
 from tunstrap.exceptions import TunnelStartupError
-from tunstrap.schemas import NodeInput
+from tunstrap.schemas import NodeInput, RemoteTarget
 
 
 def _probe_local_port(host: str, port: int, timeout: float) -> bool:
@@ -53,6 +54,42 @@ async def open_connection(node: NodeInput) -> asyncssh.SSHClientConnection:
     return await asyncssh.connect(**kwargs)
 
 
+async def _probe_required_target(
+    conn: asyncssh.SSHClientConnection,
+    handle: str,
+    target: RemoteTarget,
+    local_port: int,
+    timeout: float,
+) -> None:
+    """Open one channel to a required forward's far end; fail if unreachable.
+
+    The local-accept probe cannot see a dead remote target: the kernel
+    completes the loopback handshake regardless, and the SSH server answers
+    a channel-open failure only per connection (issue #51). This probe
+    costs one channel-open round trip per target and raises
+    ``TunnelStartupError`` -- the existing vocabulary the manager maps to
+    ``RequiredTunnelFailure`` for required nodes. Optional nodes never
+    call it.
+    """
+    try:
+        _reader, writer = await asyncio.wait_for(
+            conn.open_connection(target.host, target.port), timeout=timeout
+        )
+    except (asyncssh.Error, OSError, asyncio.TimeoutError) as exc:
+        raise TunnelStartupError(
+            f"required forward target unreachable: {target.host}:{target.port}",
+            {
+                "handle": handle,
+                "target": f"{target.host}:{target.port}",
+                "local_port": local_port,
+                "reason": str(exc),
+            },
+        ) from exc
+    # Reachability is proven at channel open; closing the writer hands the
+    # channel back without waiting on the peer's close confirmation.
+    writer.close()
+
+
 async def open_local_forwards(
     conn: asyncssh.SSHClientConnection,
     node: NodeInput,
@@ -67,6 +104,12 @@ async def open_local_forwards(
     Returns ``(handle->local_port, listeners)``. Local bind host is always
     ``127.0.0.1``; the listen port is OS-assigned. ``target.host`` is the
     remote-side address (resolved on the SSH server).
+
+    Every forward is probed for local accept; for ``required`` nodes the
+    far end is probed too, so ``start`` cannot report success for a
+    target the SSH server cannot reach. Optional nodes are probed
+    locally only, keeping their startup cost and failure modes exactly
+    as before.
     """
     ports: dict[str, int] = {}
     listeners: list[asyncssh.SSHListener] = []
@@ -92,6 +135,8 @@ async def open_local_forwards(
                         "local_port": actual_port,
                     },
                 )
+            if node.required:
+                await _probe_required_target(conn, handle, target, actual_port, timeout)
             ports[handle] = actual_port
     except BaseException:
         # Caller never sees the listeners on failure; cleanup must cover
@@ -106,7 +151,25 @@ async def close_transport(
     conn: asyncssh.SSHClientConnection | None,
     listeners: list[asyncssh.SSHListener],
 ) -> None:
-    """Best-effort teardown: close listeners then the connection.
+    """Best-effort teardown: close listeners, tear the connection down, then wait.
+
+    The order is load-bearing (issue #50). On Python >= 3.12.1 the asyncio
+    ``Server.wait_closed`` that an asyncssh forward listener awaits does not
+    return while an accepted consumer connection is still open, and asyncssh
+    holds that connection open until the SSH channel under it closes -- which
+    only the connection teardown does. Awaiting listener quiescence first
+    therefore wedges every stop issued while a consumer is connected (the
+    consumer sockets only die once the connection does), and ``stop``
+    escalates to SIGKILL. Closing the listeners (synchronously, so new
+    consumers are refused immediately), then the connection (whose cleanup
+    closes every channel and with it each forwarder's consumer transport --
+    the same order asyncssh's own tunnel-loss path takes), makes both waits
+    complete promptly afterwards.
+
+    In-flight forwarded data gets the same treatment asyncssh gives an
+    application-initiated disconnect: the per-channel close flushes each
+    channel's unsent buffer before closing, and no wait is placed on a peer
+    that may never let go.
 
     Teardown must never raise; partial cleanup is preferable to leaving the
     asyncio loop with a dangling channel.
@@ -114,7 +177,6 @@ async def close_transport(
     for lst in listeners:
         try:
             lst.close()
-            await lst.wait_closed()
         except (asyncssh.Error, OSError):
             continue
     if conn is not None:
@@ -123,3 +185,8 @@ async def close_transport(
             await conn.wait_closed()
         except (asyncssh.Error, OSError):
             pass
+    for lst in listeners:
+        try:
+            await lst.wait_closed()
+        except (asyncssh.Error, OSError):
+            continue
